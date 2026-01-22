@@ -1,0 +1,103 @@
+import pytest
+import torch
+import numpy as np
+import os
+import tempfile
+import argparse
+from stream_decode import CTCDecoder, StreamDecoder
+from model import StreamingConformer
+import config
+
+def test_ctc_decoder_greedy():
+    id_to_char = {1: 'A', 2: 'B', 3: 'C'}
+    decoder = CTCDecoder(id_to_char)
+    
+    # Simple sequence: [blank, A, A, blank, B, blank, C, C]
+    # Should decode to "ABC"
+    # logits shape: (1, T, C)
+    logits = torch.zeros(1, 8, 4)
+    logits[0, 0, 0] = 1.0 # blank
+    logits[0, 1, 1] = 1.0 # A
+    logits[0, 2, 1] = 1.0 # A
+    logits[0, 3, 0] = 1.0 # blank
+    logits[0, 4, 2] = 1.0 # B
+    logits[0, 5, 0] = 1.0 # blank
+    logits[0, 6, 3] = 1.0 # C
+    logits[0, 7, 3] = 1.0 # C
+    
+    # We need to reset last_id for independent tests if needed, 
+    # but here we just create a new decoder.
+    decoded = decoder.decode(logits)
+    assert decoded == "ABC"
+
+def test_ctc_decoder_stateful():
+    id_to_char = {1: 'A', 2: 'B'}
+    decoder = CTCDecoder(id_to_char)
+    
+    # First chunk ends with 'A'
+    logits1 = torch.zeros(1, 2, 3)
+    logits1[0, 0, 1] = 1.0 # A
+    logits1[0, 1, 1] = 1.0 # A
+    assert decoder.decode(logits1) == "A"
+    assert decoder.last_id == 1
+    
+    # Second chunk starts with 'A', then 'B'
+    logits2 = torch.zeros(1, 2, 3)
+    logits2[0, 0, 1] = 1.0 # A (should be ignored as it is same as last_id)
+    logits2[0, 1, 2] = 1.0 # B
+    assert decoder.decode(logits2) == "B"
+    assert decoder.last_id == 2
+
+@pytest.fixture
+def dummy_checkpoint():
+    # Create a dummy checkpoint for StreamDecoder
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        device = "cpu"
+        model = StreamingConformer(
+            n_mels=config.N_MELS,
+            num_classes=config.NUM_CLASSES,
+            d_model=config.D_MODEL,
+            n_head=config.N_HEAD,
+            num_layers=config.NUM_LAYERS,
+        )
+        args = argparse.Namespace(
+            lr=0.001,
+            weight_decay=0.0001,
+            samples_per_epoch=100,
+            batch_size=16,
+            save_dir='checkpoints'
+        )
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'args': args
+        }, f.name)
+        return f.name
+
+def test_stream_decoder_init(dummy_checkpoint):
+    decoder = StreamDecoder(dummy_checkpoint, device="cpu")
+    assert decoder.model is not None
+    assert decoder.states is None
+    os.remove(dummy_checkpoint)
+
+def test_stream_decoder_process_chunk(dummy_checkpoint):
+    decoder = StreamDecoder(dummy_checkpoint, device="cpu")
+    
+    # To trigger processing, we need len(combined) >= samples_needed
+    # samples_needed = num_hops * 320 + 240
+    # If chunk_size is a multiple of 16000 (sample_rate), it is also a multiple of 320.
+    # So len(combined) will always be 240 samples short of triggering the last block.
+    # We add extra samples to ensure processing triggers at least once.
+    chunk_size = 16000 + 240
+    audio_chunk = np.random.randn(chunk_size).astype(np.float32)
+    
+    # Process chunk
+    decoder.process_chunk(audio_chunk)
+    
+    # Check if states are updated
+    assert decoder.states is not None
+    # states is (sub_cache, layer_states)
+    # layer_states is a list of (attn_cache, conv_cache) for each layer
+    assert len(decoder.states) == 2
+    assert len(decoder.states[1]) == config.NUM_LAYERS
+    
+    os.remove(dummy_checkpoint)

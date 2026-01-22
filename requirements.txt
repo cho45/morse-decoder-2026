@@ -1,0 +1,6 @@
+numpy
+scipy
+onnxruntime
+pyaudio
+pytest
+matplotlib
