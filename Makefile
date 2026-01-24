@@ -8,3 +8,6 @@ build:
 
 test:
 	$(DOCKER_RUN) python3 -m pytest tests/
+
+train:
+	$(DOCKER_RUN) python3 -u train.py $(ARGS)

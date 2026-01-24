@@ -13,22 +13,24 @@ class RelPositionalEncoding(nn.Module):
         self.max_len = max_len
         self.extend_pe(max_len)
 
-    def extend_pe(self, length: int):
-        pe = torch.zeros(length, self.d_model)
-        position = torch.arange(0, length, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * -(math.log(10000.0) / self.d_model))
+    def extend_pe(self, length: int, device: torch.device = torch.device('cpu')):
+        pe = torch.zeros(length, self.d_model, device=device)
+        position = torch.arange(0, length, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=device).float() * -(math.log(10000.0) / self.d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.register_buffer('pe', pe, persistent=False)
         self.max_len = length
 
     def forward(self, length: int, offset: int = 0):
+        # For relative positional encoding in Conformer,
+        # we usually want the embeddings for the last 'length' positions.
         if offset + length > self.max_len:
-            self.extend_pe(offset + length + 1000)
+            self.extend_pe(offset + length + 1000, self.pe.device if hasattr(self, 'pe') else torch.device('cpu'))
         return self.pe[offset : offset + length, :]
 
-class CausalRelMultiHeadAttention(nn.Module):
-    """Causal Multi-Head Attention with Relative Positional Encoding."""
+class CausalMultiHeadAttention(nn.Module):
+    """Causal Multi-Head Attention."""
     def __init__(self, d_model: int, n_head: int, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
@@ -38,18 +40,16 @@ class CausalRelMultiHeadAttention(nn.Module):
         self.q_linear = nn.Linear(d_model, d_model)
         self.k_linear = nn.Linear(d_model, d_model)
         self.v_linear = nn.Linear(d_model, d_model)
-        self.pos_linear = nn.Linear(d_model, d_model)
         self.out_linear = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, pos_emb: torch.Tensor,
+    def forward(self, x: torch.Tensor,
                 cache: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, int]]:
         batch_size, seq_len, _ = x.size()
         
         q = self.q_linear(x).view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
         k = self.k_linear(x).view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
         v = self.v_linear(x).view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
-        p = self.pos_linear(pos_emb).view(seq_len, self.n_head, self.d_k).transpose(0, 1)
 
         offset = 0
         if cache is not None:
@@ -66,21 +66,11 @@ class CausalRelMultiHeadAttention(nn.Module):
         new_offset = offset + seq_len
         new_cache = (k, v, new_offset)
         
-        # Relative positional attention
-        # q: (B, H, L, Dk), k: (B, H, L_total, Dk)
-        # p is (H, L, Dk). We need (1, H, L, Dk) for broadcasting.
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
         
-        # Standard Conformer RelAttn often uses (q + p) * k^T
-        # Reshape p for broadcasting: (H, L, Dk) -> (1, H, L, Dk)
-        p_unsqueezed = p.unsqueeze(0)
-        q_with_pos = q + p_unsqueezed
-        
-        scores = torch.matmul(q_with_pos, k.transpose(-2, -1)) / math.sqrt(self.d_k)
-        
-        # Add causal mask if not streaming (or based on current seq_len)
-        if seq_len > 1 or cache is None:
-            mask = torch.triu(torch.ones(seq_len, k.size(2), device=x.device), diagonal=k.size(2)-seq_len+1).bool()
-            scores = scores.masked_fill(mask, float('-inf'))
+        # Causal mask
+        mask = torch.triu(torch.ones(seq_len, k.size(2), device=x.device), diagonal=k.size(2)-seq_len+1).bool()
+        scores = scores.masked_fill(mask, float('-inf'))
 
         attn = F.softmax(scores, dim=-1)
         attn = self.dropout(attn)
@@ -138,6 +128,7 @@ class ConformerBlock(nn.Module):
     """A single Conformer Block."""
     def __init__(self, d_model: int, n_head: int, kernel_size: int = config.KERNEL_SIZE, dropout: float = config.DROPOUT):
         super().__init__()
+        self.ln_ff1 = nn.LayerNorm(d_model)
         self.ff1 = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
             nn.SiLU(),
@@ -145,8 +136,11 @@ class ConformerBlock(nn.Module):
             nn.Linear(d_model * 4, d_model),
             nn.Dropout(dropout)
         )
-        self.attn = CausalRelMultiHeadAttention(d_model, n_head, dropout)
+        self.ln_attn = nn.LayerNorm(d_model)
+        self.attn = CausalMultiHeadAttention(d_model, n_head, dropout)
+        self.ln_conv = nn.LayerNorm(d_model)
         self.conv = ConformerConvModule(d_model, kernel_size)
+        self.ln_ff2 = nn.LayerNorm(d_model)
         self.ff2 = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
             nn.SiLU(),
@@ -154,24 +148,22 @@ class ConformerBlock(nn.Module):
             nn.Linear(d_model * 4, d_model),
             nn.Dropout(dropout)
         )
-        self.ln_attn = nn.LayerNorm(d_model)
         self.ln_final = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor, pos_emb: torch.Tensor,
+    def forward(self, x: torch.Tensor,
                 cache: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]] = None) -> Tuple[torch.Tensor, Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]]:
         attn_cache, conv_cache = cache if cache is not None else (None, None)
         
-        # FF1
-        x = x + 0.5 * self.ff1(x)
+        # FF1 (Macaron style)
+        x = x + 0.5 * self.ff1(self.ln_ff1(x))
         # MHSA
-        x_ln = self.ln_attn(x)
-        attn_out, new_attn_cache = self.attn(x_ln, pos_emb, attn_cache)
+        attn_out, new_attn_cache = self.attn(self.ln_attn(x), attn_cache)
         x = x + attn_out
         # Conv
-        conv_out, new_conv_cache = self.conv(x, conv_cache)
+        conv_out, new_conv_cache = self.conv(x, conv_cache) # ConformerConvModule has its own LN
         x = x + conv_out
         # FF2
-        x = x + 0.5 * self.ff2(x)
+        x = x + 0.5 * self.ff2(self.ln_ff2(x))
         x = self.ln_final(x)
         return x, (new_attn_cache, new_conv_cache)
 
@@ -179,50 +171,48 @@ class ConvSubsampling(nn.Module):
     """Strictly Causal Convolutional Subsampling (2x downsampling as per plan.md)."""
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        # Downsample by 2x in both time and frequency
-        # kernel_size=3, stride=2 requires 2 frames of padding for causality
-        self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(2, 2))
-        # F_in -> (F_in + 2*padding - kernel_size)//stride + 1
-        # padding=1, kernel_size=3, stride=2
-        f_out = (config.N_MELS + 2 - 3) // 2 + 1
+        # Downsample by 2x in both time and frequency.
+        # To be causal, we use padding=0 and handle time-padding manually.
+        # Frequency padding can stay symmetric if it doesn't violate causality.
+        self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(2, 2), padding=(0, 1))
+        # F_in -> (F_in + 2*padding_f - kernel_size)//stride + 1
+        f_out = (config.N_MELS + 2*1 - 3) // 2 + 1
         self.out_linear = nn.Linear(out_channels * f_out, out_channels)
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: (B, T, F)
         x = x.unsqueeze(1) # (B, 1, T, F)
         
-        # Handle time-axis causality first (padding/caching)
-        # We perform operations on x BEFORE frequency padding to keep cache clean
-        
-        if cache is not None:
-            x = torch.cat([cache, x], dim=2)
+        # Causal Padding in Time:
+        # To produce the first output frame (i=0) using kernel_size=3,
+        # we need input frames [-2, -1, 0] (left-padded).
+        # Subsequent output frame i=1 needs [0, 1, 2].
+        # Thus, we need 2 frames of history.
+        padding_t = 2
+        if cache is None:
+            # First chunk: pad with zeros on the left
+            x = F.pad(x, (0, 0, padding_t, 0))
         else:
-            # Initial padding for causality (time axis)
-            # kernel=3, stride=2. We need 2 frames padding at start.
-            x = F.pad(x, (0, 0, 2, 0)) # freq_pad=0, time_pad=2
+            x = torch.cat([cache, x], dim=2)
             
         l_in = x.size(2)
-        kernel_size = 3
-        stride = 2
         
-        # Calculate valid output length
-        n_out = (l_in - kernel_size) // stride + 1
+        # L_out = floor((L_in - kernel_size) / stride) + 1
+        # With kernel=3, stride=2:
+        n_out = (l_in - 3) // 2 + 1
         
         if n_out <= 0:
-            new_cache = x
-            # Return empty tensor with correct output dimension
-            b, _, _, _ = x.size()
-            return torch.zeros(b, 0, self.out_linear.out_features, device=x.device), new_cache
+            return torch.zeros(x.size(0), 0, self.out_linear.out_features, device=x.device), x
 
-        # Determine new cache (unprocessed frames for next chunk)
-        new_cache = x[:, :, n_out * stride :, :]
-        
-        # Determine valid input for convolution
-        l_consumed = (n_out - 1) * stride + kernel_size
+        # Stride-2 alignment: each output i consumes up to input 2*i + 2
+        l_consumed = (n_out - 1) * 2 + 3
         x_valid = x[:, :, :l_consumed, :]
-        
-        # Apply frequency padding ONLY to the valid input for convolution
-        x_valid = F.pad(x_valid, (1, 1, 0, 0)) # freq_pad=1 (sym)
+        # Cache the frames needed for the NEXT output frame.
+        # Output n_out uses [2*n_out-2, 2*n_out-1, 2*n_out].
+        # Next output n_out+1 needs [2*n_out, 2*n_out+1, 2*n_out+2].
+        # So we cache from index 2*n_out.
+        cache_start = n_out * 2
+        new_cache = x[:, :, cache_start:, :]
         
         x_out = F.relu(self.conv(x_valid))
         
@@ -245,7 +235,16 @@ class StreamingConformer(nn.Module):
         self.layers = nn.ModuleList([
             ConformerBlock(d_model, n_head, kernel_size, dropout) for _ in range(num_layers)
         ])
+        self.final_dropout = nn.Dropout(dropout)
+        self.final_ln = nn.LayerNorm(d_model)
         self.ctc_head = nn.Linear(d_model, num_classes)
+        # Sane initialization for CTC head to prevent loss explosion.
+        nn.init.trunc_normal_(self.ctc_head.weight, std=0.01)
+        nn.init.constant_(self.ctc_head.bias, 0)
+        with torch.no_grad():
+            # Blank への過度なバイアス（サボり癖）を抑制するため、初期バイアスを大幅に下げます。
+            # これにより、モデルは学習初期に積極的な文字出力を試行するようになります。
+            self.ctc_head.bias[0] = -5.0
 
     def forward(self, x: torch.Tensor,
                 states: Optional[Tuple[Optional[Tuple[torch.Tensor, torch.Tensor]], Optional[List[Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]]]]] = None) -> Tuple[torch.Tensor, Tuple[Tuple[torch.Tensor, torch.Tensor], List[Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]]]]:
@@ -258,6 +257,9 @@ class StreamingConformer(nn.Module):
         x, new_sub_cache = self.subsampling(x, sub_cache)
         batch_size, seq_len, d_model = x.size()
         
+        # Scaling for Positional Encoding balance
+        x = x * math.sqrt(d_model)
+        
         # In streaming, we need to handle relative positional encoding carefully.
         # We need to know the global start position of the current chunk.
         # We can infer it from the attention cache of the first layer.
@@ -267,15 +269,17 @@ class StreamingConformer(nn.Module):
             # attn_cache is (k, v, offset)
             offset = layer_states[0][0][2]
         
-        # Generate PE for current chunk with correct offset
+        # Generate PE for current chunk with correct offset and add to input
         pos_emb = self.pos_enc(seq_len, offset=offset)
+        x = x + pos_emb
         
         new_layer_states = []
         for i, layer in enumerate(self.layers):
             cache = layer_states[i] if layer_states is not None else None
-            x, new_cache = layer(x, pos_emb, cache)
+            x, new_cache = layer(x, cache)
             new_layer_states.append(new_cache)
             
+        x = self.final_dropout(self.final_ln(x))
         logits = self.ctc_head(x)
         return logits, (new_sub_cache, new_layer_states)
 

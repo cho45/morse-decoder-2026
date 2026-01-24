@@ -75,7 +75,62 @@ def test_cw_dataset():
     dataset = CWDataset(num_samples=num_samples)
     assert len(dataset) == num_samples
     
-    waveform, label = dataset[0]
+    # Updated to expect (waveform, label, wpm)
+    item = dataset[0]
+    assert len(item) == 3
+    waveform, label, wpm = item
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)
+    assert isinstance(wpm, int)
     assert len(label) > 0
+
+def test_prosigns():
+    gen = MorseGenerator(sample_rate=1000)
+    # Test text_to_morse_tokens
+    text = "CQ DE <BT> K"
+    tokens = gen.text_to_morse_tokens(text)
+    # "CQ", " ", "DE", " ", "<BT>", " ", "K"
+    # But text_to_morse_tokens logic splits by char unless it's a token.
+    # Wait, my implementation of text_to_morse_tokens in data_gen.py
+    # handles <BT> and config.PROSIGNS (CQ, DE).
+    # But it does NOT split by space automatically if space is just a char.
+    # Space is in config.CHARS? No, ' ' is in MORSE_DICT but not in config.CHARS usually.
+    # Ah, config.CHARS has ' ' ?
+    # config.CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,")) + PROSIGNS
+    # Space is not in CHARS. Space is handled as word separator in generate_timing.
+    
+    # Let's check data_gen.py implementation of text_to_morse_tokens again.
+    # It appends token if found, else appends char.
+    # So "CQ DE" -> "CQ", " ", "DE"
+    
+    # Let's verify this behavior
+    assert "CQ" in tokens
+    assert "DE" in tokens
+    assert "<BT>" in tokens
+    
+    # Test timing generation for prosign
+    timing = gen.generate_timing("<BT>", wpm=20)
+    # <BT> is -...-
+    # dash(3) . dot(1) . dot(1) . dot(1) . dash(3)
+    # total duration = 3+1+1+1+1+1+1+1+3 = 13 units?
+    # -...- :
+    # - (3)
+    # space (1)
+    # . (1)
+    # space (1)
+    # . (1)
+    # space (1)
+    # . (1)
+    # space (1)
+    # - (3)
+    # Total on+off = 3+1 + 1+1 + 1+1 + 1+1 + 3 = 13 units.
+    # Last symbol duration is 3 units (on).
+    
+    total_units = 0
+    for is_on, duration in timing:
+        unit = 1.2 / 20
+        units = duration / unit
+        total_units += units
+    
+    # Approx 13 units (ignoring floating point errors)
+    assert abs(total_units - 13.0) < 0.1

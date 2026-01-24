@@ -15,6 +15,9 @@ class DummyArgs:
         self.weight_decay = 1e-4
         self.grad_clip = 5.0
         self.save_dir = "test_checkpoints"
+        self.curriculum_phase = 0
+        self.resume = None
+        self.freeze_encoder = False
 
 def test_trainer_init():
     args = DummyArgs()
@@ -32,8 +35,9 @@ def test_train_epoch():
 def test_validate():
     args = DummyArgs()
     trainer = Trainer(args)
-    avg_loss = trainer.validate(1)
+    avg_loss, avg_cer = trainer.validate(1)
     assert isinstance(avg_loss, float)
+    assert isinstance(avg_cer, float)
 
 def test_save_checkpoint():
     args = DummyArgs()
@@ -56,11 +60,11 @@ def test_collate_fn():
     
     # Create a small dummy batch
     waveform = torch.randn(16000) # 1 second
-    batch = [(waveform, "TEST")]
+    batch = [(waveform, "TEST", 20)]
     
-    mels, targets, input_lengths, target_lengths, texts = trainer.collate_fn(batch)
+    waveforms, targets, lengths, target_lengths, texts, wpms = trainer.collate_fn(batch)
     
-    assert mels.ndim == 3 # (B, T, F)
-    assert mels.size(0) == 1
+    assert waveforms.ndim == 2 # (B, T)
+    assert waveforms.size(0) == 1
     assert targets.ndim == 1
     assert texts[0] == "TEST"

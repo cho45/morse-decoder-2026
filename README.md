@@ -33,7 +33,7 @@ python3 train.py --samples-per-epoch 1000 --epochs 10 --batch-size 16
 ```
 ホスト側から直接実行する場合:
 ```bash
-docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --samples-per-epoch 1000 --epochs 10 --batch-size 16
+docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --samples-per-epoch 1000 --epochs 3 --batch-size 8
 ```
 
 ## プロジェクト構造
