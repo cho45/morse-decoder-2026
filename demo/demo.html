@@ -155,12 +155,17 @@
 
                 <div class="control-group">
                     <label for="snr">SNR (dB): <span class="value-display" id="snrValue">0</span></label>
-                    <input type="range" id="snr" min="-10" max="40" value="0" step="1">
+                    <input type="range" id="snr" min="-20" max="40" value="-10" step="1">
                 </div>
 
                 <div class="control-group">
                     <label for="jitter">Jitter: <span class="value-display" id="jitterValue">0.0</span></label>
                     <input type="range" id="jitter" min="0" max="0.3" value="0" step="0.01">
+                </div>
+
+                <div class="control-group">
+                    <label for="volume">音量: <span class="value-display" id="volumeValue">0.5</span></label>
+                    <input type="range" id="volume" min="0" max="1" value="0.5" step="0.05">
                 </div>
             </div>
 

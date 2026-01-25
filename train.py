@@ -220,7 +220,7 @@ class Trainer:
                 # + 1 phase for Realistic
                 # 7 phases were: FullClean, SlightVar, Practical, Boundary, NegEntry, DeepNeg, TrueExtreme
                 # Now we expand to more steps for smoother SNR transition and fading resistance
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 12
+                max_phase = (len(KOCH_CHARS) - 4) + 2 + 14
                 
                 if self.current_phase < max_phase:
                     print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
@@ -255,7 +255,8 @@ class Trainer:
                 # 10エポック停滞したら、LR を初期値の半分まで戻して局所解からの脱出を試みる
                 # 以降、5エポックごとに再加熱を繰り返す
                 if self.phases_since_last_advance >= 10 and (self.phases_since_last_advance - 10) % 5 == 0:
-                    reheat_lr = self.args.lr * 0.5
+                    # 強力な再加熱: 停滞時は初期 LR まで戻す
+                    reheat_lr = self.args.lr
                     print(f"*** STAGNATION DETECTED ({self.phases_since_last_advance} epochs). RE-HEATING LR TO {reheat_lr} ***")
                     for param_group in self.optimizer.param_groups:
                         param_group['lr'] = reheat_lr
@@ -435,6 +436,11 @@ class Trainer:
             
         max_koch_phase = len(KOCH_CHARS) - 4 + 2 # When num_chars == len(KOCH_CHARS)
         
+        self.train_dataset.min_len = 5
+        self.train_dataset.max_len = 6
+        self.train_dataset.min_wpm = 15
+        self.train_dataset.max_wpm = 40
+
         if num_chars <= len(KOCH_CHARS):
             # Koch Phases: Gradually increase character set
             current_chars = KOCH_CHARS[:num_chars]
@@ -551,44 +557,57 @@ class Trainer:
             print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB), Very Stable (min_fading=0.6)")
 
         elif phase == max_koch_phase + 8:
-            # Target SNR: -10dB focus (-10 to 0dB)
-            # Focus on pure noise robustness with almost no fading
-            self.train_dataset.min_snr = -10.0
-            self.train_dataset.max_snr = 0.0
+            # Target SNR: -8dB focus (-8 to 2dB)
+            self.train_dataset.min_snr = -8.0
+            self.train_dataset.max_snr = 2.0
             self.train_dataset.min_fading = 0.8
             self.train_dataset.fading_speed_max = 0.05
-            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-10 to 0dB), Rock Solid (min_fading=0.8)")
+            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-8 to 2dB), Rock Solid (min_fading=0.8)")
 
         elif phase == max_koch_phase + 9:
-            # Deep Negative (-15 to -5dB)
-            self.train_dataset.min_snr = -15.0
-            self.train_dataset.max_snr = -5.0
-            self.train_dataset.min_fading = 0.9 # Almost no fading
-            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-15 to -5dB), Rock Solid (min_fading=0.9)")
+            # Deep Negative (-11 to -1dB)
+            self.train_dataset.min_snr = -11.0
+            self.train_dataset.max_snr = -1.0
+            self.train_dataset.min_fading = 0.9
+            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-11 to -1dB), Rock Solid (min_fading=0.9)")
 
         elif phase == max_koch_phase + 10:
-            # Now re-introduce fading at -10dB SNR
+            # Deep Negative (-14 to -4dB)
+            self.train_dataset.min_snr = -14.0
+            self.train_dataset.max_snr = -4.0
+            self.train_dataset.min_fading = 0.9
+            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-14 to -4dB), Rock Solid (min_fading=0.9)")
+
+        elif phase == max_koch_phase + 11:
+            # Human Limit Entry (-18 to -8dB)
+            self.train_dataset.min_snr = -18.0
+            self.train_dataset.max_snr = -8.0
+            self.train_dataset.min_fading = 0.9
+            print(f"Epoch {epoch} | Phase {phase}: Human Limit Entry (-18 to -8dB), Rock Solid (min_fading=0.9)")
+
+        elif phase == max_koch_phase + 12:
+            # Re-introduce fading at moderate SNR (-10 to 0dB)
             self.train_dataset.min_snr = -10.0
             self.train_dataset.max_snr = 0.0
             self.train_dataset.min_fading = 0.4
             self.train_dataset.fading_speed_max = 0.1
-            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-10 to 0dB), Re-introducing Fading (min_fading=0.4)")
+            print(f"Epoch {epoch} | Phase {phase}: Re-introducing Fading (-10 to 0dB), (min_fading=0.4)")
 
-        elif phase == max_koch_phase + 11:
-            # Extreme Challenge: Deep Negative with Deep Fading
-            self.train_dataset.min_snr = -15.0
-            self.train_dataset.max_snr = -5.0
+        elif phase == max_koch_phase + 13:
+            # Deep Fading at Human Limit (-18 to -8dB)
+            self.train_dataset.min_snr = -18.0
+            self.train_dataset.max_snr = -8.0
             self.train_dataset.min_fading = 0.2
             self.train_dataset.fading_speed_max = 0.2
-            print(f"Epoch {epoch} | Phase {phase}: Extreme SNR, Deep Fading (min_fading=0.2)")
+            print(f"Epoch {epoch} | Phase {phase}: Deep Fading at Human Limit (-18 to -8dB), (min_fading=0.2)")
 
         else:
-            # True Extreme (Final Boss)
-            self.train_dataset.min_snr = -20.0
-            self.train_dataset.max_snr = -10.0
+            # True Extreme / Beyond Human Limit
+            self.train_dataset.min_snr = -22.0
+            self.train_dataset.max_snr = -12.0
             self.train_dataset.min_fading = 0.1
             self.train_dataset.fading_speed_max = 0.4
-            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-20 to -10dB), Max Fading (min_fading=0.1)")
+            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-22 to -12dB), Max Fading (min_fading=0.1)")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm

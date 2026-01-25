@@ -38,6 +38,7 @@ let audioContext = null;
 let morseNode = null;
 let oscillator = null;
 let gainNode = null;
+let masterGainNode = null;
 let noiseNode = null;
 let filterNode = null;
 let session = null;
@@ -91,6 +92,7 @@ const wpmSlider = document.getElementById('wpm');
 const freqSlider = document.getElementById('frequency');
 const snrSlider = document.getElementById('snr');
 const jitterSlider = document.getElementById('jitter');
+const volumeSlider = document.getElementById('volume');
 
 // Update value displays
 const updateSliders = () => {
@@ -98,8 +100,16 @@ const updateSliders = () => {
     document.getElementById('freqValue').textContent = freqSlider.value;
     document.getElementById('snrValue').textContent = snrSlider.value;
     document.getElementById('jitterValue').textContent = jitterSlider.value;
+    document.getElementById('volumeValue').textContent = volumeSlider.value;
 };
-[wpmSlider, freqSlider, snrSlider, jitterSlider].forEach(s => s.oninput = updateSliders);
+[wpmSlider, freqSlider, snrSlider, jitterSlider, volumeSlider].forEach(s => {
+    s.oninput = () => {
+        updateSliders();
+        if (s.id === 'volume' && masterGainNode) {
+            masterGainNode.gain.setTargetAtTime(parseFloat(volumeSlider.value), audioContext.currentTime, 0.01);
+        }
+    };
+});
 updateSliders();
 
 // --- DSP Utils ---
@@ -330,32 +340,6 @@ function updateDebugInfo(startTime = null) {
                          `スキップ数: ${skipCount}${latencyInfo}`;
 }
 
-function updateDebugInfo(startTime = null) {
-    if (!session || !currentStates) return;
-    
-    let provider = 'unknown';
-    if (session.executionProviders && session.executionProviders.length > 0) {
-        provider = session.executionProviders[0];
-    } else if (session.handler) {
-        const handlerName = session.handler.constructor.name.toLowerCase();
-        if (handlerName.includes('webgpu')) provider = 'webgpu';
-        else if (handlerName.includes('wasm')) provider = 'wasm';
-        else provider = session.handler.epName || 'unknown';
-    }
-
-    const offset = currentStates.offset_0.data[0];
-    const offsetNum = typeof offset === 'bigint' ? Number(offset) : offset;
-    
-    let latencyInfo = "";
-    if (startTime) {
-        const end = performance.now();
-        latencyInfo = `<br>レイテンシ: ${(end - startTime).toFixed(1)}ms`;
-    }
-
-    debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${provider})<br>` +
-                         `処理フレーム数: ${Math.floor(offsetNum)}<br>` +
-                         `スキップ数: ${skipCount}${latencyInfo}`;
-}
 
 function drawVisualizations() {
     drawMel();
@@ -595,10 +579,25 @@ function createWhiteNoise(durationSeconds, snr) {
     const bufferSize = audioContext.sampleRate * durationSeconds;
     const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
     const data = buffer.getChannelData(0);
-    const noiseAmp = Math.pow(10, -snr / 20);
-    for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * noiseAmp;
+
+    // Match data_gen.py: SNR is based on mean power of the signal
+    // Standard Morse duty cycle is ~40%. Sine wave power at amp 1.0 is 0.5.
+    // So mean signal power is roughly 0.5 * 0.4 = 0.2
+    const sigAvgWatts = 0.2;
+    const noiseAvgWatts = sigAvgWatts / Math.pow(10, snr / 10);
+    const sigma = Math.sqrt(noiseAvgWatts);
+
+    // Box-Muller transform for Gaussian noise
+    for (let i = 0; i < bufferSize; i += 2) {
+        const u1 = Math.random();
+        const u2 = Math.random();
+        const mag = sigma * Math.sqrt(-2.0 * Math.log(u1 || 1e-12)); // Avoid log(0)
+        data[i] = mag * Math.cos(2.0 * Math.PI * u2);
+        if (i + 1 < bufferSize) {
+            data[i + 1] = mag * Math.sin(2.0 * Math.PI * u2);
+        }
     }
+
     const source = audioContext.createBufferSource();
     source.buffer = buffer;
     source.loop = true;
@@ -646,11 +645,13 @@ startBtn.onclick = async () => {
             audioBuffer.set(e.data.chunk, N_FFT - HOP_LENGTH);
             const mel = applyFFTAndMel(audioBuffer, melFilters);
             melBuffer.push(mel);
-            if (melBuffer.length >= 2) {
-                const combinedMel = new Float32Array(N_MELS * 2);
-                combinedMel.set(melBuffer[0]);
-                combinedMel.set(melBuffer[1], N_MELS);
-                runInference(combinedMel, 2);
+            // チャンクサイズを 10フレーム (100ms) に拡大してオーバーヘッドを削減
+            if (melBuffer.length >= 10) {
+                const combinedMel = new Float32Array(N_MELS * 10);
+                for (let i = 0; i < 10; i++) {
+                    combinedMel.set(melBuffer[i], i * N_MELS);
+                }
+                runInference(combinedMel, 10);
                 melBuffer = [];
             }
         }
@@ -667,6 +668,10 @@ startBtn.onclick = async () => {
     // 2. Gain (Envelope)
     gainNode = audioContext.createGain();
     gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+
+    // 2.5 Master Gain (Volume Control)
+    masterGainNode = audioContext.createGain();
+    masterGainNode.gain.setValueAtTime(parseFloat(volumeSlider.value), audioContext.currentTime);
     
     // 3. Noise (White noise)
     noiseNode = createWhiteNoise(10, parseInt(snrSlider.value));
@@ -684,8 +689,12 @@ startBtn.onclick = async () => {
     // Connect Noise: Noise -> Filter
     noiseNode.connect(filterNode);
 
-    // Filter output goes to both Receiver (for inference) and Destination (for hearing)
-    filterNode.connect(morseNode);
+    // Filter output goes to Master Gain
+    filterNode.connect(masterGainNode);
+
+    // Master Gain output goes to both Receiver (for inference) and Destination (for hearing)
+    masterGainNode.connect(morseNode);
+    masterGainNode.connect(audioContext.destination);
 
     oscillator.start();
     noiseNode.start();
@@ -711,6 +720,10 @@ stopBtn.onclick = () => {
     if (gainNode) {
         gainNode.disconnect();
         gainNode = null;
+    }
+    if (masterGainNode) {
+        masterGainNode.disconnect();
+        masterGainNode = null;
     }
     if (noiseNode) {
         try { noiseNode.stop(); noiseNode.disconnect(); } catch(e) {}
