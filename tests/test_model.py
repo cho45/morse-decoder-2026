@@ -23,7 +23,7 @@ def check_streaming_consistency(module, input_shape, chunk_size, device='cpu'):
             y_batch, _ = module(x)
     elif isinstance(module, StreamingConformer):
         with torch.no_grad():
-            y_batch, _ = module(x)
+            (y_batch, _, _), _ = module(x)
     else:
         with torch.no_grad():
             y_batch, _ = module(x)
@@ -41,7 +41,7 @@ def check_streaming_consistency(module, input_shape, chunk_size, device='cpu'):
             if isinstance(module, CausalMultiHeadAttention):
                 y_chunk, states = module(chunk, states)
             elif isinstance(module, StreamingConformer):
-                y_chunk, states = module(chunk, states)
+                (y_chunk, _, _), states = module(chunk, states)
             else:
                 y_chunk, states = module(chunk, states)
                 
@@ -111,7 +111,7 @@ def test_cache_limit_and_pe_consistency():
     with torch.no_grad():
         for i in range(num_chunks):
             x = torch.randn(1, chunk_size, config.N_MELS)
-            logits, states = model(x, states)
+            (logits, _, _), states = model(x, states)
             
             # Check attn cache size of the first layer
             k_cache = states[1][0][0][0] # states -> (sub_cache, layer_states[0] -> (attn_cache -> (k, v, offset), conv_cache))

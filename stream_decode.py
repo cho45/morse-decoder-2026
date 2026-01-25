@@ -21,20 +21,39 @@ class CTCDecoder:
     def __init__(self, id_to_char):
         self.id_to_char = id_to_char
         self.last_id = 0 # Start with blank or 0
+        self.space_pending = False
         
-    def decode(self, logits: torch.Tensor) -> str:
+    def decode(self, logits: torch.Tensor, sig_logits: torch.Tensor, boundary_logits: torch.Tensor) -> str:
         """
-        Greedy decoding of CTC logits.
+        Greedy decoding of CTC logits with physical space insertion and boundary gating.
         logits: (1, T, C)
+        sig_logits: (1, T, 6)
+        boundary_logits: (1, T, 1)
         """
         probs = torch.softmax(logits, dim=-1)
         ids = torch.argmax(probs, dim=-1)[0] # (T,)
         
+        sig_probs = torch.softmax(sig_logits, dim=-1)
+        sig_ids = torch.argmax(sig_probs, dim=-1)[0] # (T,)
+        
+        bound_probs = torch.sigmoid(boundary_logits)[0, :, 0] # (T,)
+        
         decoded_str = ""
-        for i in ids.tolist():
+        for t in range(len(ids)):
+            # Signal Head が語間空白 (5) を予測したらスペース待機フラグを立てる
+            if sig_ids[t] == 5:
+                self.space_pending = True
+
+            # 境界予測によるゲート制御: 境界と確信した瞬間以外は出力を無視
+            is_boundary = bound_probs[t] > 0.5
+            i = ids[t].item() if is_boundary else 0 # 境界以外は Blank(0) 扱い
+            
             if i != self.last_id:
                 if i != 0: # 0 is blank
                     char = self.id_to_char.get(i, "")
+                    if self.space_pending:
+                        decoded_str += " "
+                        self.space_pending = False
                     decoded_str += char
                 self.last_id = i
         return decoded_str
@@ -125,7 +144,7 @@ class StreamDecoder:
         
         with torch.no_grad():
             mels = self.preprocess(chunk_to_process)
-            logits, self.states = self.model(mels, self.states)
+            (logits, sig_logits, boundary_logits), self.states = self.model(mels, self.states)
                 
             if debug:
                 probs = torch.softmax(logits, dim=-1)
@@ -137,7 +156,7 @@ class StreamDecoder:
                     sys.stderr.write(f"\n[Debug] IDs: {ids.tolist()}, MaxProbs: {max_probs.tolist()}\n")
                     sys.stderr.flush()
 
-            decoded = self.decoder.decode(logits)
+            decoded = self.decoder.decode(logits, sig_logits, boundary_logits)
             if decoded:
                 sys.stdout.write(decoded)
                 sys.stdout.flush()

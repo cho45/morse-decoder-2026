@@ -237,14 +237,32 @@ class StreamingConformer(nn.Module):
         ])
         self.final_dropout = nn.Dropout(dropout)
         self.final_ln = nn.LayerNorm(d_model)
+        
+        # 信号の種別を予測する補助ヘッド (Multi-class: config.NUM_SIGNAL_CLASSES)
+        self.signal_head = nn.Linear(d_model, config.NUM_SIGNAL_CLASSES)
+        
+        # 文字の境界（確定タイミング）を予測する補助ヘッド (Binary: 0 or 1)
+        self.boundary_head = nn.Linear(d_model, 1)
+
+        # CTC ヘッド
+        # 以前は信号検出結果と境界予測結果を条件付けとして受け取っていたが、
+        # モデルが補助タスクに過度に依存（ショートカット学習）するのを防ぐため、
+        # 共有特徴量のみを入力とする構成に戻す。
         self.ctc_head = nn.Linear(d_model, num_classes)
+
         # Sane initialization for CTC head to prevent loss explosion.
         nn.init.trunc_normal_(self.ctc_head.weight, std=0.01)
         nn.init.constant_(self.ctc_head.bias, 0)
         with torch.no_grad():
-            # Blank への過度なバイアス（サボり癖）を抑制するため、初期バイアスを大幅に下げます。
-            # これにより、モデルは学習初期に積極的な文字出力を試行するようになります。
+            # Blank への過度なバイアス（サボり癖）を抑制しつつ、静寂区間での安定性も考慮します。
+            # 強すぎる制約はアライメント崩壊を招くため、緩和します。
+            # アライメント崩壊(Blank Collapse)を防ぐため、初期バイアスを強く設定して
+            # 無理やりにでも文字を出力させ、勾配を流すようにします。
             self.ctc_head.bias[0] = -5.0
+        
+        # Initialize signal head
+        nn.init.trunc_normal_(self.signal_head.weight, std=0.01)
+        nn.init.constant_(self.signal_head.bias, 0)
 
     def forward(self, x: torch.Tensor,
                 states: Optional[Tuple[Optional[Tuple[torch.Tensor, torch.Tensor]], Optional[List[Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]]]]] = None) -> Tuple[torch.Tensor, Tuple[Tuple[torch.Tensor, torch.Tensor], List[Tuple[Tuple[torch.Tensor, torch.Tensor, int], torch.Tensor]]]]:
@@ -280,8 +298,19 @@ class StreamingConformer(nn.Module):
             new_layer_states.append(new_cache)
             
         x = self.final_dropout(self.final_ln(x))
+        
+        # 補助タスク: 信号種別予測
+        signal_logits = self.signal_head(x)
+        
+        # 補助タスク: 文字境界予測
+        boundary_logits = self.boundary_head(x) # (B, T, 1)
+        
+        # 主タスク: CTC 復号
+        # 補助タスク（信号検出、境界予測）は Encoder に良い特徴を抽出させるための
+        # ガイド（補助損失）としてのみ機能させ、CTC 予測自体は特徴量 x のみから行う。
         logits = self.ctc_head(x)
-        return logits, (new_sub_cache, new_layer_states)
+        
+        return (logits, signal_logits, boundary_logits), (new_sub_cache, new_layer_states)
 
 if __name__ == "__main__":
     # Test the model
@@ -298,9 +327,10 @@ if __name__ == "__main__":
     num_test_frames = config.SUBSAMPLING_RATE * 200
     dummy_input = torch.randn(1, num_test_frames, config.N_MELS).to(device)
     with torch.no_grad():
-        output, _ = model(dummy_input)
+        (output, sig_out), _ = model(dummy_input)
     print(f"Input shape: {dummy_input.shape}")
     print(f"Output shape: {output.shape}")
+    print(f"Signal output shape: {sig_out.shape}")
     
     print("\nTesting streaming inference...")
     # Chunk size must be multiple of 4 for this subsampling implementation
@@ -311,7 +341,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         for i in range(0, num_test_frames, chunk_size):
             chunk = dummy_input[:, i:i+chunk_size, :]
-            logits, states = model(chunk, states)
+            (logits, sig_logits), states = model(chunk, states)
             all_outputs.append(logits)
             print(f"Chunk {i//chunk_size} processed. Output shape: {logits.shape}")
             

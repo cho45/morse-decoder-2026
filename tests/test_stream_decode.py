@@ -25,9 +25,13 @@ def test_ctc_decoder_greedy():
     logits[0, 6, 3] = 1.0 # C
     logits[0, 7, 3] = 1.0 # C
     
-    # We need to reset last_id for independent tests if needed, 
+    # We need to reset last_id for independent tests if needed,
     # but here we just create a new decoder.
-    decoded = decoder.decode(logits)
+    # Dummy sig_logits (all zeros, no spaces)
+    sig_logits = torch.zeros(1, 8, 6)
+    # Dummy boundary_logits (all ones, always allow)
+    boundary_logits = torch.ones(1, 8, 1) * 10.0
+    decoded = decoder.decode(logits, sig_logits, boundary_logits)
     assert decoded == "ABC"
 
 def test_ctc_decoder_stateful():
@@ -38,14 +42,18 @@ def test_ctc_decoder_stateful():
     logits1 = torch.zeros(1, 2, 3)
     logits1[0, 0, 1] = 1.0 # A
     logits1[0, 1, 1] = 1.0 # A
-    assert decoder.decode(logits1) == "A"
+    sig_logits1 = torch.zeros(1, 2, 6)
+    boundary_logits1 = torch.ones(1, 2, 1) * 10.0
+    assert decoder.decode(logits1, sig_logits1, boundary_logits1) == "A"
     assert decoder.last_id == 1
     
     # Second chunk starts with 'A', then 'B'
     logits2 = torch.zeros(1, 2, 3)
     logits2[0, 0, 1] = 1.0 # A (should be ignored as it is same as last_id)
     logits2[0, 1, 2] = 1.0 # B
-    assert decoder.decode(logits2) == "B"
+    sig_logits2 = torch.zeros(1, 2, 6)
+    boundary_logits2 = torch.ones(1, 2, 1) * 10.0
+    assert decoder.decode(logits2, sig_logits2, boundary_logits2) == "B"
     assert decoder.last_id == 2
 
 @pytest.fixture

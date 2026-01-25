@@ -65,83 +65,57 @@ class MorseGenerator:
         return tokens
 
     def generate_timing(self, text: str, wpm: int = 20, farnsworth_wpm: int = None,
-                        jitter: float = 0.0, weight: float = 1.0) -> List[Tuple[bool, float]]:
+                        jitter: float = 0.0, weight: float = 1.0) -> List[Tuple[int, float]]:
         """
-        Generate timing sequence (is_on, duration_sec) for the given text.
+        Generate timing sequence (class_id, duration_sec) for the given text.
+        Classes: 1: Dit, 2: Dah, 3: Intra-char space, 4: Inter-char space, 5: Inter-word space
         """
         if farnsworth_wpm is None:
             farnsworth_wpm = wpm
         
         dot_len = 1.2 / wpm
-        # Farnsworth timing: dots and dashes are at 'wpm', but spaces are at 'farnsworth_wpm'
         char_space_len = (3 * 1.2 / farnsworth_wpm)
         word_space_len = (7 * 1.2 / farnsworth_wpm)
         
         timing = []
-        # We need to handle prosigns which might contain spaces (like CQ) but are treated as one unit here?
-        # No, MORSE_DICT['CQ'] = '-.-. --.-' which has space.
-        # But our generate_timing logic splits by space for words.
-        
-        # Simpler approach: Pre-process text to handle tokens.
-        # But wait, 'text' input here is the ground truth string.
-        # If text contains "<BT>", we should treat it as one character.
-        
-        # Let's assume input text uses spaces for word boundaries.
-        # We need to tokenize the text first.
-        
-        # Split by space to get words
         words_raw = text.split(' ')
         
         for i, word_raw in enumerate(words_raw):
             if not word_raw: continue
-            
-            # Tokenize word into chars/prosigns
             tokens = self.text_to_morse_tokens(word_raw)
             
             for j, char in enumerate(tokens):
                 code = MORSE_DICT.get(char, "")
-                # Special handling for tokens that map to sequence with spaces (like CQ)
-                # Actually, standard prosigns don't have spaces inside (they are run together).
-                # CQ and DE are abbreviations, so they are just "C Q" and "D E".
-                # But if we treat "CQ" as a single token class, we should generate it as such.
-                
                 for k, symbol in enumerate(code):
-                    # Apply weight and jitter
                     if symbol == '.':
                         duration = dot_len * weight
-                        timing.append((True, duration))
+                        timing.append((1, duration)) # Dit
                     elif symbol == '-':
                         duration = dot_len * 3 * weight
-                        timing.append((True, duration))
+                        timing.append((2, duration)) # Dah
                     elif symbol == ' ':
-                        # Handle spaces within prosigns/tokens
-                        timing.append((False, char_space_len))
-                        continue # Skip the inter-symbol space below
+                        timing.append((4, char_space_len)) # Inter-char space (for CQ etc)
+                        continue
                     
                     if jitter > 0:
                         timing[-1] = (timing[-1][0], timing[-1][1] * (1 + random.uniform(-jitter, jitter)))
                     
-                    # Inter-symbol space (within a character)
                     if k < len(code) - 1 and code[k+1] != ' ':
-                        timing.append((False, dot_len))
+                        timing.append((3, dot_len)) # Intra-char space
                 
-                # Inter-character space
                 if j < len(tokens) - 1:
-                    timing.append((False, char_space_len))
+                    timing.append((4, char_space_len)) # Inter-char space
             
-            # Inter-word space
             if i < len(words_raw) - 1:
-                timing.append((False, word_space_len))
+                timing.append((5, word_space_len)) # Inter-word space
         
         return timing
 
-    def generate_waveform(self, timing: List[Tuple[bool, float]], frequency: float = 700.0, 
-                          waveform_type: str = 'sine', rise_time: float = 0.005) -> np.ndarray:
+    def generate_waveform(self, timing: List[Tuple[int, float]], frequency: float = 700.0,
+                          waveform_type: str = 'sine', rise_time: float = 0.005, wpm: int = 20) -> np.ndarray:
         """
         Convert timing sequence to audio waveform.
         """
-        # Randomize pre_silence to improve alignment robustness.
-        # This gives the causal Conformer varying history to see the start of a signal.
         pre_silence = random.uniform(0.1, 0.5)
         post_silence = 0.55
         total_duration = sum(t[1] for t in timing) + pre_silence + post_silence
@@ -149,8 +123,9 @@ class MorseGenerator:
         waveform = np.zeros(total_samples)
         
         current_sample = int(pre_silence * self.sample_rate)
-        for is_on, duration in timing:
+        for class_id, duration in timing:
             num_samples = int(duration * self.sample_rate)
+            is_on = class_id in [1, 2]
             if is_on:
                 t = np.arange(num_samples) / self.sample_rate
                 if waveform_type == 'sine':
@@ -179,7 +154,58 @@ class MorseGenerator:
             
             current_sample += num_samples
             
-        return waveform
+        # Generate multi-class frame-level labels
+        num_frames = (total_samples - config.N_FFT) // config.HOP_LENGTH + 1
+        signal_frames = np.zeros(num_frames, dtype=np.int64) # 0: Background
+        boundary_frames = np.zeros(num_frames, dtype=np.float32)
+        
+        # 境界（Boundary）の定義:
+        # 文字間空白(3ユニット)または単語間空白(7ユニット)が完了した瞬間のフレーム。
+        # つまり、次の文字が開始される直前。
+        
+        # 境界ラベルを確実に立てるためのロジック
+        dot_len_sec = 1.2 / wpm
+        time_ptr = int(pre_silence * self.sample_rate)
+        for class_id, duration in timing:
+            duration_samples = int(duration * self.sample_rate)
+            if class_id in [4, 5]: # Inter-char space or Inter-word space (文字の終了)
+                # 空白の終了時点（＝次の要素の開始直前）を特定
+                trigger_sample = time_ptr + duration_samples
+                
+                # 信号が完全に終了した後の最初のフレームを特定する。
+                # torchaudio center=False では、フレーム m はサンプル m * HOP_LENGTH から始まる。
+                # よって、trigger_sample // HOP_LENGTH が、そのサンプルを含むかそれ以降の最初のフレーム。
+                trigger_frame = trigger_sample // config.HOP_LENGTH
+                
+                # サブサンプリング(2x)で消えないよう、2フレーム分立てる
+                for offset in range(2):
+                    if 0 <= trigger_frame + offset < num_frames:
+                        boundary_frames[trigger_frame + offset] = 1.0
+            
+            time_ptr += duration_samples
+
+        # シーケンスの最後（最後の文字の終了後、文字間空白分(3ユニット)待ってから確定）
+        # 文字間空白を待つことで、信号との重なりを確実に避ける。
+        char_space_samples = int(3 * dot_len_sec * self.sample_rate)
+        trigger_sample_final = time_ptr + char_space_samples
+        trigger_frame_final = trigger_sample_final // config.HOP_LENGTH
+        for offset in range(2):
+            if 0 <= trigger_frame_final + offset < num_frames:
+                boundary_frames[trigger_frame_final + offset] = 1.0
+
+        for i in range(num_frames):
+            center_sample = i * config.HOP_LENGTH + config.N_FFT // 2
+            time_ptr = int(pre_silence * self.sample_rate)
+            for class_id, duration in timing:
+                duration_samples = int(duration * self.sample_rate)
+                if time_ptr <= center_sample < time_ptr + duration_samples:
+                    signal_frames[i] = class_id
+                    break
+                time_ptr += duration_samples
+                if time_ptr > center_sample:
+                    break
+                    
+        return waveform, signal_frames, boundary_frames
 
 class HFChannelSimulator:
     def __init__(self, sample_rate: int = config.SAMPLE_RATE):
@@ -254,14 +280,14 @@ class HFChannelSimulator:
         return scipy.signal.lfilter(b, a, waveform)
 
 def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate: int = config.SAMPLE_RATE,
-                    jitter: float = 0.0, weight: float = 1.0) -> Tuple[torch.Tensor, str]:
+                    jitter: float = 0.0, weight: float = 1.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
     # Human artifacts are now controlled by arguments
     
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
-    waveform = gen.generate_waveform(timing)
+    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, wpm=wpm)
     
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
     if snr_db < 45:
@@ -279,13 +305,14 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
     if max_val > 0:
         waveform /= max_val
         
-    return torch.from_numpy(waveform).float(), text
+    return torch.from_numpy(waveform).float(), text, torch.from_numpy(signal_labels).float(), torch.from_numpy(boundary_labels).float()
 
 class CWDataset(Dataset):
     def __init__(self, num_samples: int = 1000, min_wpm: int = 10, max_wpm: int = 40,
                  min_snr: float = 5.0, max_snr: float = 25.0,
                  jitter_max: float = 0.1, weight_var: float = 0.2,
-                 allowed_chars: str = None, min_len: int = 5, max_len: int = 10):
+                 allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
+                 focus_chars: str = None, focus_prob: float = 0.5):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -298,6 +325,8 @@ class CWDataset(Dataset):
         # config.CHARS includes prosigns now
         self.all_chars = config.CHARS
         self.chars = allowed_chars if allowed_chars else self.all_chars
+        self.focus_chars = focus_chars
+        self.focus_prob = focus_prob
 
     def __len__(self):
         return self.num_samples
@@ -311,7 +340,28 @@ class CWDataset(Dataset):
         valid_tokens = [c for c in self.chars if c != ' ']
         
         # Create a list of tokens
-        tokens = random.choices(valid_tokens, k=length)
+        if self.focus_chars and random.random() < self.focus_prob:
+            # Weighted sampling: Include at least one focus char, and higher prob for others
+            # Mix focus chars and valid tokens
+            focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
+            if focus_valid:
+                # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
+                k_focus = max(1, length // 2)
+                k_other = length - k_focus
+                
+                # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
+                if len(focus_valid) > 1 and k_focus >= len(focus_valid):
+                    tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
+                    tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
+                else:
+                    tokens = random.choices(focus_valid, k=k_focus)
+                
+                tokens += random.choices(valid_tokens, k=k_other)
+                random.shuffle(tokens)
+            else:
+                tokens = random.choices(valid_tokens, k=length)
+        else:
+            tokens = random.choices(valid_tokens, k=length)
         
         # Join them, occasionally adding spaces
         text = ""
@@ -331,16 +381,16 @@ class CWDataset(Dataset):
         # weight is centered at 1.0, variation is +/- weight_var
         weight = 1.0 + random.uniform(-self.weight_var, self.weight_var)
         
-        waveform, label = generate_sample(text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight)
+        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight)
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
-        return waveform, label, wpm
+        return waveform, label, wpm, signal_labels, boundary_labels
 
 if __name__ == "__main__":
     sample_text = "CQ DE KILO CODE K"
     sample_rate = config.SAMPLE_RATE
     print(f"Generating sample: {sample_text}")
     
-    waveform, label = generate_sample(sample_text, wpm=25, snr_db=15, sample_rate=sample_rate)
+    waveform, label, signal_labels = generate_sample(sample_text, wpm=25, snr_db=15, sample_rate=sample_rate)
     
     output_file = "sample_cw.wav"
     # Convert back to numpy for scipy saving
@@ -351,5 +401,5 @@ if __name__ == "__main__":
     
     # Test Dataset
     dataset = CWDataset(num_samples=5)
-    wf, lbl = dataset[0]
-    print(f"Dataset test - Waveform shape: {wf.shape}, Label: {lbl}")
+    wf, lbl, wpm, sig = dataset[0]
+    print(f"Dataset test - Waveform shape: {wf.shape}, Label: {lbl}, Signal shape: {sig.shape}")

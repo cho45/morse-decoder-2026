@@ -42,8 +42,8 @@ def test_model_causality():
     x2[:, 20:, :] += 1.0
     
     with torch.no_grad():
-        y1, _ = model(x1)
-        y2, _ = model(x2)
+        (y1, _, _), _ = model(x1)
+        (y2, _, _), _ = model(x2)
         
     # Check output frames before the change (approx T/2)
     diff = torch.abs(y1[:, :10, :] - y2[:, :10, :]).max().item()
@@ -60,7 +60,7 @@ def test_strict_streaming_consistency():
     x = torch.randn(1, T, config.N_MELS)
     
     with torch.no_grad():
-        y_batch, _ = model(x)
+        (y_batch, _, _), _ = model(x)
     
     # Test different chunk sizes
     for chunk_size in [2, 4, 10]:
@@ -69,7 +69,7 @@ def test_strict_streaming_consistency():
         with torch.no_grad():
             for i in range(0, T, chunk_size):
                 chunk = x[:, i:i+chunk_size, :]
-                y_chunk, states = model(chunk, states)
+                (y_chunk, _, _), states = model(chunk, states)
                 y_streams.append(y_chunk)
         
         y_stream = torch.cat(y_streams, dim=1)

@@ -3,14 +3,9 @@ import csv
 import argparse
 import os
 
-def main():
-    parser = argparse.ArgumentParser(description="Visualize training logs (history.csv)")
-    parser.add_argument("--csv", type=str, default="checkpoints/history.csv", help="Path to history.csv")
-    parser.add_argument("--output", type=str, default="diagnostics/training_curves.png", help="Output path for the plot")
-    args = parser.parse_args()
-
-    if not os.path.exists(args.csv):
-        print(f"Error: {args.csv} not found.")
+def plot_history(csv_path, output_path):
+    if not os.path.exists(csv_path):
+        print(f"Error: {csv_path} not found.")
         return
 
     epochs = []
@@ -19,14 +14,22 @@ def main():
     val_cer = []
     lrs = []
 
-    with open(args.csv, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            epochs.append(int(row['epoch']))
-            train_loss.append(float(row['train_loss']))
-            val_loss.append(float(row['val_loss']))
-            val_cer.append(float(row['val_cer']))
-            lrs.append(float(row['lr']))
+    try:
+        with open(csv_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                epochs.append(int(row['epoch']))
+                train_loss.append(float(row['train_loss']))
+                val_loss.append(float(row['val_loss']))
+                val_cer.append(float(row['val_cer']))
+                lrs.append(float(row['lr']))
+    except Exception as e:
+        print(f"Error reading history csv: {e}")
+        return
+
+    if not epochs:
+        print("No data to plot.")
+        return
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
 
@@ -49,9 +52,18 @@ def main():
     ax2.set_ylim(0, max(1.0, max(val_cer) if val_cer else 1.0))
 
     plt.tight_layout()
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    plt.savefig(args.output)
-    print(f"Saved training curves to {args.output}")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path)
+    print(f"Saved training curves to {output_path}")
+    plt.close(fig) # Close figure to free memory
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize training logs (history.csv)")
+    parser.add_argument("--csv", type=str, default="checkpoints/history.csv", help="Path to history.csv")
+    parser.add_argument("--output", type=str, default="diagnostics/training_curves.png", help="Output path for the plot")
+    args = parser.parse_args()
+
+    plot_history(args.csv, args.output)
 
 if __name__ == "__main__":
     main()

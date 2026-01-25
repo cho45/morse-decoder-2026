@@ -11,9 +11,9 @@ def test_morse_timing():
     timing = gen.generate_timing("A", wpm=20, jitter=0)
     
     assert len(timing) == 3 # dot, inter-symbol, dash
-    assert timing[0] == (True, pytest.approx(1.2 / 20, rel=1e-2)) # dot
-    assert timing[1] == (False, pytest.approx(1.2 / 20, rel=1e-2)) # inter-symbol
-    assert timing[2] == (True, pytest.approx(3 * 1.2 / 20, rel=1e-2)) # dash
+    assert timing[0] == (1, pytest.approx(1.2 / 20, rel=1e-2)) # dot (Dit=1)
+    assert timing[1] == (3, pytest.approx(1.2 / 20, rel=1e-2)) # inter-symbol (Intra-char-space=3)
+    assert timing[2] == (2, pytest.approx(3 * 1.2 / 20, rel=1e-2)) # dash (Dah=2)
 
 def test_morse_timing_spaces():
     gen = MorseGenerator(sample_rate=1000)
@@ -32,17 +32,19 @@ def test_morse_timing_spaces():
     has_word_space = False
     dot_len = 1.2 / 20
     word_space_len = 7 * dot_len
-    for is_on, duration in timing:
-        if not is_on and abs(duration - word_space_len) < 1e-4:
+    for class_id, duration in timing:
+        if class_id == 5 and abs(duration - word_space_len) < 1e-4: # Inter-word space = 5
             has_word_space = True
     assert has_word_space
 
 def test_waveform_generation():
     gen = MorseGenerator(sample_rate=config.SAMPLE_RATE)
-    timing = [(True, 0.1), (False, 0.1), (True, 0.3)]
-    waveform = gen.generate_waveform(timing, frequency=700)
+    timing = [(1, 0.1), (3, 0.1), (2, 0.3)]
+    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=700)
     
     assert isinstance(waveform, np.ndarray)
+    assert isinstance(signal_labels, np.ndarray)
+    assert isinstance(boundary_labels, np.ndarray)
     assert len(waveform) > 0
     assert np.max(np.abs(waveform)) <= 1.0
 
@@ -64,21 +66,24 @@ def test_hf_simulator():
     assert filtered.shape == waveform.shape
 
 def test_generate_sample():
-    waveform, label = generate_sample("TEST", wpm=20, snr_db=20)
+    waveform, label, signal_labels, boundary_labels = generate_sample("TEST", wpm=20, snr_db=20)
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)
+    assert isinstance(signal_labels, torch.Tensor)
+    assert isinstance(boundary_labels, torch.Tensor)
     assert label == "TEST"
     assert waveform.ndim == 1
+    assert isinstance(signal_labels, torch.Tensor)
 
 def test_cw_dataset():
     num_samples = 5
     dataset = CWDataset(num_samples=num_samples)
     assert len(dataset) == num_samples
     
-    # Updated to expect (waveform, label, wpm)
+    # Updated to expect (waveform, label, wpm, signal_labels, boundary_labels)
     item = dataset[0]
-    assert len(item) == 3
-    waveform, label, wpm = item
+    assert len(item) == 5
+    waveform, label, wpm, signal_labels, boundary_labels = item
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)
     assert isinstance(wpm, int)

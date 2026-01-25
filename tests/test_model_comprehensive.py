@@ -144,13 +144,13 @@ def test_model_full_streaming_consistency():
     
     x = torch.randn(1, 200, config.N_MELS).to(device)
     with torch.no_grad():
-        y_batch, _ = model(x)
+        (y_batch, _, _), _ = model(x)
         
         states = None
         y_streams = []
         for i in range(0, 200, 20):
             chunk = x[:, i:i+20, :]
-            y_chunk, states = model(chunk, states)
+            (y_chunk, _, _), states = model(chunk, states)
             y_streams.append(y_chunk)
         y_stream = torch.cat(y_streams, dim=1)
         

@@ -29,6 +29,7 @@ def main():
             self.samples_per_epoch = 1000
             self.batch_size = 1
             self.curriculum_phase = args.phase
+            self.save_dir = "checkpoints"
     
     trainer = train.Trainer(MockArgs())
     
@@ -73,12 +74,12 @@ def main():
 
     print(f"Visualizing {args.num_samples} samples from {phase_name}")
 
-    fig, axes = plt.subplots(args.num_samples, 2, figsize=(15, 4 * args.num_samples))
+    fig, axes = plt.subplots(args.num_samples, 3, figsize=(20, 4 * args.num_samples))
     if args.num_samples == 1:
         axes = np.expand_dims(axes, axis=0)
 
     for i in range(args.num_samples):
-        waveform, label, wpm = dataset[i]
+        waveform, label, wpm, signal_labels = dataset[i]
         
         # Preprocess using trainer's logic
         # waveform is (T,) -> needs (1, T) for mel_transform
@@ -102,6 +103,15 @@ def main():
         ax_mel.set_xlabel("Frames")
         ax_mel.set_ylabel("Mel Bin")
         fig.colorbar(im, ax=ax_mel)
+
+        # Plot Signal Labels
+        ax_sig = axes[i, 2]
+        ax_sig.plot(signal_labels.numpy(), color='green', drawstyle='steps-post')
+        ax_sig.set_title("Signal Labels (On/Off)")
+        ax_sig.set_xlabel("Frames")
+        ax_sig.set_ylabel("State")
+        ax_sig.set_ylim(-0.1, 1.1)
+        ax_sig.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(args.output)
