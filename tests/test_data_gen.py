@@ -80,10 +80,10 @@ def test_cw_dataset():
     dataset = CWDataset(num_samples=num_samples)
     assert len(dataset) == num_samples
     
-    # Updated to expect (waveform, label, wpm, signal_labels, boundary_labels)
+    # Updated to expect (waveform, label, wpm, signal_labels, boundary_labels, is_phrase)
     item = dataset[0]
-    assert len(item) == 5
-    waveform, label, wpm, signal_labels, boundary_labels = item
+    assert len(item) == 6
+    waveform, label, wpm, signal_labels, boundary_labels, is_phrase = item
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)
     assert isinstance(wpm, int)

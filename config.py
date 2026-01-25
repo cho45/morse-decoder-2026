@@ -21,6 +21,41 @@ DROPOUT = 0.1        # ドロップアウト率
 # Streaming Parameters
 MAX_CACHE_LEN = 1000  # ストリーミング推論時の過去キャッシュの最大フレーム数 (約20秒分)
 LOOKAHEAD_FRAMES = 30 # 未来の信号をどれだけ参照するか (10フレーム = 100ms)
+TARGET_FRAMES = 1000  # 学習時のターゲットフレーム数 (約10秒)
+
+# Phrase Generation Parameters
+PHRASE_TEMPLATES = [
+    "CQ CQ CQ",
+    "CQ DE {call}",
+    "QRZ? DE {call}",
+    "DE {call} {call}",
+    "DE {call} K",
+    "TU DE {call}",
+    "UR RST {rst}",
+    "RST {rst} BK",
+    "5NN BK",
+    "QRM ES QSB",
+    "FB SIGS",
+    "QTH {city}",
+    "NAME {name}",
+    "OP {name}",
+    "WX {weather}",
+    "TEMP {temp} C",
+    "TU FER CALL",
+    "GA OM",
+    "GM OM",
+    "GE OM",
+    "PSE K",
+    "FB OM TU",
+    "HW? BK",
+    "QSL? BK",
+    "TNX QSO",
+    "73 GL SK",
+    "73 TU",
+    "SEE U AGW",
+    "{call} DE {call} CL",
+]
+COMMON_WEATHER = ["FINE", "RAIN", "CLOUDY", "SNOW", "SUNNY", "HOT", "COLD"]
 
 # Signal Task Parameters
 # 0: Background/Padding, 1: Dit, 2: Dah, 3: Intra-char space, 4: Inter-char space, 5: Inter-word space

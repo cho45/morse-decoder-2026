@@ -269,9 +269,9 @@ class Trainer:
         if 'phases_since_last_advance' in checkpoint:
             self.phases_since_last_advance = checkpoint['phases_since_last_advance']
             
-    def collate_fn(self, batch: List[Tuple[torch.Tensor, str, int, torch.Tensor, torch.Tensor]]):
-        # batch is a list of (waveform, text, wpm, signal_labels, boundary_labels)
-        waveforms, texts, wpms, signal_labels, boundary_labels = zip(*batch)
+    def collate_fn(self, batch: List[Tuple[torch.Tensor, str, int, torch.Tensor, torch.Tensor, bool]]):
+        # batch is a list of (waveform, text, wpm, signal_labels, boundary_labels, is_phrase)
+        waveforms, texts, wpms, signal_labels, boundary_labels, is_phrases = zip(*batch)
         
         # Physical Lookahead Alignment:
         # Add LOOKAHEAD_FRAMES at the end of each waveform to allow the causal model
@@ -336,7 +336,7 @@ class Trainer:
             label_list.extend(encoded)
             label_lengths.append(len(encoded))
             
-        return padded_waveforms, torch.tensor(label_list, dtype=torch.long), lengths, torch.tensor(label_lengths, dtype=torch.long), texts, torch.tensor(wpms), padded_signals, padded_boundaries
+        return padded_waveforms, torch.tensor(label_list, dtype=torch.long), lengths, torch.tensor(label_lengths, dtype=torch.long), texts, torch.tensor(wpms), padded_signals, padded_boundaries, torch.tensor(is_phrases)
 
     def compute_mels_and_lengths(self, waveforms, lengths):
         x = waveforms.to(self.device)
@@ -491,7 +491,11 @@ class Trainer:
 
             # Apply weighted sampling for characters (must be after Drill Mode expansion)
             self.train_dataset.focus_chars = new_chars
-            print(f"Epoch {epoch} | Koch Phase {phase}: Chars={current_chars} (20 Wpm, Clean) | Focus: {new_chars} | Focus Prob: {self.train_dataset.focus_prob}")
+            
+            # コッホ学習中は文字認識に集中するため定型文は導入しない
+            self.train_dataset.phrase_prob = 0.0
+                
+            print(f"Epoch {epoch} | Koch Phase {phase}: Chars={current_chars} (20 Wpm, Clean) | Focus: {new_chars}")
 
         elif phase == max_koch_phase + 1:
             # All characters (including prosigns), still clean
@@ -505,7 +509,8 @@ class Trainer:
             self.train_dataset.min_len = 5
             self.train_dataset.max_len = 8 # OOM回避のため少し短縮
             self.train_dataset.focus_chars = None # No focus in full phase
-            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Clean")
+            self.train_dataset.phrase_prob = 0.3
+            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Clean | Phrase Prob: {self.train_dataset.phrase_prob:.2f}")
 
         elif phase == max_koch_phase + 2:
             # Slight variations (No Fading yet)
@@ -518,7 +523,8 @@ class Trainer:
             self.train_dataset.fading_speed_min = 0.0
             self.train_dataset.fading_speed_max = 0.0
             self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations (No Fading)")
+            self.train_dataset.phrase_prob = 0.5 # 実戦的なバリエーションを増やす
+            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations (No Fading) | Phrase Prob: {self.train_dataset.phrase_prob:.2f}")
 
         elif phase == max_koch_phase + 3:
             # Practical SNR (15-25dB) with moderate fading
@@ -526,6 +532,7 @@ class Trainer:
             self.train_dataset.max_snr = 25.0
             self.train_dataset.min_fading = 0.2 # Start with fading to learn its pattern
             self.train_dataset.fading_speed_max = 0.1
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Practical SNR (15-25dB), Deep Fading (min_fading=0.2)")
 
         elif phase == max_koch_phase + 4:
@@ -533,6 +540,7 @@ class Trainer:
             self.train_dataset.min_snr = 10.0
             self.train_dataset.max_snr = 20.0
             self.train_dataset.min_fading = 0.3 # Reduce fading depth as SNR drops
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Transition SNR (10-20dB), Moderate Fading (min_fading=0.3)")
 
         elif phase == max_koch_phase + 5:
@@ -540,6 +548,7 @@ class Trainer:
             self.train_dataset.min_snr = 5.0
             self.train_dataset.max_snr = 15.0
             self.train_dataset.min_fading = 0.4
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (5-15dB), Weak Fading (min_fading=0.4)")
 
         elif phase == max_koch_phase + 6:
@@ -547,6 +556,7 @@ class Trainer:
             self.train_dataset.min_snr = 0.0
             self.train_dataset.max_snr = 10.0
             self.train_dataset.min_fading = 0.5
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Zero SNR Entry (0-10dB), Stable (min_fading=0.5)")
 
         elif phase == max_koch_phase + 7:
@@ -554,6 +564,7 @@ class Trainer:
             self.train_dataset.min_snr = -5.0
             self.train_dataset.max_snr = 5.0
             self.train_dataset.min_fading = 0.6
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB), Very Stable (min_fading=0.6)")
 
         elif phase == max_koch_phase + 8:
@@ -562,6 +573,7 @@ class Trainer:
             self.train_dataset.max_snr = 2.0
             self.train_dataset.min_fading = 0.8
             self.train_dataset.fading_speed_max = 0.05
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Target SNR (-8 to 2dB), Rock Solid (min_fading=0.8)")
 
         elif phase == max_koch_phase + 9:
@@ -569,6 +581,7 @@ class Trainer:
             self.train_dataset.min_snr = -11.0
             self.train_dataset.max_snr = -1.0
             self.train_dataset.min_fading = 0.9
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-11 to -1dB), Rock Solid (min_fading=0.9)")
 
         elif phase == max_koch_phase + 10:
@@ -576,6 +589,7 @@ class Trainer:
             self.train_dataset.min_snr = -14.0
             self.train_dataset.max_snr = -4.0
             self.train_dataset.min_fading = 0.9
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-14 to -4dB), Rock Solid (min_fading=0.9)")
 
         elif phase == max_koch_phase + 11:
@@ -583,6 +597,7 @@ class Trainer:
             self.train_dataset.min_snr = -18.0
             self.train_dataset.max_snr = -8.0
             self.train_dataset.min_fading = 0.9
+            self.train_dataset.phrase_prob = 0.5
             print(f"Epoch {epoch} | Phase {phase}: Human Limit Entry (-18 to -8dB), Rock Solid (min_fading=0.9)")
 
         elif phase == max_koch_phase + 12:
@@ -591,6 +606,7 @@ class Trainer:
             self.train_dataset.max_snr = 0.0
             self.train_dataset.min_fading = 0.4
             self.train_dataset.fading_speed_max = 0.1
+            self.train_dataset.phrase_prob = 0.7
             print(f"Epoch {epoch} | Phase {phase}: Re-introducing Fading (-10 to 0dB), (min_fading=0.4)")
 
         elif phase == max_koch_phase + 13:
@@ -599,6 +615,7 @@ class Trainer:
             self.train_dataset.max_snr = -8.0
             self.train_dataset.min_fading = 0.2
             self.train_dataset.fading_speed_max = 0.2
+            self.train_dataset.phrase_prob = 0.7
             print(f"Epoch {epoch} | Phase {phase}: Deep Fading at Human Limit (-18 to -8dB), (min_fading=0.2)")
 
         else:
@@ -607,6 +624,7 @@ class Trainer:
             self.train_dataset.max_snr = -12.0
             self.train_dataset.min_fading = 0.1
             self.train_dataset.fading_speed_max = 0.4
+            self.train_dataset.phrase_prob = 0.7
             print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-22 to -12dB), Max Fading (min_fading=0.1)")
 
         # Apply same curriculum to validation dataset
@@ -624,10 +642,11 @@ class Trainer:
         self.val_dataset.max_len = self.train_dataset.max_len
         self.val_dataset.focus_chars = self.train_dataset.focus_chars
         self.val_dataset.focus_prob = self.train_dataset.focus_prob
+        self.val_dataset.phrase_prob = self.train_dataset.phrase_prob
 
         total_loss_accum = 0
         dataloader = DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=self.collate_fn)
-        for batch_idx, (waveforms, targets, lengths, target_lengths, _, _, signal_targets, boundary_targets) in enumerate(dataloader):
+        for batch_idx, (waveforms, targets, lengths, target_lengths, _, _, signal_targets, boundary_targets, _) in enumerate(dataloader):
             # アライメント矯正のための「再加熱」ロジック
             # 停滞している場合（Epoch 60以降など）、一時的に LR を上げて局所解から脱出させる
             total_warmup_batches = len(dataloader)
@@ -689,6 +708,12 @@ class Trainer:
         total_edit_distance = 0
         total_ref_length = 0
         
+        # 分離計測用
+        total_dist_phrase = 0
+        total_len_phrase = 0
+        total_dist_random = 0
+        total_len_random = 0
+        
         dataloader = DataLoader(self.val_dataset, batch_size=self.args.batch_size, shuffle=False, collate_fn=self.collate_fn)
         
         last_ref = ""
@@ -696,7 +721,7 @@ class Trainer:
         timed_hyp = ""
         
         with torch.no_grad():
-            for waveforms, targets, lengths, target_lengths, texts, wpms, signal_targets, boundary_targets in dataloader:
+            for waveforms, targets, lengths, target_lengths, texts, wpms, signal_targets, boundary_targets, is_phrases in dataloader:
                 mels, input_lengths = self.compute_mels_and_lengths(waveforms, lengths)
                 targets = targets.to(self.device)
                 target_lengths = target_lengths.to(self.device)
@@ -752,13 +777,23 @@ class Trainer:
                     total_edit_distance += dist
                     total_ref_length += len(reference_no_space)
                     
+                    if is_phrases[i]:
+                        total_dist_phrase += dist
+                        total_len_phrase += len(reference_no_space)
+                    else:
+                        total_dist_random += dist
+                        total_len_random += len(reference_no_space)
+
                     last_ref = reference
                     last_hyp = hypothesis
                     timed_hyp = " ".join([f"{ID_TO_CHAR.get(idx, '')}({pos})" for idx, pos in zip(decoded_indices, decoded_positions)])
                     
         avg_loss = total_loss / len(dataloader)
         avg_cer = total_edit_distance / total_ref_length if total_ref_length > 0 else 0.0
-        print(f"Validation Epoch {epoch} | Avg Loss: {avg_loss:.4f} | CER: {avg_cer:.4f}")
+        cer_phrase = total_dist_phrase / total_len_phrase if total_len_phrase > 0 else 0.0
+        cer_random = total_dist_random / total_len_random if total_len_random > 0 else 0.0
+        
+        print(f"Validation Epoch {epoch} | Avg Loss: {avg_loss:.4f} | CER: {avg_cer:.4f} (Phrase: {cer_phrase:.4f}, Random: {cer_random:.4f})")
         
         # 0:bg(_), 1:dit(#), 2:dah(=), 3:intra(.), 4:inter( ), 5:word( )
         class_map = {0: '_', 1: '#', 2: '=', 3: '.', 4: ' ', 5: ' '}
@@ -788,9 +823,9 @@ class Trainer:
             if last_pos > total_len * 0.9:
                 print(f"  WARNING: Alignment collapse detected! Last char at {last_pos}/{total_len}")
 
-        return avg_loss, avg_cer
+        return avg_loss, avg_cer, cer_phrase, cer_random
 
-    def save_checkpoint(self, epoch, train_loss, val_loss, val_cer):
+    def save_checkpoint(self, epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random):
         os.makedirs(self.args.save_dir, exist_ok=True)
         
         path = os.path.join(self.args.save_dir, f"checkpoint_epoch_{epoch}.pt")
@@ -810,12 +845,14 @@ class Trainer:
         with open(self.history_path, 'a', newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_cer', 'lr', 'phase', 'stagnation'])
+                writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_cer', 'cer_phrase', 'cer_random', 'lr', 'phase', 'stagnation'])
             writer.writerow([
                 epoch,
                 f"{train_loss:.6f}",
                 f"{val_loss:.6f}",
                 f"{val_cer:.6f}",
+                f"{cer_phrase:.6f}",
+                f"{cer_random:.6f}",
                 f"{self.optimizer.param_groups[0]['lr']:.8f}",
                 self.current_phase,
                 self.phases_since_last_advance
@@ -925,12 +962,12 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         start_time = time.time()
         train_loss = trainer.train_epoch(epoch)
-        val_loss, val_cer = trainer.validate(epoch)
+        val_loss, val_cer, cer_phrase, cer_random = trainer.validate(epoch)
         trainer.scheduler.step(val_cer)
         duration = time.time() - start_time
-        print(f"Epoch {epoch} finished in {duration:.2f}s | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val CER: {val_cer:.4f}")
+        print(f"Epoch {epoch} finished in {duration:.2f}s | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val CER: {val_cer:.4f} (P: {cer_phrase:.4f}, R: {cer_random:.4f})")
         trainer.update_curriculum(val_cer)
-        trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer)
+        trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random)
         try:
             visualize_logs.plot_history(trainer.history_path, os.path.join(args.save_dir, "training_curves.png"))
         except:

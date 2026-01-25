@@ -19,6 +19,8 @@ def plot_history(csv_path, output_path):
                         'train_loss': float(row['train_loss']),
                         'val_loss': float(row['val_loss']),
                         'val_cer': float(row['val_cer']),
+                        'cer_phrase': float(row.get('cer_phrase', 0)),
+                        'cer_random': float(row.get('cer_random', 0)),
                         'lr': float(row['lr']),
                         'phase': int(row.get('phase', 0))
                     }
@@ -39,6 +41,8 @@ def plot_history(csv_path, output_path):
     train_loss = [data[ep]['train_loss'] for ep in epochs]
     val_loss = [data[ep]['val_loss'] for ep in epochs]
     val_cer = [data[ep]['val_cer'] for ep in epochs]
+    cer_phrase = [data[ep]['cer_phrase'] for ep in epochs]
+    cer_random = [data[ep]['cer_random'] for ep in epochs]
     lrs = [data[ep]['lr'] for ep in epochs]
     phases = [data[ep]['phase'] for ep in epochs]
 
@@ -54,7 +58,13 @@ def plot_history(csv_path, output_path):
     ax1.set_yscale('log')
 
     # Plot CER
-    ax2.plot(epochs, val_cer, label='Val CER', color='red', marker='s', markersize=4)
+    ax2.plot(epochs, val_cer, label='Total CER', color='red', marker='s', markersize=4, linewidth=2)
+    # Only plot phrase/random CER if they are non-zero (i.e. after they were introduced)
+    if any(c > 0 for c in cer_phrase):
+        ax2.plot(epochs, cer_phrase, label='Phrase CER', color='blue', marker='o', markersize=3, alpha=0.6, linestyle='--')
+    if any(c > 0 for c in cer_random):
+        ax2.plot(epochs, cer_random, label='Random CER', color='orange', marker='x', markersize=3, alpha=0.6, linestyle='--')
+        
     ax2.set_ylabel('Character Error Rate (CER)')
     ax2.set_xlabel('Epoch')
     ax2.set_title('Validation CER')

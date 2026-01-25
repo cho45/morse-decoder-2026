@@ -110,6 +110,34 @@ class MorseGenerator:
         
         return timing
 
+    def estimate_wpm_for_target_frames(self, text: str, target_frames: int = config.TARGET_FRAMES,
+                                      min_wpm: int = 15, max_wpm: int = 45) -> int:
+        """
+        Estimate the WPM needed to fit the text into target_frames.
+        """
+        # Roughly 50 units per word (PARIS standard)
+        # 1 WPM = 50 units per minute = 50/60 units per second
+        # Duration (sec) = units / (WPM * 50 / 60) = (1.2 * units) / WPM
+        
+        # Count approximate units in text
+        tokens = self.text_to_morse_tokens(text)
+        total_units = 0
+        for token in tokens:
+            code = MORSE_DICT.get(token, "")
+            for symbol in code:
+                if symbol == '.': total_units += 1
+                elif symbol == '-': total_units += 3
+                total_units += 1 # Intra-char space
+            total_units += 3 # Inter-char space
+        
+        target_sec = target_frames * config.HOP_LENGTH / self.sample_rate
+        
+        # WPM = (1.2 * units) / sec
+        if target_sec <= 0: return max_wpm
+        needed_wpm = (1.2 * total_units) / target_sec
+        
+        return int(np.clip(needed_wpm, min_wpm, max_wpm))
+
     def generate_waveform(self, timing: List[Tuple[int, float]], frequency: float = 700.0,
                           waveform_type: str = 'sine', rise_time: float = 0.005, wpm: int = 20) -> np.ndarray:
         """
@@ -317,7 +345,8 @@ class CWDataset(Dataset):
                  allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
                  focus_chars: str = None, focus_prob: float = 0.5,
                  fading_speed_min: float = 0.1, fading_speed_max: float = 0.1,
-                 min_fading: float = 0.1):
+                 min_fading: float = 0.1,
+                 phrase_prob: float = 0.0):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -335,53 +364,88 @@ class CWDataset(Dataset):
         self.chars = allowed_chars if allowed_chars else self.all_chars
         self.focus_chars = focus_chars
         self.focus_prob = focus_prob
+        self.phrase_prob = phrase_prob
+        self.gen = MorseGenerator()
+
+    def generate_random_callsign(self) -> str:
+        """Generate a realistic random callsign."""
+        prefix_len = random.randint(1, 2)
+        prefix = "".join(random.choices(string.ascii_uppercase, k=prefix_len))
+        digit = random.choice(string.digits)
+        suffix_len = random.randint(1, 3)
+        suffix = "".join(random.choices(string.ascii_uppercase, k=suffix_len))
+        call = f"{prefix}{digit}{suffix}"
+        if random.random() < 0.2: # Mobile operation
+            call += f"/{random.choice(string.digits)}"
+        return call
+
+    def generate_phrase(self) -> str:
+        """Generate a text from templates."""
+        template = random.choice(config.PHRASE_TEMPLATES)
+        call = self.generate_random_callsign()
+        # Generate random strings for name and city to avoid hallucination
+        name = "".join(random.choices(string.ascii_uppercase, k=random.randint(3, 6)))
+        city = "".join(random.choices(string.ascii_uppercase, k=random.randint(3, 8)))
+        weather = random.choice(config.COMMON_WEATHER)
+        temp = random.randint(-5, 35)
+        rst = f"{random.randint(4, 5)}{random.randint(7, 9)}{random.randint(7, 9)}"
+        # 599 -> 5NN conversion for realism
+        rst = rst.replace('9', 'N')
+        
+        return template.format(call=call, name=name, city=city, rst=rst, weather=weather, temp=temp)
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # Generate random text
-        length = random.randint(self.min_len, self.max_len)
-        
-        # Randomly choose from available tokens (chars + prosigns)
-        # Filter out spaces for random choice, we will add them manually
-        valid_tokens = [c for c in self.chars if c != ' ']
-        
-        # Create a list of tokens
-        if self.focus_chars and random.random() < self.focus_prob:
-            # Weighted sampling: Include at least one focus char, and higher prob for others
-            # Mix focus chars and valid tokens
-            focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
-            if focus_valid:
-                # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
-                k_focus = max(1, length // 2)
-                k_other = length - k_focus
-                
-                # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
-                if len(focus_valid) > 1 and k_focus >= len(focus_valid):
-                    tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
-                    tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
+        is_phrase = random.random() < self.phrase_prob
+        if is_phrase:
+            text = self.generate_phrase()
+            # Adaptive WPM for phrases to fit in TARGET_FRAMES
+            wpm = self.gen.estimate_wpm_for_target_frames(text, target_frames=config.TARGET_FRAMES)
+        else:
+            # Generate random text
+            length = random.randint(self.min_len, self.max_len)
+            
+            # Randomly choose from available tokens (chars + prosigns)
+            # Filter out spaces for random choice, we will add them manually
+            valid_tokens = [c for c in self.chars if c != ' ']
+            
+            # Create a list of tokens
+            if self.focus_chars and random.random() < self.focus_prob:
+                # Weighted sampling: Include at least one focus char, and higher prob for others
+                # Mix focus chars and valid tokens
+                focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
+                if focus_valid:
+                    # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
+                    k_focus = max(1, length // 2)
+                    k_other = length - k_focus
+                    
+                    # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
+                    if len(focus_valid) > 1 and k_focus >= len(focus_valid):
+                        tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
+                        tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
+                    else:
+                        tokens = random.choices(focus_valid, k=k_focus)
+                    
+                    tokens += random.choices(valid_tokens, k=k_other)
+                    random.shuffle(tokens)
                 else:
-                    tokens = random.choices(focus_valid, k=k_focus)
-                
-                tokens += random.choices(valid_tokens, k=k_other)
-                random.shuffle(tokens)
+                    tokens = random.choices(valid_tokens, k=length)
             else:
                 tokens = random.choices(valid_tokens, k=length)
-        else:
-            tokens = random.choices(valid_tokens, k=length)
-        
-        # Join them, occasionally adding spaces
-        text = ""
-        for t in tokens:
-            text += t
-            if random.random() < 0.2:
-                text += " "
-        text = text.strip()
-        
-        if not text: text = "CQ"
-        
-        wpm = random.randint(self.min_wpm, self.max_wpm)
+            
+            # Join them, occasionally adding spaces
+            text = ""
+            for t in tokens:
+                text += t
+                if random.random() < 0.2:
+                    text += " "
+            text = text.strip()
+            
+            if not text: text = "CQ"
+            
+            wpm = random.randint(self.min_wpm, self.max_wpm)
         snr = random.uniform(self.min_snr, self.max_snr)
         
         # Determine jitter and weight based on curriculum settings
@@ -396,7 +460,7 @@ class CWDataset(Dataset):
             fading_speed=fading_speed, min_fading=self.min_fading
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
-        return waveform, label, wpm, signal_labels, boundary_labels
+        return waveform, label, wpm, signal_labels, boundary_labels, is_phrase
 
 if __name__ == "__main__":
     sample_text = "CQ DE KILO CODE K"
