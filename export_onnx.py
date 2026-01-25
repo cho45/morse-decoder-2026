@@ -160,7 +160,7 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export StreamingConformer model to ONNX format")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
-    parser.add_argument("--output", type=str, default="cw_decoder.onnx", help="Output ONNX file path")
+    parser.add_argument("--output", type=str, default="demo/cw_decoder.onnx", help="Output ONNX file path")
     args = parser.parse_args()
 
     export(checkpoint_path=args.checkpoint, output_path=args.output)

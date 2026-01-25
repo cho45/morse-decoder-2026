@@ -218,7 +218,9 @@ class Trainer:
                 # Phase N: len(KOCH_CHARS) chars -> N = len(KOCH_CHARS) - 2
                 # + 2 phases for Full Clean and Slight Variations
                 # + 1 phase for Realistic
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 7
+                # 7 phases were: FullClean, SlightVar, Practical, Boundary, NegEntry, DeepNeg, TrueExtreme
+                # Now we expand to more steps for smoother SNR transition and fading resistance
+                max_phase = (len(KOCH_CHARS) - 4) + 2 + 12
                 
                 if self.current_phase < max_phase:
                     print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
@@ -513,69 +515,80 @@ class Trainer:
             print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations (No Fading)")
 
         elif phase == max_koch_phase + 3:
-            # Practical SNR with weak fading
-            self.train_dataset.min_wpm = 15
-            self.train_dataset.max_wpm = 35
-            self.train_dataset.min_snr = 10.0
-            self.train_dataset.max_snr = 20.0
-            self.train_dataset.jitter_max = 0.05
-            self.train_dataset.weight_var = 0.10
-            self.train_dataset.fading_speed_min = 0.05
+            # Practical SNR (15-25dB) with moderate fading
+            self.train_dataset.min_snr = 15.0
+            self.train_dataset.max_snr = 25.0
+            self.train_dataset.min_fading = 0.2 # Start with fading to learn its pattern
             self.train_dataset.fading_speed_max = 0.1
-            self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Practical SNR (10-20dB) with Weak Fading")
+            print(f"Epoch {epoch} | Phase {phase}: Practical SNR (15-25dB), Deep Fading (min_fading=0.2)")
 
         elif phase == max_koch_phase + 4:
-            # Boundary SNR
-            self.train_dataset.min_wpm = 15
-            self.train_dataset.max_wpm = 40
-            self.train_dataset.min_snr = 0.0
-            self.train_dataset.max_snr = 10.0
-            self.train_dataset.jitter_max = 0.08
-            self.train_dataset.weight_var = 0.12
-            self.train_dataset.fading_speed_min = 0.1
-            self.train_dataset.fading_speed_max = 0.2
-            self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (0-10dB)")
+            # Transition SNR (10-20dB)
+            self.train_dataset.min_snr = 10.0
+            self.train_dataset.max_snr = 20.0
+            self.train_dataset.min_fading = 0.3 # Reduce fading depth as SNR drops
+            print(f"Epoch {epoch} | Phase {phase}: Transition SNR (10-20dB), Moderate Fading (min_fading=0.3)")
 
         elif phase == max_koch_phase + 5:
-            # Negative SNR Entry
-            self.train_dataset.min_wpm = 15
-            self.train_dataset.max_wpm = 40
-            self.train_dataset.min_snr = -5.0
-            self.train_dataset.max_snr = 5.0
-            self.train_dataset.jitter_max = 0.10
-            self.train_dataset.weight_var = 0.15
-            self.train_dataset.fading_speed_min = 0.1
-            self.train_dataset.fading_speed_max = 0.3
-            self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB)")
+            # Boundary SNR (5-15dB)
+            self.train_dataset.min_snr = 5.0
+            self.train_dataset.max_snr = 15.0
+            self.train_dataset.min_fading = 0.4
+            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (5-15dB), Weak Fading (min_fading=0.4)")
 
         elif phase == max_koch_phase + 6:
-            # Deep Negative SNR
-            self.train_dataset.min_wpm = 15
-            self.train_dataset.max_wpm = 40
+            # Zero SNR Entry (0-10dB)
+            self.train_dataset.min_snr = 0.0
+            self.train_dataset.max_snr = 10.0
+            self.train_dataset.min_fading = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Zero SNR Entry (0-10dB), Stable (min_fading=0.5)")
+
+        elif phase == max_koch_phase + 7:
+            # Negative SNR Entry (-5 to 5dB)
+            self.train_dataset.min_snr = -5.0
+            self.train_dataset.max_snr = 5.0
+            self.train_dataset.min_fading = 0.6
+            print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB), Very Stable (min_fading=0.6)")
+
+        elif phase == max_koch_phase + 8:
+            # Target SNR: -10dB focus (-10 to 0dB)
+            # Focus on pure noise robustness with almost no fading
             self.train_dataset.min_snr = -10.0
             self.train_dataset.max_snr = 0.0
-            self.train_dataset.jitter_max = 0.10
-            self.train_dataset.weight_var = 0.15
-            self.train_dataset.fading_speed_min = 0.1
-            self.train_dataset.fading_speed_max = 0.4
-            self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-10 to 0dB)")
+            self.train_dataset.min_fading = 0.8
+            self.train_dataset.fading_speed_max = 0.05
+            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-10 to 0dB), Rock Solid (min_fading=0.8)")
 
-        else:
-            # True Extreme
-            self.train_dataset.min_wpm = 15
-            self.train_dataset.max_wpm = 40
+        elif phase == max_koch_phase + 9:
+            # Deep Negative (-15 to -5dB)
             self.train_dataset.min_snr = -15.0
             self.train_dataset.max_snr = -5.0
-            self.train_dataset.jitter_max = 0.10
-            self.train_dataset.weight_var = 0.15
-            self.train_dataset.fading_speed_min = 0.1
-            self.train_dataset.fading_speed_max = 0.5
-            self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB)")
+            self.train_dataset.min_fading = 0.9 # Almost no fading
+            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-15 to -5dB), Rock Solid (min_fading=0.9)")
+
+        elif phase == max_koch_phase + 10:
+            # Now re-introduce fading at -10dB SNR
+            self.train_dataset.min_snr = -10.0
+            self.train_dataset.max_snr = 0.0
+            self.train_dataset.min_fading = 0.4
+            self.train_dataset.fading_speed_max = 0.1
+            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-10 to 0dB), Re-introducing Fading (min_fading=0.4)")
+
+        elif phase == max_koch_phase + 11:
+            # Extreme Challenge: Deep Negative with Deep Fading
+            self.train_dataset.min_snr = -15.0
+            self.train_dataset.max_snr = -5.0
+            self.train_dataset.min_fading = 0.2
+            self.train_dataset.fading_speed_max = 0.2
+            print(f"Epoch {epoch} | Phase {phase}: Extreme SNR, Deep Fading (min_fading=0.2)")
+
+        else:
+            # True Extreme (Final Boss)
+            self.train_dataset.min_snr = -20.0
+            self.train_dataset.max_snr = -10.0
+            self.train_dataset.min_fading = 0.1
+            self.train_dataset.fading_speed_max = 0.4
+            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-20 to -10dB), Max Fading (min_fading=0.1)")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm

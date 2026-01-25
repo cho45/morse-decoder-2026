@@ -42,6 +42,7 @@ let noiseNode = null;
 let filterNode = null;
 let session = null;
 let isRunning = false;
+let isInferenceRunning = false; // 推論の重なりを防止
 let currentStates = null;
 let audioBuffer = new Float32Array(N_FFT); // Sliding window for FFT
 let melFilters = null;
@@ -51,6 +52,7 @@ let lastCharId = 0;
 let decodedEvents = []; // {char: string, pos: number} for visualization
 let morseAbortController = null;
 let totalFrames = 0;
+let skipCount = 0;
 
 // Visualization Buffers (History)
 const HISTORY_LEN = 200; // Number of frames to show
@@ -139,9 +141,28 @@ function createMelFilters(n_mels, n_fft, sample_rate) {
 async function initONNX() {
     try {
         status.textContent = "モデル読み込み中...";
-        session = await ort.InferenceSession.create('./cw_decoder.onnx', { executionProviders: ['wasm'] });
-        status.textContent = "準備完了";
-        debugInfo.innerHTML = "モデル: 読み込み完了<br>処理フレーム数: 0<br>レイテンシ: 0ms";
+        
+        // URLハッシュでプロバイダーを切り替え (#webgpu または #wasm)
+        const useWebGPU = window.location.hash === '#webgpu';
+        const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
+        
+        session = await ort.InferenceSession.create('./cw_decoder.onnx', {
+            executionProviders: providers
+        });
+        
+        // 実際に使用されているプロバイダー名を取得
+        let provider = 'unknown';
+        if (session.executionProviders && session.executionProviders.length > 0) {
+            provider = session.executionProviders[0];
+        } else if (session.handler) {
+            // handler の型名から判定を試みる (OnnxruntimeWebBackendWasm, OnnxruntimeWebBackendWebgpu など)
+            const handlerName = session.handler.constructor.name.toLowerCase();
+            if (handlerName.includes('webgpu')) provider = 'webgpu';
+            else if (handlerName.includes('wasm')) provider = 'wasm';
+            else provider = session.handler.epName || handlerName;
+        }
+        status.textContent = `準備完了 (${provider})`;
+        debugInfo.innerHTML = `モデル: 読み込み完了 (${provider})<br>モード切替: URLに #webgpu または #wasm を追加<br>スキップ数: 0`;
     } catch (e) {
         status.textContent = "モデル読み込み失敗: " + e;
         console.error(e);
@@ -163,21 +184,46 @@ function initStates() {
 
 async function runInference(melFrame, tLen = 1) {
     if (!session || !currentStates) return;
+    if (isInferenceRunning) {
+        // 推論が追いついていない場合はスキップ
+        skipCount++;
+        console.warn(`Inference skipped (busy) - Total skips: ${skipCount}`);
+        updateDebugInfo();
+        return;
+    }
+    isInferenceRunning = true;
 
     const start = performance.now();
-    const x = new ort.Tensor('float32', melFrame, [1, tLen, N_MELS]);
-    const inputs = { x, ...currentStates };
+    let x = null;
+    try {
+        x = new ort.Tensor('float32', melFrame, [1, tLen, N_MELS]);
+        const inputs = { x, ...currentStates };
 
-    const results = await session.run(inputs);
-    
-    // Update states
-    currentStates.sub_cache = results.new_sub_cache;
-    for (let i = 0; i < NUM_LAYERS; i++) {
-        currentStates[`attn_k_${i}`] = results[`new_attn_k_${i}`];
-        currentStates[`attn_v_${i}`] = results[`new_attn_v_${i}`];
-        currentStates[`offset_${i}`] = results[`new_offset_${i}`];
-        currentStates[`conv_cache_${i}`] = results[`new_conv_cache_${i}`];
-    }
+        const results = await session.run(inputs);
+        
+        // 新しい状態をセットし、古い状態をリストアップ
+        const oldStateValues = Object.values(currentStates);
+        
+        const nextStates = {};
+        nextStates.sub_cache = results.new_sub_cache;
+        for (let i = 0; i < NUM_LAYERS; i++) {
+            nextStates[`attn_k_${i}`] = results[`new_attn_k_${i}`];
+            nextStates[`attn_v_${i}`] = results[`new_attn_v_${i}`];
+            nextStates[`offset_${i}`] = results[`new_offset_${i}`];
+            nextStates[`conv_cache_${i}`] = results[`new_conv_cache_${i}`];
+        }
+        currentStates = nextStates;
+
+        // 古い状態テンソルを明示的に破棄 (WebGPU メモリ解放)
+        // 初期状態の空テンソルや、新しい状態と同一のインスタンスは破棄しない
+        const nextStateValues = Object.values(currentStates);
+        oldStateValues.forEach(t => {
+            if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
+                if (!nextStateValues.includes(t)) {
+                    t.dispose();
+                }
+            }
+        });
 
     // Data for visualization (only last frame of the chunk for simplicity in history)
     const numOutFrames = results.logits.dims[1];
@@ -237,12 +283,78 @@ async function runInference(melFrame, tLen = 1) {
     }
 
     drawVisualizations();
+    updateDebugInfo(start);
 
-    const end = performance.now();
-    // Safe conversion of BigInt to Number for Math.floor
+    // 出力テンソルの破棄 (results 内の各テンソル)
+        Object.values(results).forEach(t => {
+            // ただし、currentStates に代入したものは破棄してはいけない
+            // ここでは logits など、状態以外のテンソルを破棄する
+            // 実際には、currentStates に代入しなかったものだけを特定して破棄する
+            if (t && t.dispose && !Object.values(currentStates).includes(t)) {
+                t.dispose();
+            }
+        });
+
+    } catch (e) {
+        console.error("Inference error:", e);
+    } finally {
+        if (x) x.dispose();
+        isInferenceRunning = false;
+    }
+}
+
+function updateDebugInfo(startTime = null) {
+    if (!session || !currentStates) return;
+    
+    let provider = 'unknown';
+    if (session.executionProviders && session.executionProviders.length > 0) {
+        provider = session.executionProviders[0];
+    } else if (session.handler) {
+        const handlerName = session.handler.constructor.name.toLowerCase();
+        if (handlerName.includes('webgpu')) provider = 'webgpu';
+        else if (handlerName.includes('wasm')) provider = 'wasm';
+        else provider = session.handler.epName || 'unknown';
+    }
+
     const offset = currentStates.offset_0.data[0];
     const offsetNum = typeof offset === 'bigint' ? Number(offset) : offset;
-    debugInfo.innerHTML = `モデル: 動作中<br>処理フレーム数: ${Math.floor(offsetNum)}<br>レイテンシ: ${(end - start).toFixed(1)}ms`;
+    
+    let latencyInfo = "";
+    if (startTime) {
+        const end = performance.now();
+        latencyInfo = `<br>レイテンシ: ${(end - startTime).toFixed(1)}ms`;
+    }
+
+    debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${provider})<br>` +
+                         `処理フレーム数: ${Math.floor(offsetNum)}<br>` +
+                         `スキップ数: ${skipCount}${latencyInfo}`;
+}
+
+function updateDebugInfo(startTime = null) {
+    if (!session || !currentStates) return;
+    
+    let provider = 'unknown';
+    if (session.executionProviders && session.executionProviders.length > 0) {
+        provider = session.executionProviders[0];
+    } else if (session.handler) {
+        const handlerName = session.handler.constructor.name.toLowerCase();
+        if (handlerName.includes('webgpu')) provider = 'webgpu';
+        else if (handlerName.includes('wasm')) provider = 'wasm';
+        else provider = session.handler.epName || 'unknown';
+    }
+
+    const offset = currentStates.offset_0.data[0];
+    const offsetNum = typeof offset === 'bigint' ? Number(offset) : offset;
+    
+    let latencyInfo = "";
+    if (startTime) {
+        const end = performance.now();
+        latencyInfo = `<br>レイテンシ: ${(end - startTime).toFixed(1)}ms`;
+    }
+
+    debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${provider})<br>` +
+                         `処理フレーム数: ${Math.floor(offsetNum)}<br>` +
+                         `スキップ数: ${skipCount}${latencyInfo}`;
 }
 
 function drawVisualizations() {
@@ -630,7 +742,9 @@ resetBtn.onclick = () => {
     decodedEvents = [];
     lastCharId = 0;
     totalFrames = 0;
+    skipCount = 0;
     drawVisualizations();
+    updateDebugInfo();
 };
 
 initONNX();

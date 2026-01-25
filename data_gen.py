@@ -317,7 +317,7 @@ class CWDataset(Dataset):
                  allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
                  focus_chars: str = None, focus_prob: float = 0.5,
                  fading_speed_min: float = 0.1, fading_speed_max: float = 0.1,
-                 min_fading: float = 0.05):
+                 min_fading: float = 0.1):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm

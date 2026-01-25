@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CW Decoder - Real-time Demo</title>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -202,7 +202,7 @@
             <h2>デバッグ情報</h2>
             <div class="status" id="debugInfo">
                 モデル: 読み込み中...<br>
-                処理フレーム数: 0<br>
+                モード切替: URLに #webgpu または #wasm を追加<br>
                 レイテンシ: 0ms
             </div>
         </div>
