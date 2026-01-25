@@ -500,26 +500,82 @@ class Trainer:
             print(f"Epoch {epoch} | Phase {phase}: Full Chars, Clean")
 
         elif phase == max_koch_phase + 2:
-            # Slight variations
+            # Slight variations (No Fading yet)
             self.train_dataset.min_wpm = 18
             self.train_dataset.max_wpm = 25
             self.train_dataset.min_snr = 30.0
             self.train_dataset.max_snr = 45.0
             self.train_dataset.jitter_max = 0.03
             self.train_dataset.weight_var = 0.05
+            self.train_dataset.fading_speed_min = 0.0
+            self.train_dataset.fading_speed_max = 0.0
             self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations")
+            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations (No Fading)")
 
-        else:
-            # Realistic
-            self.train_dataset.min_wpm = 10
-            self.train_dataset.max_wpm = 45
-            self.train_dataset.min_snr = 5.0
-            self.train_dataset.max_snr = 30.0
+        elif phase == max_koch_phase + 3:
+            # Practical SNR with weak fading
+            self.train_dataset.min_wpm = 15
+            self.train_dataset.max_wpm = 35
+            self.train_dataset.min_snr = 10.0
+            self.train_dataset.max_snr = 20.0
+            self.train_dataset.jitter_max = 0.05
+            self.train_dataset.weight_var = 0.10
+            self.train_dataset.fading_speed_min = 0.05
+            self.train_dataset.fading_speed_max = 0.1
+            self.train_dataset.chars = self.train_dataset.all_chars
+            print(f"Epoch {epoch} | Phase {phase}: Practical SNR (10-20dB) with Weak Fading")
+
+        elif phase == max_koch_phase + 4:
+            # Boundary SNR
+            self.train_dataset.min_wpm = 15
+            self.train_dataset.max_wpm = 40
+            self.train_dataset.min_snr = 0.0
+            self.train_dataset.max_snr = 10.0
+            self.train_dataset.jitter_max = 0.08
+            self.train_dataset.weight_var = 0.12
+            self.train_dataset.fading_speed_min = 0.1
+            self.train_dataset.fading_speed_max = 0.2
+            self.train_dataset.chars = self.train_dataset.all_chars
+            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (0-10dB)")
+
+        elif phase == max_koch_phase + 5:
+            # Negative SNR Entry
+            self.train_dataset.min_wpm = 15
+            self.train_dataset.max_wpm = 40
+            self.train_dataset.min_snr = -5.0
+            self.train_dataset.max_snr = 5.0
             self.train_dataset.jitter_max = 0.10
             self.train_dataset.weight_var = 0.15
+            self.train_dataset.fading_speed_min = 0.1
+            self.train_dataset.fading_speed_max = 0.3
             self.train_dataset.chars = self.train_dataset.all_chars
-            print(f"Epoch {epoch} | Phase {phase}: Realistic (Noise & Jitter)")
+            print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB)")
+
+        elif phase == max_koch_phase + 6:
+            # Deep Negative SNR
+            self.train_dataset.min_wpm = 15
+            self.train_dataset.max_wpm = 40
+            self.train_dataset.min_snr = -10.0
+            self.train_dataset.max_snr = 0.0
+            self.train_dataset.jitter_max = 0.10
+            self.train_dataset.weight_var = 0.15
+            self.train_dataset.fading_speed_min = 0.1
+            self.train_dataset.fading_speed_max = 0.4
+            self.train_dataset.chars = self.train_dataset.all_chars
+            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-10 to 0dB)")
+
+        else:
+            # True Extreme
+            self.train_dataset.min_wpm = 15
+            self.train_dataset.max_wpm = 40
+            self.train_dataset.min_snr = -15.0
+            self.train_dataset.max_snr = -5.0
+            self.train_dataset.jitter_max = 0.10
+            self.train_dataset.weight_var = 0.15
+            self.train_dataset.fading_speed_min = 0.1
+            self.train_dataset.fading_speed_max = 0.5
+            self.train_dataset.chars = self.train_dataset.all_chars
+            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB)")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm
@@ -528,6 +584,9 @@ class Trainer:
         self.val_dataset.max_snr = self.train_dataset.max_snr
         self.val_dataset.jitter_max = self.train_dataset.jitter_max
         self.val_dataset.weight_var = self.train_dataset.weight_var
+        self.val_dataset.fading_speed_min = self.train_dataset.fading_speed_min
+        self.val_dataset.fading_speed_max = self.train_dataset.fading_speed_max
+        self.val_dataset.min_fading = self.train_dataset.min_fading
         self.val_dataset.chars = self.train_dataset.chars
         self.val_dataset.min_len = self.train_dataset.min_len
         self.val_dataset.max_len = self.train_dataset.max_len

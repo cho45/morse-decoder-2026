@@ -8,18 +8,18 @@ class TestDiagnosticsAndDrill(unittest.TestCase):
         # プロサインが正しく1文字の制御コードに変換・復元されるか
         original = "CQ DE <BT> K"
         mapped = map_prosigns(original)
-        # CQ, DE, <BT> がそれぞれ1文字に置換されているはず
+        # <BT> のみが1文字に置換されているはず (CQ, DE は置換されない)
         # 元の長さ: 2+1+2+1+4+1+1 = 12
-        # マップ後: 1+1+1+1+1+1+1 = 7
-        self.assertEqual(len(mapped), 7)
+        # マップ後: 2+1+2+1+1+1+1 = 9
+        self.assertEqual(len(mapped), 9)
         
         unmapped = unmap_prosigns(mapped)
         self.assertEqual(unmapped, original)
 
     def test_levenshtein_with_prosigns(self):
         # プロサインを1トークンとして編集距離が計算されるか
-        ref = "CQ DE <BT>"
-        hyp = "CQ DE <AR>" # <BT> が <AR> に置換されたケース
+        ref = "K <BT>"
+        hyp = "K <AR>" # <BT> が <AR> に置換されたケース
         
         dist, ops = levenshtein(ref, hyp)
         

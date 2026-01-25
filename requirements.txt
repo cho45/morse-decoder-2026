@@ -1,5 +1,6 @@
 numpy
 scipy
+onnx
 onnxruntime
 pyaudio
 pytest

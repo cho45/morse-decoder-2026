@@ -109,8 +109,11 @@ def test_prosigns():
     # So "CQ DE" -> "CQ", " ", "DE"
     
     # Let's verify this behavior
-    assert "CQ" in tokens
-    assert "DE" in tokens
+    # CQ and DE are now treated as separate characters (C, Q, D, E)
+    assert "C" in tokens
+    assert "Q" in tokens
+    assert "D" in tokens
+    assert "E" in tokens
     assert "<BT>" in tokens
     
     # Test timing generation for prosign

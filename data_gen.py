@@ -25,7 +25,6 @@ MORSE_DICT = {
     '9': '----.', '0': '-----', '.': '.-.-.-', ',': '--..--', '?': '..--..',
     '/': '-..-.', '-': '-....-', '(': '-.--.', ')': '-.--.-', ' ': ' ',
     '<BT>': '-...-', '<AR>': '.-.-.', '<SK>': '...-.-', '<KA>': '-.-.-',
-    'CQ': '-.-. --.-', 'DE': '-.. .'
 }
 
 class MorseGenerator:
@@ -211,8 +210,11 @@ class HFChannelSimulator:
     def __init__(self, sample_rate: int = config.SAMPLE_RATE):
         self.sample_rate = sample_rate
 
-    def apply_fading(self, waveform: np.ndarray, speed_hz: float = 0.1) -> np.ndarray:
+    def apply_fading(self, waveform: np.ndarray, speed_hz: float = 0.1, min_fading: float = 0.05) -> np.ndarray:
         """Apply Rayleigh-like fading using filtered Gaussian noise."""
+        if speed_hz <= 0:
+            return waveform
+            
         # Generate complex Gaussian noise
         n_samples = len(waveform)
         # Low-pass filter to simulate fading speed (Doppler spread)
@@ -229,7 +231,7 @@ class HFChannelSimulator:
         # Normalize fading envelope
         fading /= (np.mean(fading) + 1e-12)
         # Avoid total silence
-        fading = np.clip(fading, 0.05, 2.0)
+        fading = np.clip(fading, min_fading, 2.0)
         
         return waveform * fading
 
@@ -280,7 +282,8 @@ class HFChannelSimulator:
         return scipy.signal.lfilter(b, a, waveform)
 
 def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate: int = config.SAMPLE_RATE,
-                    jitter: float = 0.0, weight: float = 1.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    jitter: float = 0.0, weight: float = 1.0,
+                    fading_speed: float = 0.1, min_fading: float = 0.05) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
@@ -291,7 +294,7 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
     
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
     if snr_db < 45:
-        waveform = sim.apply_fading(waveform)
+        waveform = sim.apply_fading(waveform, speed_hz=fading_speed, min_fading=min_fading)
         if random.random() > 0.5:
             waveform = sim.apply_qrm(waveform, snr_db=snr_db + random.uniform(0, 10))
         waveform = sim.apply_noise(waveform, snr_db=snr_db)
@@ -312,7 +315,9 @@ class CWDataset(Dataset):
                  min_snr: float = 5.0, max_snr: float = 25.0,
                  jitter_max: float = 0.1, weight_var: float = 0.2,
                  allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
-                 focus_chars: str = None, focus_prob: float = 0.5):
+                 focus_chars: str = None, focus_prob: float = 0.5,
+                 fading_speed_min: float = 0.1, fading_speed_max: float = 0.1,
+                 min_fading: float = 0.05):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -322,6 +327,9 @@ class CWDataset(Dataset):
         self.weight_var = weight_var
         self.min_len = min_len
         self.max_len = max_len
+        self.fading_speed_min = fading_speed_min
+        self.fading_speed_max = fading_speed_max
+        self.min_fading = min_fading
         # config.CHARS includes prosigns now
         self.all_chars = config.CHARS
         self.chars = allowed_chars if allowed_chars else self.all_chars
@@ -381,7 +389,12 @@ class CWDataset(Dataset):
         # weight is centered at 1.0, variation is +/- weight_var
         weight = 1.0 + random.uniform(-self.weight_var, self.weight_var)
         
-        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight)
+        fading_speed = random.uniform(self.fading_speed_min, self.fading_speed_max)
+        
+        waveform, label, signal_labels, boundary_labels = generate_sample(
+            text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight,
+            fading_speed=fading_speed, min_fading=self.min_fading
+        )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels
 
