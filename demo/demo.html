@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CW Decoder - Real-time Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #1a1a1a;
+        }
+
+        .panel {
+            background: #ffffff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            padding: 10px;
+            background: #fff;
+            border: 1px solid #ccc;
+            color: #333;
+            font-family: inherit;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            margin: 10px 0;
+        }
+
+        button {
+            background: #007bff;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-right: 10px;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #555;
+            color: #888;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .output {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 20px;
+            min-height: 100px;
+            font-size: 24px;
+            letter-spacing: 2px;
+            word-wrap: break-word;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #000;
+        }
+
+        .status {
+            padding: 10px;
+            background: #e9ecef;
+            border-left: 4px solid #007bff;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #495057;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .value-display {
+            display: inline-block;
+            min-width: 50px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📡 CW Decoder - Real-time Demo</h1>
+
+        <div class="panel">
+            <h2>入力テキスト</h2>
+            <div class="control-group">
+                <label for="inputText">送信するテキスト</label>
+                <input type="text" id="inputText" value="CQ CQ DE JH1UMV PSE K" placeholder="モールス信号に変換するテキスト">
+            </div>
+
+            <div class="grid">
+                <div class="control-group">
+                    <label for="wpm">速度 (WPM): <span class="value-display" id="wpmValue">30</span></label>
+                    <input type="range" id="wpm" min="5" max="40" value="30" step="1">
+                </div>
+
+                <div class="control-group">
+                    <label for="frequency">周波数 (Hz): <span class="value-display" id="freqValue">700</span></label>
+                    <input type="range" id="frequency" min="400" max="1000" value="700" step="10">
+                </div>
+
+                <div class="control-group">
+                    <label for="snr">SNR (dB): <span class="value-display" id="snrValue">0</span></label>
+                    <input type="range" id="snr" min="-10" max="40" value="0" step="1">
+                </div>
+
+                <div class="control-group">
+                    <label for="jitter">Jitter: <span class="value-display" id="jitterValue">0.0</span></label>
+                    <input type="range" id="jitter" min="0" max="0.3" value="0" step="0.01">
+                </div>
+            </div>
+
+            <div class="control-group">
+                <button id="startBtn">開始</button>
+                <button id="stopBtn" disabled>停止</button>
+                <button id="resetBtn">リセット</button>
+            </div>
+
+            <div class="status" id="status">準備完了</div>
+        </div>
+
+        <div class="panel">
+            <h2>デコード結果</h2>
+            <div class="output" id="output"></div>
+        </div>
+
+        <div class="panel">
+            <h2>リアルタイム解析</h2>
+            <div class="control-group">
+                <label>メルスペクトログラム</label>
+                <canvas id="melCanvas" width="1160" height="100" style="width: 100%; height: 100px; background: #fff; border: 1px solid #ccc;"></canvas>
+            </div>
+            <div class="control-group">
+                <label>CTC 確率 (文字)</label>
+                <canvas id="ctcCanvas" width="1160" height="100" style="width: 100%; height: 100px; background: #fff; border: 1px solid #ccc;"></canvas>
+            </div>
+            <div class="control-group">
+                <label>Signal 確率 (Dit/Dah/Space)</label>
+                <canvas id="sigCanvas" width="1160" height="100" style="width: 100%; height: 100px; background: #fff; border: 1px solid #ccc;"></canvas>
+            </div>
+            <div class="control-group">
+                <label>Boundary 確率</label>
+                <canvas id="boundCanvas" width="1160" height="60" style="width: 100%; height: 60px; background: #fff; border: 1px solid #ccc;"></canvas>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>デバッグ情報</h2>
+            <div class="status" id="debugInfo">
+                モデル: 読み込み中...<br>
+                処理フレーム数: 0<br>
+                レイテンシ: 0ms
+            </div>
+        </div>
+    </div>
+
+    <script src="dsp.js"></script>
+    <script src="demo.js"></script>
+</body>
+</html>

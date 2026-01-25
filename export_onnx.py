@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import onnxruntime as ort
 import numpy as np
+import argparse
 import config
 from model import StreamingConformer
 import os
@@ -40,7 +41,7 @@ class ONNXWrapper(nn.Module):
             
         return logits, signal_logits, boundary_logits, *new_states_flat
 
-def export():
+def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     device = torch.device("cpu")
     model = StreamingConformer(
         n_mels=config.N_MELS,
@@ -48,15 +49,16 @@ def export():
         d_model=config.D_MODEL,
         num_layers=config.NUM_LAYERS
     ).to(device)
-    
+
     # Checkpoint があれば読み込む（なければランダム初期値でエクスポート）
-    checkpoint_path = "checkpoint_epoch_145_clean_all.pt"
-    if os.path.exists(checkpoint_path):
+    if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
-        print("No checkpoint found, exporting with random weights.")
+        if checkpoint_path:
+            print(f"Warning: Checkpoint not found at {checkpoint_path}")
+        print("Exporting with random weights.")
     
     model.eval()
     wrapper = ONNXWrapper(model)
@@ -103,13 +105,12 @@ def export():
         dynamic_axes[f'new_attn_v_{i}'] = {0: 'batch_size', 2: 'new_attn_cache_len'}
         dynamic_axes[f'new_conv_cache_{i}'] = {0: 'batch_size'}
 
-    onnx_path = "cw_decoder.onnx"
-    print(f"Exporting to {onnx_path}...")
-    
+    print(f"Exporting to {output_path}...")
+
     torch.onnx.export(
         wrapper,
         (x, sub_cache, *layer_states_flat),
-        onnx_path,
+        output_path,
         input_names=input_names,
         output_names=output_names,
         dynamic_axes=dynamic_axes,
@@ -122,7 +123,7 @@ def export():
     # Verification
     print("Verifying ONNX model...")
     # Use CPU provider explicitly for consistency
-    ort_session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+    ort_session = ort.InferenceSession(output_path, providers=['CPUExecutionProvider'])
     
     def to_numpy(t):
         return t.detach().cpu().numpy() if t is not None else None
@@ -157,4 +158,9 @@ def export():
             print(f"Verification passed for '{name}'.")
 
 if __name__ == "__main__":
-    export()
+    parser = argparse.ArgumentParser(description="Export StreamingConformer model to ONNX format")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
+    parser.add_argument("--output", type=str, default="cw_decoder.onnx", help="Output ONNX file path")
+    args = parser.parse_args()
+
+    export(checkpoint_path=args.checkpoint, output_path=args.output)

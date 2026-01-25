@@ -218,7 +218,7 @@ class Trainer:
                 # Phase N: len(KOCH_CHARS) chars -> N = len(KOCH_CHARS) - 2
                 # + 2 phases for Full Clean and Slight Variations
                 # + 1 phase for Realistic
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 3
+                max_phase = (len(KOCH_CHARS) - 4) + 2 + 7
                 
                 if self.current_phase < max_phase:
                     print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
@@ -648,10 +648,6 @@ class Trainer:
                     print(f"  Input Len (avg): {input_lengths.float().mean():.1f} | Target Len (avg): {target_lengths.float().mean():.1f}")
                     print(f"  Logits Stats | Blank Mean: {blank_logits.mean():.4f}, Max: {blank_logits.max():.4f}")
                     print(f"  Logits Stats | Chars Mean: {char_logits.mean():.4f}, Max: {max_char_logits.max():.4f}")
-                    
-                    # Check if model is stuck in blank-only output
-                    if blank_logits.mean() > max_char_logits.mean() + 2.0:
-                        print("  WARNING: Model is heavily biased towards BLANK.")
 
         return total_loss_accum / len(dataloader)
 
