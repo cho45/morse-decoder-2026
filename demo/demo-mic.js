@@ -52,6 +52,7 @@ let inputSpecHistory = []; // Buffer for 14 bins history
 let sigHistory = [];       // Buffer for signal probs
 let eventHistory = [];     // Buffer for decoded char events {char, pos}
 let totalFrames = 0;
+let capturedSpecData = []; // Buffer for exporting inference data
 
 // UI Elements
 const waterfallCanvas = document.getElementById('waterfallCanvas');
@@ -70,6 +71,7 @@ const debugInfo = document.getElementById('debugInfo');
 const volumeSlider = document.getElementById('volume');
 const volumeValue = document.getElementById('volumeValue');
 const autoTrackCheck = document.getElementById('autoTrack');
+const exportBtn = document.getElementById('exportBtn');
 
 // Viridis colormap
 const viridis = [
@@ -317,11 +319,17 @@ function processAudioChunk(chunk) {
             const p1 = real[kIdx]*real[kIdx] + imag[kIdx]*imag[kIdx];
             const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
             const p = p1 * (1 - kFrac) + p2 * kFrac;
+            
             specFrame[i] = Math.log1p(p * 100.0) / 5.0;
         }
     }
     
     totalFrames++;
+    capturedSpecData.push({
+        frame: Array.from(specFrame),
+        freq: trackedFreq
+    });
+    if (capturedSpecData.length === 1) exportBtn.disabled = false;
     inferenceBuffer.push(specFrame);
     if (inferenceBuffer.length >= INFERENCE_CHUNK_SIZE) {
         const combined = new Float32Array(14 * INFERENCE_CHUNK_SIZE);
@@ -365,6 +373,12 @@ function stopAll() {
     currentStates = null;
     inferenceBuffer = [];
     lastCharId = 0;
+    totalFrames = 0;
+    waterfallBuffer = [];
+    inputSpecBuffer = [];
+    inputSpecHistory = [];
+    sigHistory = [];
+    eventHistory = [];
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
     demoNodes = [];
@@ -374,6 +388,8 @@ function stopAll() {
 }
 
 micBtn.onclick = async () => {
+    capturedSpecData = [];
+    exportBtn.disabled = true;
     await initAudio();
     try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -385,6 +401,8 @@ micBtn.onclick = async () => {
 };
 
 demoBtn.onclick = async () => {
+    capturedSpecData = [];
+    exportBtn.disabled = true;
     await initAudio();
     isRunning = true;
     micBtn.disabled = true; demoBtn.disabled = true; stopBtn.disabled = false;
@@ -437,7 +455,11 @@ function setupProcessing(source) {
 // --- Visualization ---
 
 function drawWaterfall() {
-    if (isRunning && waterfallBuffer.length > 0) {
+    if (!isRunning) {
+        requestAnimationFrame(drawWaterfall);
+        return;
+    }
+    if (waterfallBuffer.length > 0) {
         const w = waterfallCanvas.width;
         const h = waterfallCanvas.height;
         const numFramesToDraw = waterfallBuffer.length;
@@ -602,5 +624,32 @@ volumeSlider.oninput = () => {
     volumeValue.textContent = vol.toFixed(2);
     if (masterGainNode) masterGainNode.gain.setTargetAtTime(vol, audioContext.currentTime, 0.01);
 };
+
+function exportData() {
+    if (capturedSpecData.length === 0) {
+        alert("エクスポートするデータがありません。");
+        return;
+    }
+
+    const exportObj = {
+        sample_rate: sampleRate,
+        n_fft: nFft,
+        hop_ms: HOP_MS,
+        n_bins: 14,
+        data: capturedSpecData
+    };
+
+    const blob = new Blob([JSON.stringify(exportObj)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cw-decoder-spec-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+exportBtn.onclick = exportData;
 
 drawWaterfall();

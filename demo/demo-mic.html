@@ -197,7 +197,10 @@
         </div>
 
         <div class="panel">
-            <h2>モデル入力解析 (14 bins) & 推論結果</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h2 style="margin-bottom: 0;">モデル入力解析 (14 bins) & 推論結果</h2>
+                <button id="exportBtn" style="margin-bottom: 0; padding: 8px 16px; font-size: 14px;" disabled>データエクスポート</button>
+            </div>
             <div class="canvas-container" style="height: 150px;">
                 <canvas id="inputCanvas" width="1000" height="150"></canvas>
                 <canvas id="inputOverlayCanvas" width="1000" height="150"></canvas>

@@ -318,18 +318,33 @@ class HFChannelSimulator:
         b, a = scipy.signal.butter(4, [max(0.01, low), min(0.99, high)], btype='band')
         return scipy.signal.lfilter(b, a, waveform)
 
+    def apply_tx_filter(self, waveform: np.ndarray, cutoff: float) -> np.ndarray:
+        """Apply Low-pass filter to simulate TX-side bandwidth limitation (soften edges)."""
+        nyquist = 0.5 * self.sample_rate
+        # Ensure cutoff is within a reasonable range
+        cutoff = np.clip(cutoff, 100, nyquist - 100)
+        # Use higher order for more noticeable effect
+        b, a = scipy.signal.butter(4, cutoff / nyquist, btype='low')
+        return scipy.signal.lfilter(b, a, waveform)
+
 def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate: int = config.SAMPLE_RATE,
                     jitter: float = 0.0, weight: float = 1.0,
                     fading_speed: float = 0.1, min_fading: float = 0.05,
-                    frequency: float = 700.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    frequency: float = 700.0,
+                    tx_lowpass: float = None,
+                    rise_time: float = 0.005) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
     # Human artifacts are now controlled by arguments
     
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
-    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=frequency, wpm=wpm)
+    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=frequency, wpm=wpm, rise_time=rise_time)
     
+    # Apply TX filter (soften edges) before channel effects
+    if tx_lowpass is not None:
+        waveform = sim.apply_tx_filter(waveform, cutoff=tx_lowpass)
+
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
     if snr_db < 45:
         waveform = sim.apply_fading(waveform, speed_hz=fading_speed, min_fading=min_fading)
@@ -359,7 +374,9 @@ class CWDataset(Dataset):
                  min_fading: float = 0.1,
                  phrase_prob: float = 0.0,
                  min_freq: float = 650.0,
-                 max_freq: float = 750.0):
+                 max_freq: float = 750.0,
+                 tx_lowpass_prob: float = 0.8,
+                 rise_time_max: float = 0.025):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -380,6 +397,8 @@ class CWDataset(Dataset):
         self.phrase_prob = phrase_prob
         self.min_freq = min_freq
         self.max_freq = max_freq
+        self.tx_lowpass_prob = tx_lowpass_prob
+        self.rise_time_max = rise_time_max
         self.gen = MorseGenerator()
 
     def generate_random_callsign(self) -> str:
@@ -481,11 +500,23 @@ class CWDataset(Dataset):
         fading_speed = random.uniform(self.fading_speed_min, self.fading_speed_max)
         
         frequency = random.uniform(self.min_freq, self.max_freq)
+
+        # Randomly apply TX lowpass filter to soften edges
+        tx_lowpass = None
+        rise_time = 0.005 # Default
+        if random.random() < self.tx_lowpass_prob:
+            # Cutoff is typically somewhere above the carrier frequency.
+            # 0.8x to 2.5x frequency covers from "muffled" to "standard".
+            tx_lowpass = frequency * random.uniform(0.8, 2.5)
+            # Also soften the rise time itself
+            rise_time = random.uniform(0.005, self.rise_time_max)
         
         waveform, label, signal_labels, boundary_labels = generate_sample(
             text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight,
             fading_speed=fading_speed, min_fading=self.min_fading,
-            frequency=frequency
+            frequency=frequency,
+            tx_lowpass=tx_lowpass,
+            rise_time=rise_time
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels, is_phrase
