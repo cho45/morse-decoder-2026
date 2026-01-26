@@ -26,7 +26,7 @@ def test_train_val_loss_consistency():
     # 固定の入力データを作成
     batch_size = 2
     seq_len = 100
-    num_mels = config.N_MELS
+    num_mels = config.N_BINS
     num_classes = config.NUM_CLASSES
     
     mels = torch.randn(batch_size, seq_len, num_mels).to(device)

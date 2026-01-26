@@ -24,7 +24,7 @@ def test_generate_sample_with_signal_labels():
 
 def test_dataset_returns_signal_labels():
     dataset = CWDataset(num_samples=2)
-    waveform, label, wpm, signal_labels, boundary_labels = dataset[0]
+    waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[0]
     
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)

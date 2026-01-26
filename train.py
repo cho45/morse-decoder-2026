@@ -134,20 +134,24 @@ class Trainer:
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Pre-compute Mel filterbank using config
-        # Single-bin MelSpectrogram focusing on 700Hz to maximize information density
-        self.mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=config.SAMPLE_RATE,
+        # Pre-compute Spectrogram transform using config
+        self.spec_transform = torchaudio.transforms.Spectrogram(
             n_fft=config.N_FFT,
             hop_length=config.HOP_LENGTH,
-            n_mels=config.N_MELS,
-            f_min=500.0,
-            f_max=900.0,
+            power=2.0,
             center=False # Use False for strict streaming causality
         ).to(self.device)
         
+        # Calculate bin indices for cropping
+        # 16000 / 512 = 31.25 Hz/bin
+        # 500 / 31.25 = 16.0
+        # 900 / 31.25 = 28.8
+        self.bin_start = int(round(config.F_MIN * config.N_FFT / config.SAMPLE_RATE))
+        self.bin_end = self.bin_start + config.N_BINS
+        print(f"Spectrogram Bin Range: {self.bin_start} to {self.bin_end} ({config.N_BINS} bins)")
+
         self.model = StreamingConformer(
-            n_mels=config.N_MELS,
+            n_mels=config.N_BINS,
             num_classes=NUM_CLASSES,
             d_model=getattr(args, 'd_model', config.D_MODEL),
             n_head=getattr(args, 'n_head', config.N_HEAD),
@@ -220,7 +224,9 @@ class Trainer:
                 # + 1 phase for Realistic
                 # 7 phases were: FullClean, SlightVar, Practical, Boundary, NegEntry, DeepNeg, TrueExtreme
                 # Now we expand to more steps for smoother SNR transition and fading resistance
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 14
+                # Koch Phases: (len(KOCH_CHARS) - 4) + 2
+                # Additional SNR/Fading Phases: 11
+                max_phase = (len(KOCH_CHARS) - 4) + 2 + 11
                 
                 if self.current_phase < max_phase:
                     print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
@@ -340,14 +346,17 @@ class Trainer:
 
     def compute_mels_and_lengths(self, waveforms, lengths):
         x = waveforms.to(self.device)
-        mels = self.mel_transform(x) # (B, F, T)
+        spec = self.spec_transform(x) # (B, F, T)
         
+        # Crop frequency bins
+        spec = spec[:, self.bin_start:self.bin_end, :] # (B, N_BINS, T)
+
         # Log scaling and robust normalization
         # Use a fixed scaling factor to avoid blowing up silence in InstanceNorm
-        mels = torch.log1p(mels * 100.0)
+        mels = torch.log1p(spec * 100.0)
         
         # Simple global-style normalization: scale to roughly [0, 1] range
-        # Based on typical log1p(mel * 100) values where max is around 5-10
+        # Based on typical log1p(spec * 100) values where max is around 5-10
         mels = mels / 5.0
         
         mels = mels.transpose(1, 2) # (B, T, F)
@@ -440,6 +449,8 @@ class Trainer:
         self.train_dataset.max_len = 6
         self.train_dataset.min_wpm = 15
         self.train_dataset.max_wpm = 40
+        self.train_dataset.min_freq = 650.0
+        self.train_dataset.max_freq = 750.0
 
         if num_chars <= len(KOCH_CHARS):
             # Koch Phases: Gradually increase character set
@@ -469,6 +480,8 @@ class Trainer:
             self.train_dataset.max_wpm = 22
             self.train_dataset.min_snr = 100.0 # Clean
             self.train_dataset.max_snr = 100.0
+            self.train_dataset.min_freq = 700.0 # Koch 初期は周波数を固定してリズム学習に集中
+            self.train_dataset.max_freq = 700.0
             self.train_dataset.jitter_max = 0.0
             self.train_dataset.weight_var = 0.0
             self.train_dataset.chars = current_chars
@@ -497,8 +510,8 @@ class Trainer:
                 
             print(f"Epoch {epoch} | Koch Phase {phase}: Chars={current_chars} (20 Wpm, Clean) | Focus: {new_chars}")
 
-        elif phase == max_koch_phase + 1:
-            # All characters (including prosigns), still clean
+        elif phase == max_koch_phase + 1: # 35
+            # Phase max+1: Full Clean (全文字導入、クリーン環境)
             self.train_dataset.min_wpm = 20
             self.train_dataset.max_wpm = 20
             self.train_dataset.min_snr = 50.0
@@ -507,125 +520,98 @@ class Trainer:
             self.train_dataset.weight_var = 0.0
             self.train_dataset.chars = self.train_dataset.all_chars
             self.train_dataset.min_len = 5
-            self.train_dataset.max_len = 8 # OOM回避のため少し短縮
-            self.train_dataset.focus_chars = None # No focus in full phase
+            self.train_dataset.max_len = 8
+            self.train_dataset.focus_chars = None
             self.train_dataset.phrase_prob = 0.3
             print(f"Epoch {epoch} | Phase {phase}: Full Chars, Clean | Phrase Prob: {self.train_dataset.phrase_prob:.2f}")
 
         elif phase == max_koch_phase + 2:
-            # Slight variations (No Fading yet)
+            # Phase max+2: Slight Var (軽微なノイズと打鍵の揺らぎ)
             self.train_dataset.min_wpm = 18
             self.train_dataset.max_wpm = 25
-            self.train_dataset.min_snr = 30.0
-            self.train_dataset.max_snr = 45.0
+            self.train_dataset.min_snr = 25.0
+            self.train_dataset.max_snr = 40.0
             self.train_dataset.jitter_max = 0.03
             self.train_dataset.weight_var = 0.05
             self.train_dataset.fading_speed_min = 0.0
             self.train_dataset.fading_speed_max = 0.0
-            self.train_dataset.chars = self.train_dataset.all_chars
-            self.train_dataset.phrase_prob = 0.5 # 実戦的なバリエーションを増やす
-            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Slight Variations (No Fading) | Phrase Prob: {self.train_dataset.phrase_prob:.2f}")
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Slight Variations (SNR 25-40dB, No Fading)")
 
         elif phase == max_koch_phase + 3:
-            # Practical SNR (15-25dB) with moderate fading
+            # Phase max+3: Practical 1 (フェージングの導入)
             self.train_dataset.min_snr = 15.0
             self.train_dataset.max_snr = 25.0
-            self.train_dataset.min_fading = 0.2 # Start with fading to learn its pattern
+            self.train_dataset.min_fading = 0.4
             self.train_dataset.fading_speed_max = 0.1
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Practical SNR (15-25dB), Deep Fading (min_fading=0.2)")
+            print(f"Epoch {epoch} | Phase {phase}: Practical 1 (SNR 15-25dB, Fading min=0.4)")
 
         elif phase == max_koch_phase + 4:
-            # Transition SNR (10-20dB)
-            self.train_dataset.min_snr = 10.0
-            self.train_dataset.max_snr = 20.0
-            self.train_dataset.min_fading = 0.3 # Reduce fading depth as SNR drops
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Transition SNR (10-20dB), Moderate Fading (min_fading=0.3)")
-
-        elif phase == max_koch_phase + 5:
-            # Boundary SNR (5-15dB)
-            self.train_dataset.min_snr = 5.0
-            self.train_dataset.max_snr = 15.0
-            self.train_dataset.min_fading = 0.4
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (5-15dB), Weak Fading (min_fading=0.4)")
-
-        elif phase == max_koch_phase + 6:
-            # Zero SNR Entry (0-10dB)
-            self.train_dataset.min_snr = 0.0
-            self.train_dataset.max_snr = 10.0
+            # Phase max+4: Practical 2 (中程度のノイズ)
+            self.train_dataset.min_snr = 8.0
+            self.train_dataset.max_snr = 18.0
             self.train_dataset.min_fading = 0.5
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Zero SNR Entry (0-10dB), Stable (min_fading=0.5)")
+            print(f"Epoch {epoch} | Phase {phase}: Practical 2 (SNR 8-18dB, Fading min=0.5)")
 
-        elif phase == max_koch_phase + 7:
-            # Negative SNR Entry (-5 to 5dB)
-            self.train_dataset.min_snr = -5.0
-            self.train_dataset.max_snr = 5.0
+        elif phase == max_koch_phase + 5:
+            # Phase max+5: Boundary (SNR 0dB付近)
+            self.train_dataset.min_snr = 2.0
+            self.train_dataset.max_snr = 12.0
             self.train_dataset.min_fading = 0.6
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Negative SNR Entry (-5 to 5dB), Very Stable (min_fading=0.6)")
+            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (2-12dB, Fading min=0.6)")
 
-        elif phase == max_koch_phase + 8:
-            # Target SNR: -8dB focus (-8 to 2dB)
+        elif phase == max_koch_phase + 6:
+            # Phase max+6: Negative 1 (負のSNR突入)
+            self.train_dataset.min_snr = -4.0
+            self.train_dataset.max_snr = 6.0
+            self.train_dataset.min_fading = 0.7
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 1 (-4 to 6dB, Fading min=0.7)")
+
+        elif phase == max_koch_phase + 7:
+            # Phase max+7: Negative 2 (現在のモデル限界付近)
             self.train_dataset.min_snr = -8.0
             self.train_dataset.max_snr = 2.0
             self.train_dataset.min_fading = 0.8
-            self.train_dataset.fading_speed_max = 0.05
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Target SNR (-8 to 2dB), Rock Solid (min_fading=0.8)")
+            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 2 (-8 to 2dB, Fading min=0.8)")
+
+        elif phase == max_koch_phase + 8:
+            # Phase max+8: Human Limit (人間の限界領域)
+            self.train_dataset.min_snr = -12.0
+            self.train_dataset.max_snr = -2.0
+            self.train_dataset.min_fading = 0.9
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Human Limit SNR (-12 to -2dB, Fading min=0.9)")
 
         elif phase == max_koch_phase + 9:
-            # Deep Negative (-11 to -1dB)
-            self.train_dataset.min_snr = -11.0
-            self.train_dataset.max_snr = -1.0
+            # Phase max+9: True Extreme (最終到達目標)
+            self.train_dataset.min_snr = -15.0
+            self.train_dataset.max_snr = -5.0
             self.train_dataset.min_fading = 0.9
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-11 to -1dB), Rock Solid (min_fading=0.9)")
+            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB, Fading min=0.9)")
 
         elif phase == max_koch_phase + 10:
-            # Deep Negative (-14 to -4dB)
-            self.train_dataset.min_snr = -14.0
-            self.train_dataset.max_snr = -4.0
-            self.train_dataset.min_fading = 0.9
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Deep Negative SNR (-14 to -4dB), Rock Solid (min_fading=0.9)")
-
-        elif phase == max_koch_phase + 11:
-            # Human Limit Entry (-18 to -8dB)
-            self.train_dataset.min_snr = -18.0
-            self.train_dataset.max_snr = -8.0
-            self.train_dataset.min_fading = 0.9
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Human Limit Entry (-18 to -8dB), Rock Solid (min_fading=0.9)")
-
-        elif phase == max_koch_phase + 12:
-            # Re-introduce fading at moderate SNR (-10 to 0dB)
-            self.train_dataset.min_snr = -10.0
-            self.train_dataset.max_snr = 0.0
-            self.train_dataset.min_fading = 0.4
-            self.train_dataset.fading_speed_max = 0.1
-            self.train_dataset.phrase_prob = 0.7
-            print(f"Epoch {epoch} | Phase {phase}: Re-introducing Fading (-10 to 0dB), (min_fading=0.4)")
-
-        elif phase == max_koch_phase + 13:
-            # Deep Fading at Human Limit (-18 to -8dB)
-            self.train_dataset.min_snr = -18.0
-            self.train_dataset.max_snr = -8.0
-            self.train_dataset.min_fading = 0.2
+            # Phase max+10: Fading Specialization (SNRは高めで深いフェージングを学習)
+            self.train_dataset.min_snr = -5.0
+            self.train_dataset.max_snr = 5.0
+            self.train_dataset.min_fading = 0.3
             self.train_dataset.fading_speed_max = 0.2
-            self.train_dataset.phrase_prob = 0.7
-            print(f"Epoch {epoch} | Phase {phase}: Deep Fading at Human Limit (-18 to -8dB), (min_fading=0.2)")
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Fading Specialization (-5 to 5dB, Deep Fading min=0.3)")
 
         else:
-            # True Extreme / Beyond Human Limit
-            self.train_dataset.min_snr = -22.0
-            self.train_dataset.max_snr = -12.0
-            self.train_dataset.min_fading = 0.1
-            self.train_dataset.fading_speed_max = 0.4
-            self.train_dataset.phrase_prob = 0.7
-            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-22 to -12dB), Max Fading (min_fading=0.1)")
+            # Phase max+11: Final Refine (SNRを下げ、代わりにフェージングを緩和)
+            self.train_dataset.min_snr = -10.0
+            self.train_dataset.max_snr = 0.0
+            self.train_dataset.min_fading = 0.5
+            self.train_dataset.fading_speed_max = 0.3
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Final Refine (-10 to 0dB, Moderate Fading min=0.5)")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm
@@ -643,6 +629,8 @@ class Trainer:
         self.val_dataset.focus_chars = self.train_dataset.focus_chars
         self.val_dataset.focus_prob = self.train_dataset.focus_prob
         self.val_dataset.phrase_prob = self.train_dataset.phrase_prob
+        self.val_dataset.min_freq = self.train_dataset.min_freq
+        self.val_dataset.max_freq = self.train_dataset.max_freq
 
         total_loss_accum = 0
         dataloader = DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=self.collate_fn)
@@ -708,6 +696,10 @@ class Trainer:
         total_edit_distance = 0
         total_ref_length = 0
         
+        # シグナル分類精度計測用
+        total_sig_correct = 0
+        total_sig_elements = 0
+
         # 分離計測用
         total_dist_phrase = 0
         total_len_phrase = 0
@@ -742,6 +734,15 @@ class Trainer:
                 
                 sig_preds = signal_logits.argmax(dim=2)
                 
+                # シグナル分類精度の計算 (Mask を考慮)
+                input_lengths_clamped = torch.clamp(input_lengths, max=signal_logits.size(1))
+                for i in range(signal_logits.size(0)):
+                    length = input_lengths_clamped[i].item()
+                    sig_p = sig_preds[i, :length]
+                    sig_t = signal_targets[i, :length].to(self.device)
+                    total_sig_correct += (sig_p == sig_t).sum().item()
+                    total_sig_elements += length
+
                 for i in range(preds.size(0)):
                     length = input_lengths[i].item()
                     p_indices = preds[i, :length]
@@ -760,8 +761,8 @@ class Trainer:
                     h_list = []
                     last_p = 0
                     for idx, pos in zip(decoded_indices, decoded_positions):
-                        # 前の文字との間に単語間空白(5)があるかチェック
-                        if any(p_sigs[last_p:pos] == 5):
+                        # 前の文字との間に単語間空白(3)があるかチェック
+                        if any(p_sigs[last_p:pos] == 3):
                             h_list.append(" ")
                         h_list.append(ID_TO_CHAR.get(idx, ""))
                         last_p = pos
@@ -793,10 +794,11 @@ class Trainer:
         cer_phrase = total_dist_phrase / total_len_phrase if total_len_phrase > 0 else 0.0
         cer_random = total_dist_random / total_len_random if total_len_random > 0 else 0.0
         
-        print(f"Validation Epoch {epoch} | Avg Loss: {avg_loss:.4f} | CER: {avg_cer:.4f} (Phrase: {cer_phrase:.4f}, Random: {cer_random:.4f})")
+        avg_sig_acc = total_sig_correct / total_sig_elements if total_sig_elements > 0 else 0.0
+        print(f"Validation Epoch {epoch} | Avg Loss: {avg_loss:.4f} | CER: {avg_cer:.4f} (Phrase: {cer_phrase:.4f}, Random: {cer_random:.4f}) | Sig Acc: {avg_sig_acc:.4f}")
         
-        # 0:bg(_), 1:dit(#), 2:dah(=), 3:intra(.), 4:inter( ), 5:word( )
-        class_map = {0: '_', 1: '#', 2: '=', 3: '.', 4: ' ', 5: ' '}
+        # 0:bg/space(_), 1:dit(#), 2:dah(=), 3:word( )
+        class_map = {0: '_', 1: '#', 2: '=', 3: ' '}
         sig_t_str = "".join([class_map.get(int(x), '?') for x in signal_targets[-1, :]])
         bound_t = boundary_targets[-1, :].cpu().numpy()
         bound_t_str = "".join(['!' if x > 0.5 else ' ' for x in bound_t])
@@ -823,9 +825,9 @@ class Trainer:
             if last_pos > total_len * 0.9:
                 print(f"  WARNING: Alignment collapse detected! Last char at {last_pos}/{total_len}")
 
-        return avg_loss, avg_cer, cer_phrase, cer_random
+        return avg_loss, avg_cer, cer_phrase, cer_random, avg_sig_acc
 
-    def save_checkpoint(self, epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random):
+    def save_checkpoint(self, epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random, sig_acc):
         os.makedirs(self.args.save_dir, exist_ok=True)
         
         path = os.path.join(self.args.save_dir, f"checkpoint_epoch_{epoch}.pt")
@@ -845,7 +847,7 @@ class Trainer:
         with open(self.history_path, 'a', newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_cer', 'cer_phrase', 'cer_random', 'lr', 'phase', 'stagnation'])
+                writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_cer', 'cer_phrase', 'cer_random', 'sig_acc', 'lr', 'phase', 'stagnation'])
             writer.writerow([
                 epoch,
                 f"{train_loss:.6f}",
@@ -853,6 +855,7 @@ class Trainer:
                 f"{val_cer:.6f}",
                 f"{cer_phrase:.6f}",
                 f"{cer_random:.6f}",
+                f"{sig_acc:.6f}",
                 f"{self.optimizer.param_groups[0]['lr']:.8f}",
                 self.current_phase,
                 self.phases_since_last_advance
@@ -962,12 +965,12 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         start_time = time.time()
         train_loss = trainer.train_epoch(epoch)
-        val_loss, val_cer, cer_phrase, cer_random = trainer.validate(epoch)
+        val_loss, val_cer, cer_phrase, cer_random, sig_acc = trainer.validate(epoch)
         trainer.scheduler.step(val_cer)
         duration = time.time() - start_time
-        print(f"Epoch {epoch} finished in {duration:.2f}s | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val CER: {val_cer:.4f} (P: {cer_phrase:.4f}, R: {cer_random:.4f})")
+        print(f"Epoch {epoch} finished in {duration:.2f}s | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val CER: {val_cer:.4f} (P: {cer_phrase:.4f}, R: {cer_random:.4f}) | Sig Acc: {sig_acc:.4f}")
         trainer.update_curriculum(val_cer)
-        trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random)
+        trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random, sig_acc)
         try:
             visualize_logs.plot_history(trainer.history_path, os.path.join(args.save_dir, "training_curves.png"))
         except:

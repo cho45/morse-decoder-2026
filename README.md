@@ -1,12 +1,29 @@
 # CW Decoder (Streaming Conformer)
 
 ディープラーニング（Streaming Conformer）を用いた、リアルタイム・モールス信号（CW）復号システムです。
+
+![SNR Performance](diagnostics/snr_performance_latest.png)
+*図1: 最新チェックポイントの SNR vs CER 性能曲線。*
+
+![ONNX Comparison](diagnostics/snr_performance_onnx_comparison.png)
+*図2: ONNX エクスポートおよび INT8 量子化後の性能比較。*
 WSL (Ubuntu) 上での学習および推論、最終的には Web ブラウザ上での動作を目指しています。
 
 ## 特徴
 - **Streaming Conformer:** CTC 損失を用いたストリーミング対応の CNN + Transformer アーキテクチャ。
 - **周波数クロッピング:** 広帯域信号からターゲット信号を DSP で特定し、軽量モデルで効率的に復号。
 - **堅牢な合成データ:** 人間による打鍵の揺らぎや、HF 帯特有のノイズ・フェージングをシミュレートしたデータで学習。
+
+![Model Architecture](docs/model_architecture.png)
+*図3: モデルアーキテクチャ（Streaming Conformer）*
+
+### 入出力形式
+- **入力**: ターゲット信号の周波数付近をクロップしたスペクトログラム（14 bins）。
+  - 事前の DSP 処理により信号のピーク周波数を特定し、その周辺のみを抽出してモデルに入力します。これにより、広帯域な信号処理をモデルから切り離し、推論の軽量化を実現しています。
+- **出力**:
+  - **CTC Logits**: 文字列復号用。
+  - **Signal Logits**: 物理的な信号状態（Dit/Dah/Space/WordSpace）のフレーム単位分類。
+  - **Boundary Logits**: 文字境界の予測。
 
 ## 環境構築 (WSL2 / Docker)
 
@@ -37,14 +54,101 @@ docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --sam
 ```
 
 ## プロジェクト構造
-- `data_gen.py`: 高度な人間的揺らぎとノイズをシミュレートするデータジェネレータ。
+
+### モデル開発 (Python/PyTorch)
 - `model.py`: Lightweight Streaming Conformer モデルの定義。
+- `data_gen.py`: 高度な人間的揺らぎとノイズをシミュレートするデータジェネレータ。
 - `train.py`: 学習スクリプト。
-- `stream_decode.py`: リアルタイム音声入力による推論プロトタイプ。
-- `plan.md`: 詳細なプロジェクト計画書。
+- `export_onnx.py` / `quantize_onnx.py`: ONNX エクスポートおよび量子化スクリプト。
+- `visualize_snr_performance.py`: モデルのノイズ耐性評価スクリプト。
+
+### 推論・デモ (JavaScript/ONNX Runtime)
+- `demo/inference.js`: Node.js/ブラウザ共用の推論コアロジック。
+- `demo/dsp.js` / `demo/data_gen.js`: JS 版の信号処理・データ生成モジュール。
+- `demo/evaluate_snr.js`: Node.js 上での精度評価スクリプト。
+- `demo/demo.js`: ブラウザデモ用フロントエンド。
+- `demo/audio-processor.js`: Web Audio API 用の信号処理ワークレット。
+
+## SNR の定義
+本プロジェクトにおける SNR (Signal-to-Noise Ratio) は、以下の基準で定義されています。
+
+- **信号電力 ($P_{\text{signal}}$):** モールス信号が **ON（マーク）の状態** における正弦波の平均電力。
+  - 振幅 $A$ の正弦波の場合、$P_{\text{signal}} = A^2 / 2$ です。
+- **雑音電力 ($P_{\text{noise}}$):** 全帯域（ナイキスト周波数まで）における加法性ホワイトガウスノイズ (AWGN) の平均電力。
+- **SNR 計算式:** $\text{SNR}_{\text{dB}} = 10 \log_{10} (P_{\text{signal}} / P_{\text{noise}})$
+
+この定義により、送信する文章のデューティ比（ON/OFF比率）に依存せず、信号が存在する瞬間の強度に基づいてノイズ耐性を評価しています。
 
 ## 開発フェーズ
 1. **フェーズ 1:** データジェネレータの実装
 2. **フェーズ 2:** モデル定義と学習（オンザフライ生成）
 3. **フェーズ 3:** リアルタイム推論エンジン（Python）の開発
 4. **フェーズ 4:** Web ブラウザ（ONNX Runtime Web / WASM）へのデプロイ
+
+## 技術的設計と知見
+
+### 1. マルチタスク学習と強制的な構造学習
+学習初期、CTC はアライメントが一切得られない「宝探し」のような状態に陥ります。この問題を打破し、モデルに信号の物理的構造を強制的に学習させるため、複数の補助ヘッドを併用しています。
+- **Signal Head**: フレーム単位の信号状態（Dit/Dah/Space）を分類。低レイヤーに「何が信号で何がノイズか」を教え込み、特徴抽出を安定化させます。
+- **Boundary Head**: 文字境界（文字間空白の終端）を予測。アライメントの拠り所を与え、低 SNR 時のスパイク崩壊を防ぎます。
+
+### 2. なぜ合成データ環境で CTC を使うのか
+本プロジェクトは合成データを使用しているため、原理的には全フレームに対して厳密なラベル付け（強教師あり学習）が可能です。しかし、あえて CTC をメインの損失関数に採用しています。
+
+これは、**出力を簡略化し、デコード処理を軽量化するため**です。フレーム単位の厳密な分類結果から文字列を再構成するよりも、CTC によるスパイク出力を扱う方が、ストリーミング推論における後処理（デバウンスや重複除去）が圧倒的にシンプルになり、ブラウザ上でのリアルタイム動作に適しています。
+
+### 3. 設計のポイント: バウンダリ情報の分離
+Boundary Head の出力を CTC Head の入力に直接混ぜる構成は採用していません。これは、モデルが音声特徴の学習をサボり、境界信号をトリガーに「その場で最もらしい文字を出す」というショートカット（カンニング）を学習してしまうのを防ぐためです。代わりに、学習時のみ境界外の出力を罰する **Illegal Spike Penalty** を導入し、推論時の因果性を保ちつつスパイク位置をピンポイントに矯正しています。
+
+### 4. 徹底したカリキュラムトレーニング
+リズムの微細な差（L と R など）を正確に捉えるため、段階的な学習プロセスを構築しています。
+- **Koch メソッド**: 2 文字から開始し、精度に応じて 1 文字ずつ追加。
+- **対照学習**: 新文字導入時、誤認しやすい既存文字（例：L に対する R）を重点サンプリングし、差異を集中学習。
+- **段階的環境悪化**: クリーンな環境でリズムを習得した後、打鍵の揺らぎ、ノイズ、フェージング（QSB）を順次導入。
+
+## 開発ワークフロー
+
+本プロジェクトでは、モデルの学習からブラウザデプロイまで、以下のサイクルで開発を進めます。
+
+### 1. モデルの学習と改善 (PyTorch)
+`train.py` を用いてモデルを学習させ、ロスや CER の推移を確認します。
+```bash
+make train ARGS="--epochs 10"
+docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 -u train.py --epochs 5000 --batch-size 20 --samples-per-epoch 5000 --resume latest
+```
+
+### 2. モデルの性能限界の評価
+学習したチェックポイントに対して、SNR ごとの CER 曲線を描画し、モデルのノイズ耐性を確認します。
+```bash
+make performance
+# 成果物: diagnostics/snr_performance_latest.png
+```
+
+### 3. ONNX エクスポートと量子化
+モデルを ONNX 形式に変換し、ブラウザ向けに軽量化（INT8 量子化）します。
+```bash
+make onnx
+# 成果物: demo/cw_decoder.onnx, demo/cw_decoder_quantized.onnx
+```
+
+### 4. ONNX モデルの精度検証 (Python)
+量子化による精度劣化がないかを Python 環境で確認します。
+```bash
+make performance_onnx
+# 成果物: diagnostics/snr_performance_onnx_comparison.png
+```
+
+### 5. JavaScript 推論エンジンの検証 (Node.js)
+ブラウザ向けに移植した JS ロジック（DSP、デコード）が Python 実装と数値的に整合しているかを検証します。
+
+*   **ユニットテスト:** ロジックの単体テスト
+    ```bash
+    make test-js
+    ```
+*   **精度評価:** JS 推論エンジンによる SNR 評価。高 SNR で CER 0% になることを確認し、移植ミスを検出します。
+    ```bash
+    make evaluate-js
+    ```
+
+### 6. ブラウザでの動作確認
+最後に `demo/demo.html` をブラウザで開き、実際のリアルタイム復号動作を確認します。

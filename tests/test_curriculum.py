@@ -78,7 +78,7 @@ class TestAdaptiveCurriculum(unittest.TestCase):
         self.trainer.phases_since_last_advance = 2
         
         # Save
-        self.trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer)
+        self.trainer.save_checkpoint(epoch, train_loss, val_loss, val_cer, 0.1, 0.1, 0.9)
         
         # Reset trainer state to verify load
         self.trainer.current_phase = 1

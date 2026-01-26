@@ -61,8 +61,8 @@ def check_streaming_consistency(module, input_shape, chunk_size, device='cpu'):
 @pytest.mark.parametrize("chunk_size", [1, 7, 40, 80, 33])
 def test_conv_subsampling_consistency(chunk_size):
     # Input: (B, T, F) -> (1, 400, 80)
-    input_shape = (1, 400, config.N_MELS)
-    subsampling = ConvSubsampling(config.N_MELS, config.D_MODEL)
+    input_shape = (1, 400, config.N_BINS)
+    subsampling = ConvSubsampling(config.N_BINS, config.D_MODEL)
     
     diff = check_streaming_consistency(subsampling, input_shape, chunk_size)
     assert diff < 1e-5, f"ConvSubsampling consistency failed. Diff: {diff}"
@@ -87,7 +87,7 @@ def test_attention_consistency(chunk_size):
 
 @pytest.mark.parametrize("chunk_size", [40, 80, 33])
 def test_model_consistency(chunk_size):
-    input_shape = (1, 400, config.N_MELS)
+    input_shape = (1, 400, config.N_BINS)
     model = StreamingConformer(num_layers=2) # Small model for testing
     
     diff = check_streaming_consistency(model, input_shape, chunk_size)
@@ -110,7 +110,7 @@ def test_cache_limit_and_pe_consistency():
     states = None
     with torch.no_grad():
         for i in range(num_chunks):
-            x = torch.randn(1, chunk_size, config.N_MELS)
+            x = torch.randn(1, chunk_size, config.N_BINS)
             (logits, _, _), states = model(x, states)
             
             # Check attn cache size of the first layer

@@ -125,9 +125,9 @@ def test_impulse_alignment():
         print(f"Input Mel peak frame: {input_peak_frame}")
         print(f"Expected output peak frame: {expected_output_peak}")
         
-        # Allow 1 frame tolerance for windowing effects in center=False
+        # Allow 2 frame tolerance for windowing effects in center=False with N_FFT=512
         theoretical_frame = trigger_sample // config.HOP_LENGTH
-        assert abs(input_peak_frame - theoretical_frame) <= 1, \
+        assert abs(input_peak_frame - theoretical_frame) <= 2, \
             f"Input peak at {input_peak_frame}, expected near {theoretical_frame}"
 
 if __name__ == "__main__":

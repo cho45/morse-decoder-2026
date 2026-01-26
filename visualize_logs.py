@@ -21,6 +21,7 @@ def plot_history(csv_path, output_path):
                         'val_cer': float(row['val_cer']),
                         'cer_phrase': float(row.get('cer_phrase', 0)),
                         'cer_random': float(row.get('cer_random', 0)),
+                        'sig_acc': float(row.get('sig_acc', 0)),
                         'lr': float(row['lr']),
                         'phase': int(row.get('phase', 0))
                     }
@@ -43,6 +44,7 @@ def plot_history(csv_path, output_path):
     val_cer = [data[ep]['val_cer'] for ep in epochs]
     cer_phrase = [data[ep]['cer_phrase'] for ep in epochs]
     cer_random = [data[ep]['cer_random'] for ep in epochs]
+    sig_acc = [data[ep]['sig_acc'] for ep in epochs]
     lrs = [data[ep]['lr'] for ep in epochs]
     phases = [data[ep]['phase'] for ep in epochs]
 
@@ -64,6 +66,15 @@ def plot_history(csv_path, output_path):
         ax2.plot(epochs, cer_phrase, label='Phrase CER', color='blue', marker='o', markersize=3, alpha=0.6, linestyle='--')
     if any(c > 0 for c in cer_random):
         ax2.plot(epochs, cer_random, label='Random CER', color='orange', marker='x', markersize=3, alpha=0.6, linestyle='--')
+        
+    # Plot Signal Error Rate (1.0 - Accuracy)
+    sig_err = [1.0 - a for a in sig_acc]
+    if any(e > 0 for e in sig_err):
+        ax2_sig = ax2.twinx()
+        ax2_sig.plot(epochs, sig_err, label='Signal Error', color='green', marker='v', markersize=3, alpha=0.4, linestyle=':')
+        ax2_sig.set_ylabel('Signal Error Rate', color='green')
+        ax2_sig.tick_params(axis='y', labelcolor='green')
+        ax2_sig.set_ylim(0, 1.0)
         
     ax2.set_ylabel('Character Error Rate (CER)')
     ax2.set_xlabel('Epoch')

@@ -35,8 +35,8 @@ def test_train_epoch():
 def test_validate():
     args = DummyArgs()
     trainer = Trainer(args)
-    # Trainer.validate now expects multi-task dataset outputs
-    avg_loss, avg_cer = trainer.validate(1)
+    # Trainer.validate returns (avg_loss, avg_cer, cer_phrase, cer_random, sig_acc)
+    avg_loss, avg_cer, cer_phrase, cer_random, sig_acc = trainer.validate(1)
     assert isinstance(avg_loss, float)
     assert isinstance(avg_cer, float)
 
@@ -46,8 +46,8 @@ def test_save_checkpoint():
         shutil.rmtree(args.save_dir)
     
     trainer = Trainer(args)
-    # Updated to match new signature: save_checkpoint(epoch, train_loss, val_loss, val_cer)
-    trainer.save_checkpoint(1, 0.6, 0.5, 0.1)
+    # Updated to match new signature: save_checkpoint(epoch, train_loss, val_loss, val_cer, cer_phrase, cer_random, sig_acc)
+    trainer.save_checkpoint(1, 0.6, 0.5, 0.1, 0.1, 0.1, 0.9)
     
     checkpoint_path = os.path.join(args.save_dir, "checkpoint_epoch_1.pt")
     assert os.path.exists(checkpoint_path)
@@ -62,12 +62,15 @@ def test_collate_fn():
     
     # Create a small dummy batch
     waveform = torch.randn(16000) # 1 second
-    # signal_labels has length corresponding to mel frames: (16000 - 400)//160 + 1 = 98
-    signal_labels = torch.zeros(98)
-    boundary_labels = torch.zeros(98)
-    batch = [(waveform, "TEST", 20, signal_labels, boundary_labels)]
+    # signal_labels has length corresponding to mel frames: (16000 - 512)//160 + 1 = 97
+    # Use config values to be safe
+    l_mel = (16000 - config.N_FFT) // config.HOP_LENGTH + 1
+    signal_labels = torch.zeros(l_mel)
+    boundary_labels = torch.zeros(l_mel)
+    is_phrase = False
+    batch = [(waveform, "TEST", 20, signal_labels, boundary_labels, is_phrase)]
     
-    waveforms, targets, lengths, target_lengths, texts, wpms, signals, boundaries = trainer.collate_fn(batch)
+    waveforms, targets, lengths, target_lengths, texts, wpms, signals, boundaries, is_phrases = trainer.collate_fn(batch)
     
     assert waveforms.ndim == 2 # (B, T)
     assert waveforms.size(0) == 1

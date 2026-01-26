@@ -88,7 +88,7 @@ def test_conv_module_streaming_consistency():
 
 # --- Tests for ConvSubsampling ---
 def test_subsampling_causality():
-    in_channels = config.N_MELS
+    in_channels = config.N_BINS
     out_channels = 64
     sub = ConvSubsampling(in_channels, out_channels)
     sub.eval()
@@ -106,7 +106,7 @@ def test_subsampling_causality():
     assert torch.allclose(out1[:, :35, :], out2[:, :35, :], atol=1e-6)
 
 def test_subsampling_streaming_consistency():
-    in_channels = config.N_MELS
+    in_channels = config.N_BINS
     out_channels = 64
     sub = ConvSubsampling(in_channels, out_channels)
     sub.eval()
@@ -135,14 +135,14 @@ def test_subsampling_streaming_consistency():
 def test_model_full_streaming_consistency():
     device = get_device()
     model = StreamingConformer(
-        n_mels=config.N_MELS,
+        n_mels=config.N_BINS,
         num_classes=10,
         d_model=64,
         num_layers=2
     ).to(device)
     model.eval()
     
-    x = torch.randn(1, 200, config.N_MELS).to(device)
+    x = torch.randn(1, 200, config.N_BINS).to(device)
     with torch.no_grad():
         (y_batch, _, _), _ = model(x)
         

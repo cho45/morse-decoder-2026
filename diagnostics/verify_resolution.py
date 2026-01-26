@@ -27,7 +27,7 @@ def main():
     trainer = train.Trainer(MockArgs())
     
     # Generate Samples for M and K at 20 WPM
-    print(f"Config: N_FFT={config.N_FFT}, HOP_LENGTH={config.HOP_LENGTH}, N_MELS={config.N_MELS}")
+    print(f"Config: N_FFT={config.N_FFT}, HOP_LENGTH={config.HOP_LENGTH}, N_BINS={config.N_BINS}")
     print("Generating M and K samples at 20 WPM...")
     
     # M: -- (Dash Dash)

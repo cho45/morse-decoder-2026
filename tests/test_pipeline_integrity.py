@@ -18,11 +18,11 @@ class DummyArgs:
 
 def test_mel_physical_properties():
     """
-    Measure actual Mel power levels to derive correct normalization.
+    Measure actual Spectrogram power levels to derive correct normalization.
     """
     args = DummyArgs()
     trainer = Trainer(args)
-    mel_transform = trainer.mel_transform
+    spec_transform = trainer.spec_transform
     
     # 700Hz Sine wave at amplitude 1.0
     t = torch.arange(16000) / config.SAMPLE_RATE
@@ -30,12 +30,16 @@ def test_mel_physical_properties():
     silence = torch.zeros(1, 16000).to(trainer.device)
     
     with torch.no_grad():
-        mel_sig = mel_transform(signal)
-        mel_sil = mel_transform(silence)
+        spec_sig = spec_transform(signal)
+        spec_sil = spec_transform(silence)
         
-        # Current logic in train.py uses log10(x + 1e-9)
-        log_sig = torch.log10(mel_sig + 1e-9)
-        log_sil = torch.log10(mel_sil + 1e-9)
+        # Crop to target bins
+        spec_sig = spec_sig[:, trainer.bin_start:trainer.bin_end, :]
+        spec_sil = spec_sil[:, trainer.bin_start:trainer.bin_end, :]
+
+        # Current logic in train.py uses log1p(x * 100)
+        log_sig = torch.log1p(spec_sig * 100.0)
+        log_sil = torch.log1p(spec_sil * 100.0)
         
         sig_val = log_sig.max().item()
         sil_val = log_sil.mean().item()
@@ -61,9 +65,9 @@ def test_temporal_alignment():
     waveform[0, trigger_sample:] = torch.sin(2 * torch.pi * 700.0 * t)
     
     with torch.no_grad():
-        mels = trainer.mel_transform(waveform)
-        # Check energy across frames
-        energies = mels[0].mean(dim=0)
+        spec = trainer.spec_transform(waveform)
+        # Check energy across frames (using target bins)
+        energies = spec[0, trainer.bin_start:trainer.bin_end, :].mean(dim=0)
         
         # Frame 9 (ending at 1600) should be low
         # Frame 10 (starting at 1600) should be high

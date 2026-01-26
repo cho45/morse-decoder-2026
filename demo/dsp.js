@@ -2,7 +2,7 @@
  * DSP Utilities for CW Decoder
  */
 
-class DSP {
+export class DSP {
     /**
      * Fast Fourier Transform (Radix-2 Cooley-Tukey)
      * Input size must be a power of 2.
@@ -49,52 +49,51 @@ class DSP {
     }
 
     /**
-     * Calculate Mel Filterbank
-     * Matches torchaudio/librosa behavior with fractional bin interpolation and area normalization.
+     * IIR Filter (Direct Form II Transposed)
+     * Equivalent to scipy.signal.lfilter(b, a, x)
      */
-    static createMelFilters(n_mels, n_fft, sample_rate, f_min = 500, f_max = 900) {
-        const hz_to_mel = (hz) => 2595 * Math.log10(1 + hz / 700);
-        const mel_to_hz = (mel) => 700 * (Math.pow(10, mel / 2595) - 1);
-        
-        const min_mel = hz_to_mel(f_min);
-        const max_mel = hz_to_mel(f_max);
-        
-        const mel_points = new Float32Array(n_mels + 2);
-        for (let i = 0; i < n_mels + 2; i++) {
-            mel_points[i] = mel_to_hz(min_mel + (max_mel - min_mel) * i / (n_mels + 1));
-        }
-        
-        const bin_points = mel_points.map(hz => hz * n_fft / sample_rate);
-        const filters = new Array(n_mels);
-        const num_bins = Math.floor(n_fft / 2) + 1;
-        
-        for (let i = 0; i < n_mels; i++) {
-            filters[i] = new Float32Array(num_bins);
-            const left = bin_points[i];
-            const center = bin_points[i + 1];
-            const right = bin_points[i + 2];
-            
-            for (let j = 0; j < num_bins; j++) {
-                if (j > left && j < center) {
-                    filters[i][j] = (j - left) / (center - left);
-                } else if (j >= center && j < right) {
-                    filters[i][j] = (right - j) / (right - center);
-                } else {
-                    filters[i][j] = 0;
-                }
-            }
-            
-            // Area normalization
-            let sum = 0;
-            for (let j = 0; j < num_bins; j++) sum += filters[i][j];
-            if (sum > 0) {
-                for (let j = 0; j < num_bins; j++) filters[i][j] /= sum;
-            }
-        }
-        return filters;
-    }
-}
+    static lfilter(b, a, x) {
+        const n = x.length;
+        const nb = b.length;
+        const na = a.length;
+        // Use Float64Array for internal state to maintain precision for high-order filters
+        const y = new Float64Array(n);
+        const z = new Float64Array(Math.max(nb, na));
 
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = DSP;
+        // Normalize by a[0]
+        const a0 = a[0];
+        const nb_norm = b.map(v => v / a0);
+        const na_norm = a.map(v => v / a0);
+
+        for (let i = 0; i < n; i++) {
+            y[i] = nb_norm[0] * x[i] + z[0];
+            for (let j = 1; j < Math.max(nb, na); j++) {
+                const bj = j < nb ? nb_norm[j] : 0;
+                const aj = j < na ? na_norm[j] : 0;
+                z[j - 1] = bj * x[i] - aj * y[i] + (z[j] || 0);
+            }
+        }
+        // Convert back to Float32Array if input was Float32Array, or return Float64Array
+        if (x instanceof Float32Array) {
+            return new Float32Array(y);
+        }
+        return y;
+    }
+
+    /**
+     * Generate Gaussian Noise (Box-Muller transform)
+     */
+    static generateGaussianNoise(length, sigma = 1.0) {
+        const noise = new Float32Array(length);
+        for (let i = 0; i < length; i += 2) {
+            const u1 = Math.random();
+            const u2 = Math.random();
+            const mag = sigma * Math.sqrt(-2.0 * Math.log(u1));
+            noise[i] = mag * Math.cos(2.0 * Math.PI * u2);
+            if (i + 1 < length) {
+                noise[i + 1] = mag * Math.sin(2.0 * Math.PI * u2);
+            }
+        }
+        return noise;
+    }
 }

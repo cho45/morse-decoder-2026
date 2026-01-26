@@ -67,7 +67,7 @@ class DetailedEvaluator:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.model = StreamingConformer(
-            n_mels=config.N_MELS,
+            n_mels=config.N_BINS,
             num_classes=config.NUM_CLASSES,
             d_model=config.D_MODEL,
             n_head=config.N_HEAD,
@@ -81,7 +81,7 @@ class DetailedEvaluator:
             sample_rate=config.SAMPLE_RATE,
             n_fft=config.N_FFT,
             hop_length=config.HOP_LENGTH,
-            n_mels=config.N_MELS,
+            n_mels=config.N_BINS,
             f_min=500.0,
             f_max=900.0,
             center=False
@@ -159,7 +159,7 @@ class DetailedEvaluator:
         fig, axes = plt.subplots(5, 1, figsize=(15, 12), sharex=True, gridspec_kw={'height_ratios': [2, 2, 2, 1, 1]})
 
         # 1. Mel Spectrogram
-        axes[0].imshow(mels, aspect='auto', origin='lower', extent=[t_mel[0], t_mel[-1], 0, config.N_MELS])
+        axes[0].imshow(mels, aspect='auto', origin='lower', extent=[t_mel[0], t_mel[-1], 0, config.N_BINS])
         axes[0].set_ylabel("Mel Bin")
         title_text = f"Detailed Analysis: '{text}' at SNR={snr}dB ({mode} inference)\nDecoded: '{decoded_text}'"
         axes[0].set_title(title_text)

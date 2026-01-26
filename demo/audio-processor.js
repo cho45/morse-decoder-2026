@@ -3,9 +3,9 @@
  * This processor only buffers incoming audio and sends it to the main thread for inference.
  */
 class MorseBufferProcessor extends AudioWorkletProcessor {
-    constructor() {
+    constructor(options) {
         super();
-        this.hopLength = 160; // 10ms @ 16kHz
+        this.hopLength = (options.processorOptions && options.processorOptions.hopLength) || 160;
         this.audioBuffer = new Float32Array(this.hopLength);
         this.bufferPtr = 0;
     }

@@ -182,6 +182,7 @@ class MorseGenerator:
             current_sample += num_samples
             
         # Generate multi-class frame-level labels
+        # 0: Background/Space, 1: Dit, 2: Dah, 3: Inter-word space
         num_frames = (total_samples - config.N_FFT) // config.HOP_LENGTH + 1
         signal_frames = np.zeros(num_frames, dtype=np.int64) # 0: Background
         boundary_frames = np.zeros(num_frames, dtype=np.float32)
@@ -226,7 +227,15 @@ class MorseGenerator:
             for class_id, duration in timing:
                 duration_samples = int(duration * self.sample_rate)
                 if time_ptr <= center_sample < time_ptr + duration_samples:
-                    signal_frames[i] = class_id
+                    # Simplify classes:
+                    # Original: 1: Dit, 2: Dah, 3: Intra, 4: Inter-char, 5: Inter-word
+                    # New: 1: Dit, 2: Dah, 0: Space, 3: Inter-word
+                    if class_id in [1, 2]:
+                        signal_frames[i] = class_id
+                    elif class_id == 5:
+                        signal_frames[i] = 3
+                    else:
+                        signal_frames[i] = 0
                     break
                 time_ptr += duration_samples
                 if time_ptr > center_sample:
@@ -266,11 +275,11 @@ class HFChannelSimulator:
     def apply_noise(self, waveform: np.ndarray, snr_db: float = 10.0, impulse_prob: float = 0.001) -> np.ndarray:
         """Apply AWGN and impulse noise."""
         # AWGN
-        sig_avg_watts = np.mean(waveform**2)
-        sig_avg_db = 10 * np.log10(sig_avg_watts + 1e-12)
-        noise_avg_db = sig_avg_db - snr_db
-        noise_avg_watts = 10 ** (noise_avg_db / 10)
-        noise = np.random.normal(0, np.sqrt(noise_avg_watts), len(waveform))
+        # SNR is defined based on the average power of the signal during the MARK (ON) state.
+        # For a sine wave with amplitude 1.0, the power is 0.5.
+        mark_power = 0.5
+        noise_power = mark_power / (10**(snr_db / 10))
+        noise = np.random.normal(0, np.sqrt(noise_power), len(waveform))
         
         # Impulse noise
         impulses = np.zeros(len(waveform))
@@ -311,14 +320,15 @@ class HFChannelSimulator:
 
 def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate: int = config.SAMPLE_RATE,
                     jitter: float = 0.0, weight: float = 1.0,
-                    fading_speed: float = 0.1, min_fading: float = 0.05) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    fading_speed: float = 0.1, min_fading: float = 0.05,
+                    frequency: float = 700.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
     # Human artifacts are now controlled by arguments
     
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
-    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, wpm=wpm)
+    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=frequency, wpm=wpm)
     
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
     if snr_db < 45:
@@ -326,7 +336,8 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
         if random.random() > 0.5:
             waveform = sim.apply_qrm(waveform, snr_db=snr_db + random.uniform(0, 10))
         waveform = sim.apply_noise(waveform, snr_db=snr_db)
-        waveform = sim.apply_filter(waveform)
+        # Apply filter centered at the signal frequency
+        waveform = sim.apply_filter(waveform, center_freq=frequency)
     else:
         # Truly clean: no noise, no filter, no fading
         pass
@@ -346,7 +357,9 @@ class CWDataset(Dataset):
                  focus_chars: str = None, focus_prob: float = 0.5,
                  fading_speed_min: float = 0.1, fading_speed_max: float = 0.1,
                  min_fading: float = 0.1,
-                 phrase_prob: float = 0.0):
+                 phrase_prob: float = 0.0,
+                 min_freq: float = 650.0,
+                 max_freq: float = 750.0):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -365,6 +378,8 @@ class CWDataset(Dataset):
         self.focus_chars = focus_chars
         self.focus_prob = focus_prob
         self.phrase_prob = phrase_prob
+        self.min_freq = min_freq
+        self.max_freq = max_freq
         self.gen = MorseGenerator()
 
     def generate_random_callsign(self) -> str:
@@ -382,7 +397,8 @@ class CWDataset(Dataset):
     def generate_phrase(self) -> str:
         """Generate a text from templates."""
         template = random.choice(config.PHRASE_TEMPLATES)
-        call = self.generate_random_callsign()
+        call1 = self.generate_random_callsign()
+        call2 = self.generate_random_callsign()
         # Generate random strings for name and city to avoid hallucination
         name = "".join(random.choices(string.ascii_uppercase, k=random.randint(3, 6)))
         city = "".join(random.choices(string.ascii_uppercase, k=random.randint(3, 8)))
@@ -392,7 +408,16 @@ class CWDataset(Dataset):
         # 599 -> 5NN conversion for realism
         rst = rst.replace('9', 'N')
         
-        return template.format(call=call, name=name, city=city, rst=rst, weather=weather, temp=temp)
+        return template.format(
+            call=call1,
+            call1=call1,
+            call2=call2,
+            name=name,
+            city=city,
+            rst=rst,
+            weather=weather,
+            temp=temp
+        )
 
     def __len__(self):
         return self.num_samples
@@ -455,9 +480,12 @@ class CWDataset(Dataset):
         
         fading_speed = random.uniform(self.fading_speed_min, self.fading_speed_max)
         
+        frequency = random.uniform(self.min_freq, self.max_freq)
+        
         waveform, label, signal_labels, boundary_labels = generate_sample(
             text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight,
-            fading_speed=fading_speed, min_fading=self.min_fading
+            fading_speed=fading_speed, min_fading=self.min_fading,
+            frequency=frequency
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels, is_phrase

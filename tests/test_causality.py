@@ -7,11 +7,11 @@ def test_subsampling_causality():
     """
     Ensure that future input frames do not affect past output frames in ConvSubsampling.
     """
-    subsampling = ConvSubsampling(config.N_MELS, config.D_MODEL)
+    subsampling = ConvSubsampling(config.N_BINS, config.D_MODEL)
     subsampling.eval()
     
     T = 20
-    x1 = torch.randn(1, T, config.N_MELS)
+    x1 = torch.randn(1, T, config.N_BINS)
     x2 = x1.clone()
     # Modify the future frame (e.g., frame 10)
     x2[:, 10:, :] += 1.0
@@ -37,7 +37,7 @@ def test_model_causality():
     model.eval()
     
     T = 40
-    x1 = torch.randn(1, T, config.N_MELS)
+    x1 = torch.randn(1, T, config.N_BINS)
     x2 = x1.clone()
     x2[:, 20:, :] += 1.0
     
@@ -57,7 +57,7 @@ def test_strict_streaming_consistency():
     model.eval()
     
     T = 40
-    x = torch.randn(1, T, config.N_MELS)
+    x = torch.randn(1, T, config.N_BINS)
     
     with torch.no_grad():
         (y_batch, _, _), _ = model(x)

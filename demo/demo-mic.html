@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CW Decoder - Microphone & Wide-band Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #1a1a1a;
+        }
+
+        .panel {
+            background: #ffffff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            max-width: 1000px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        select, input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            background: #fff;
+            border: 1px solid #ccc;
+            color: #333;
+            font-family: inherit;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        button {
+            background: #007bff;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button.stop {
+            background: #dc3545;
+        }
+
+        button.stop:hover {
+            background: #a71d2a;
+        }
+
+        button:disabled {
+            background: #555;
+            color: #888;
+            cursor: not-allowed;
+        }
+
+        .output {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 20px;
+            min-height: 80px;
+            font-size: 24px;
+            letter-spacing: 2px;
+            word-wrap: break-word;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #000;
+        }
+
+        .status {
+            padding: 10px;
+            background: #e9ecef;
+            border-left: 4px solid #007bff;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #495057;
+        }
+
+        .canvas-container {
+            position: relative;
+            margin-bottom: 10px;
+            width: 100%;
+            height: 400px;
+            background: #000;
+            border: 1px solid #ccc;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+
+        .freq-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📡 CW Decoder - Mic & Wide-band Demo</h1>
+
+        <div class="panel">
+            <h2>コントロール</h2>
+            <div class="control-group">
+                <button id="micBtn">マイク開始</button>
+                <button id="demoBtn">デモモード開始</button>
+                <button id="stopBtn" class="stop" disabled>停止</button>
+            </div>
+            <div class="grid">
+                <div class="control-group">
+                    <label for="modelSelect">使用モデル</label>
+                    <select id="modelSelect">
+                        <option value="./cw_decoder_quantized.onnx" selected>軽量 (INT8) - 11MB</option>
+                        <option value="./cw_decoder.onnx">標準 (FP32) - 30MB</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>自動追従</label>
+                    <label style="font-weight: normal;">
+                        <input type="checkbox" id="autoTrack" checked> 有効
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label for="volume">デモ音量: <span id="volumeValue">0.3</span></label>
+                    <input type="range" id="volume" min="0" max="1" value="0.3" step="0.01">
+                </div>
+            </div>
+            <div class="status" id="status">準備完了</div>
+        </div>
+
+        <div class="panel">
+            <h2>広域スペクトログラム (0 - 4000 Hz)</h2>
+            <div class="canvas-container">
+                <canvas id="waterfallCanvas" width="1000" height="400"></canvas>
+                <canvas id="overlayCanvas" width="1000" height="400"></canvas>
+            </div>
+            </div>
+            <div class="status" id="debugInfo">
+                サンプルレート: - Hz | FFTサイズ: - | フレーム間隔: - ms
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>モデル入力解析 (14 bins) & 推論結果</h2>
+            <div class="canvas-container" style="height: 150px;">
+                <canvas id="inputCanvas" width="1000" height="150"></canvas>
+                <canvas id="inputOverlayCanvas" width="1000" height="150"></canvas>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>デコード結果</h2>
+            <div class="output" id="output"></div>
+        </div>
+    </div>
+
+    <script type="module" src="demo-mic.js"></script>
+</body>
+</html>

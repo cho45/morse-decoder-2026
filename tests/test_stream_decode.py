@@ -62,7 +62,7 @@ def dummy_checkpoint():
     with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
         device = "cpu"
         model = StreamingConformer(
-            n_mels=config.N_MELS,
+            n_mels=config.N_BINS,
             num_classes=config.NUM_CLASSES,
             d_model=config.D_MODEL,
             n_head=config.N_HEAD,
@@ -91,11 +91,7 @@ def test_stream_decoder_process_chunk(dummy_checkpoint):
     decoder = StreamDecoder(dummy_checkpoint, device="cpu")
     
     # To trigger processing, we need len(combined) >= samples_needed
-    # samples_needed = num_hops * 320 + 240
-    # If chunk_size is a multiple of 16000 (sample_rate), it is also a multiple of 320.
-    # So len(combined) will always be 240 samples short of triggering the last block.
-    # We add extra samples to ensure processing triggers at least once.
-    chunk_size = 16000 + 240
+    chunk_size = 20000
     audio_chunk = np.random.randn(chunk_size).astype(np.float32)
     
     # Process chunk

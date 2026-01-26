@@ -136,6 +136,17 @@
         <h1>📡 CW Decoder - Real-time Demo</h1>
 
         <div class="panel">
+            <h2>モデル設定</h2>
+            <div class="control-group">
+                <label for="modelSelect">使用モデル</label>
+                <select id="modelSelect">
+                    <option value="./cw_decoder_quantized.onnx" selected>軽量 (INT8) - 11MB</option>
+                    <option value="./cw_decoder.onnx">標準 (FP32) - 30MB</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="panel">
             <h2>入力テキスト</h2>
             <div class="control-group">
                 <label for="inputText">送信するテキスト</label>
@@ -164,8 +175,8 @@
                 </div>
 
                 <div class="control-group">
-                    <label for="volume">音量: <span class="value-display" id="volumeValue">0.5</span></label>
-                    <input type="range" id="volume" min="0" max="1" value="0.5" step="0.05">
+                    <label for="volume">音量: <span class="value-display" id="volumeValue">0.1</span></label>
+                    <input type="range" id="volume" min="0" max="1" value="0.1" step="0.01">
                 </div>
             </div>
 
@@ -213,7 +224,6 @@
         </div>
     </div>
 
-    <script src="dsp.js"></script>
-    <script src="demo.js"></script>
+    <script type="module" src="demo.js"></script>
 </body>
 </html>

@@ -1,0 +1,606 @@
+/**
+ * CW Decoder - Microphone & Wide-band Demo Script
+ */
+import { DSP } from './dsp.js';
+import { NoiseNode } from './noise-node.js';
+import {
+    N_BINS, NUM_LAYERS, CHARS, ID_TO_CHAR,
+    softmax, sigmoid, initStates
+} from './inference.js';
+
+// --- Constants & Config ---
+const WINDOW_MS = 32;
+const HOP_MS = 10;
+const MAX_FREQ = 4000;
+const PEAK_LOCK_MS = 3000;
+
+// --- State Variables ---
+let audioContext = null;
+let session = null;
+let isRunning = false;
+let isInferenceRunning = false;
+let stream = null;
+let demoNodes = [];
+let masterGainNode = null;
+
+let currentStates = null;
+let decodedText = "";
+let lastCharId = 0;
+
+// FFT & Processing Parameters
+let sampleRate = 0;
+let windowSize = 0;
+let hopLength = 0;
+let nFft = 0;
+
+// Inference Buffering
+let inferenceBuffer = [];
+const INFERENCE_CHUNK_SIZE = 10;
+
+// Peak Tracking State
+let targetFreq = 800;
+let trackedFreq = 800;
+let peakLockTimer = 0;
+const peakSmoothing = 0.7;
+
+// Buffers
+const historyLen = 400;
+let waterfallBuffer = [];
+let audioBuf = null;
+let inputSpecBuffer = [];
+let inputSpecHistory = []; // Buffer for 14 bins history
+let sigHistory = [];       // Buffer for signal probs
+let eventHistory = [];     // Buffer for decoded char events {char, pos}
+let totalFrames = 0;
+
+// UI Elements
+const waterfallCanvas = document.getElementById('waterfallCanvas');
+const waterfallCtx = waterfallCanvas.getContext('2d', { alpha: false });
+const overlayCanvas = document.getElementById('overlayCanvas');
+const overlayCtx = overlayCanvas.getContext('2d');
+const inputCanvas = document.getElementById('inputCanvas');
+const inputCtx = inputCanvas.getContext('2d', { alpha: false });
+const inputOverlayCanvas = document.getElementById('inputOverlayCanvas');
+const inputOverlayCtx = inputOverlayCanvas.getContext('2d');
+const micBtn = document.getElementById('micBtn');
+const demoBtn = document.getElementById('demoBtn');
+const stopBtn = document.getElementById('stopBtn');
+const status = document.getElementById('status');
+const debugInfo = document.getElementById('debugInfo');
+const volumeSlider = document.getElementById('volume');
+const volumeValue = document.getElementById('volumeValue');
+const autoTrackCheck = document.getElementById('autoTrack');
+
+// Viridis colormap
+const viridis = [
+    [68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142],
+    [38, 130, 142], [31, 158, 137], [53, 183, 121], [109, 205, 89], [253, 231, 37]
+];
+
+function getColor(v) {
+    v = Math.max(0, Math.min(1, v));
+    const pos = v * (viridis.length - 1);
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    if (idx >= viridis.length - 1) return viridis[viridis.length - 1];
+    const c1 = viridis[idx];
+    const c2 = viridis[idx + 1];
+    return [
+        Math.floor(c1[0] + (c2[0] - c1[0]) * frac),
+        Math.floor(c1[1] + (c2[1] - c1[1]) * frac),
+        Math.floor(c1[2] + (c2[2] - c1[2]) * frac)
+    ];
+}
+
+// --- Station Class for Demo Mode ---
+const MORSE_MAP = {
+    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
+    'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
+    'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
+    'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
+    'Y': '-.--', 'Z': '--..', '1': '.----', '2': '..---', '3': '...--',
+    '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..',
+    '9': '----.', '0': '-----', '/': '-..-.', '?': '..--..', '.': '.-.-.-',
+    ',': '--..--', ' ': ' '
+};
+
+class Station {
+    constructor(ctx, freq, wpm, jitter, volume, destination) {
+        this.ctx = ctx;
+        this.freq = freq;
+        this.wpm = wpm;
+        this.jitter = jitter;
+        this.volume = volume;
+        this.osc = ctx.createOscillator();
+        this.gain = ctx.createGain();
+        this.osc.type = 'sine';
+        this.osc.frequency.value = freq;
+        this.gain.gain.value = 0;
+        this.osc.connect(this.gain);
+        this.gain.connect(destination);
+        this.osc.start();
+        this.active = true;
+    }
+
+    async play(text) {
+        await new Promise(r => setTimeout(r, Math.random() * 5000));
+        const attackRelease = 0.005;
+        const ditBase = 1.2 / this.wpm;
+        const getLen = (units) => units * ditBase * (1 + (Math.random() * 2 - 1) * this.jitter);
+
+        while (this.active && isRunning) {
+            let schedTime = this.ctx.currentTime + 0.1;
+            for (const char of text.toUpperCase()) {
+                if (!this.active || !isRunning) break;
+                if (char === ' ') { schedTime += getLen(4); continue; }
+                const code = MORSE_MAP[char];
+                if (!code) continue;
+                for (const symbol of code) {
+                    const duration = getLen(symbol === '.' ? 1 : 3);
+                    this.gain.gain.setTargetAtTime(this.volume, schedTime, attackRelease);
+                    schedTime += duration;
+                    this.gain.gain.setTargetAtTime(0, schedTime, attackRelease);
+                    schedTime += getLen(1);
+                }
+                schedTime += getLen(2); // char space
+            }
+            await new Promise(r => setTimeout(r, Math.max(0, (schedTime - this.ctx.currentTime) * 1000) + 2000));
+        }
+    }
+
+    stop() {
+        this.active = false;
+        try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) {}
+    }
+}
+
+// --- ONNX Inference ---
+
+async function initONNX() {
+    try {
+        const modelPath = document.getElementById('modelSelect').value;
+        status.textContent = `モデル読み込み中...`;
+        session = await ort.InferenceSession.create(modelPath, {
+            executionProviders: ['wasm']
+        });
+        status.textContent = `準備完了`;
+    } catch (e) {
+        status.textContent = "モデル読み込み失敗: " + e;
+        console.error(e);
+    }
+}
+
+async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
+    if (!session || isInferenceRunning) return;
+    isInferenceRunning = true;
+
+    if (!currentStates) currentStates = initStates(ort);
+
+    try {
+        const x = new ort.Tensor('float32', combinedSpecFrames, [1, tLen, N_BINS]);
+        const inputs = { x, ...currentStates };
+        const results = await session.run(inputs);
+
+        // Map output frames back to global timeline.
+        // MODEL_DELAY accounts for the model's internal lookahead/processing lag.
+        // Set to 0 to align with the natural buffering delay.
+        const MODEL_DELAY = 0;
+        const startFramePos = (capturedTotalFrames - INFERENCE_CHUNK_SIZE + 1) - MODEL_DELAY;
+
+        const nextStates = { sub_cache: results.new_sub_cache };
+        for (let i = 0; i < NUM_LAYERS; i++) {
+            nextStates[`attn_k_${i}`] = results[`new_attn_k_${i}`];
+            nextStates[`attn_v_${i}`] = results[`new_attn_v_${i}`];
+            nextStates[`offset_${i}`] = results[`new_offset_${i}`];
+            nextStates[`conv_cache_${i}`] = results[`new_conv_cache_${i}`];
+        }
+        
+        Object.values(currentStates).forEach(t => {
+            if (t && t.dispose && !Object.values(nextStates).includes(t)) t.dispose();
+        });
+        currentStates = nextStates;
+
+        const numOutFrames = results.logits.dims[1];
+        const numClasses = CHARS.length + 1;
+        const logits = results.logits.data;
+        const sigLogits = results.signal_logits.data;
+
+        for (let t = 0; t < numOutFrames; t++) {
+            const pos = startFramePos + (t * 2);
+            const sigProbs = softmax(Array.from(sigLogits.slice(t * 4, (t + 1) * 4)));
+            sigHistory.push({ probs: sigProbs, pos: pos });
+            if (sigHistory.length > 800) sigHistory.shift();
+
+            let maxId = 0, maxVal = -Infinity;
+            for (let i = 0; i < numClasses; i++) {
+                const val = logits[t * numClasses + i];
+                if (val > maxVal) { maxVal = val; maxId = i; }
+            }
+
+            if (maxId !== 0 && maxId !== lastCharId) {
+                let maxSigId = 0, maxSigVal = -Infinity;
+                for (let s = 0; s < 4; s++) {
+                    if (sigProbs[s] > maxSigVal) { maxSigVal = sigProbs[s]; maxSigId = s; }
+                }
+                
+                if (maxSigId === 3 && decodedText.length > 0 && !decodedText.endsWith(" ")) {
+                    decodedText += " ";
+                    eventHistory.push({ char: " ", pos: pos });
+                }
+
+                const char = ID_TO_CHAR[maxId];
+                if (char) {
+                    decodedText += char;
+                    eventHistory.push({ char: char, pos: pos });
+                    document.getElementById('output').textContent = decodedText;
+                }
+            }
+            lastCharId = maxId;
+        }
+        // Keep events until they are well off-screen (400px width + margin)
+        while (eventHistory.length > 0 && eventHistory[0].pos < totalFrames - 800) {
+            eventHistory.shift();
+        }
+
+        x.dispose();
+        Object.values(results).forEach(t => {
+            if (t && t.dispose && !Object.values(currentStates).includes(t)) t.dispose();
+        });
+    } catch (e) {
+        console.error("Inference error:", e);
+    } finally {
+        isInferenceRunning = false;
+    }
+}
+
+// --- Core Logic ---
+
+function peakDetect(magnitudes) {
+    const numBins = magnitudes.length;
+    let peaks = [];
+    let sumP = 0;
+    for (let j = 0; j < numBins; j++) sumP += magnitudes[j];
+    const avgP = sumP / numBins;
+    const threshold = avgP * 5 + 0.0001;
+
+    for (let j = 1; j < numBins - 1; j++) {
+        if (magnitudes[j] > threshold && magnitudes[j] > magnitudes[j - 1] && magnitudes[j] > magnitudes[j + 1]) {
+            peaks.push({ p: magnitudes[j], k: j, f: j * sampleRate / nFft });
+        }
+    }
+    peaks.sort((a, b) => b.p - a.p);
+
+    if (autoTrackCheck.checked) {
+        const now = Date.now();
+        const nearbyPeak = peaks.find(p => Math.abs(p.f - trackedFreq) < 50);
+        if (nearbyPeak) {
+            trackedFreq = trackedFreq * 0.9 + nearbyPeak.f * 0.1;
+            peakLockTimer = now + PEAK_LOCK_MS;
+        } else if (now > peakLockTimer && peaks.length > 0) {
+            trackedFreq = peaks[0].f;
+            peakLockTimer = now + PEAK_LOCK_MS;
+        }
+    } else {
+        trackedFreq = targetFreq;
+    }
+}
+
+function processAudioChunk(chunk) {
+    audioBuf.set(audioBuf.subarray(chunk.length));
+    audioBuf.set(chunk, nFft - chunk.length);
+
+    const real = new Float32Array(nFft);
+    real.set(audioBuf.subarray(nFft - windowSize));
+    const imag = new Float32Array(nFft);
+    for (let j = 0; j < windowSize; j++) {
+        real[j] *= 0.5 * (1 - Math.cos(2 * Math.PI * j / windowSize));
+    }
+    DSP.fft(real, imag);
+
+    const numBins = Math.floor(MAX_FREQ * nFft / sampleRate);
+    const magnitudes = new Float32Array(numBins);
+    for (let j = 0; j < numBins; j++) magnitudes[j] = real[j] * real[j] + imag[j] * imag[j];
+
+    // 1. Peak Detection
+    peakDetect(magnitudes);
+
+    // 2. Inference Sampling & Buffering
+    const W = 14 * 31.25;
+    const fStart = trackedFreq - W/2 + 31.25/2;
+    const specFrame = new Float32Array(14);
+    for (let i = 0; i < 14; i++) {
+        const f = fStart + i * 31.25;
+        const k = f * nFft / sampleRate;
+        const kIdx = Math.floor(k);
+        const kFrac = k - kIdx;
+        if (kIdx >= 0 && kIdx < nFft - 1) {
+            const p1 = real[kIdx]*real[kIdx] + imag[kIdx]*imag[kIdx];
+            const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
+            const p = p1 * (1 - kFrac) + p2 * kFrac;
+            specFrame[i] = Math.log1p(p * 100.0) / 5.0;
+        }
+    }
+    
+    totalFrames++;
+    inferenceBuffer.push(specFrame);
+    if (inferenceBuffer.length >= INFERENCE_CHUNK_SIZE) {
+        const combined = new Float32Array(14 * INFERENCE_CHUNK_SIZE);
+        for (let i = 0; i < INFERENCE_CHUNK_SIZE; i++) combined.set(inferenceBuffer[i], i * 14);
+        if (session) runInference(combined, INFERENCE_CHUNK_SIZE, totalFrames);
+        inferenceBuffer = [];
+    }
+
+    // Capture history for input visualization
+    const frameCopy = new Float32Array(specFrame);
+    inputSpecHistory.push(frameCopy);
+    inputSpecBuffer.push(frameCopy);
+    if (inputSpecHistory.length > 800) inputSpecHistory.shift();
+
+    // 3. Waterfall update
+    const displayMagnitude = magnitudes.map(p => Math.max(0, Math.log1p(p * 5000) / 12));
+    waterfallBuffer.push(displayMagnitude);
+    if (waterfallBuffer.length > historyLen) waterfallBuffer.shift();
+}
+
+// --- Lifecycle & UI ---
+
+async function initAudio() {
+    if (!session) await initONNX();
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        sampleRate = audioContext.sampleRate;
+        await NoiseNode.addModule(audioContext);
+        windowSize = Math.floor(sampleRate * (WINDOW_MS / 1000));
+        hopLength = Math.floor(sampleRate * (HOP_MS / 1000));
+        nFft = Math.pow(2, Math.ceil(Math.log2(windowSize)));
+        audioBuf = new Float32Array(nFft);
+        debugInfo.innerHTML = `サンプルレート: ${sampleRate} Hz | FFTサイズ: ${nFft} | フレーム間隔: ${HOP_MS} ms`;
+        await audioContext.audioWorklet.addModule('audio-processor.js');
+    }
+    if (audioContext.state === 'suspended') await audioContext.resume();
+}
+
+function stopAll() {
+    isRunning = false;
+    currentStates = null;
+    inferenceBuffer = [];
+    lastCharId = 0;
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
+    demoNodes = [];
+    masterGainNode = null;
+    micBtn.disabled = false; demoBtn.disabled = false; stopBtn.disabled = true;
+    status.textContent = "停止中";
+}
+
+micBtn.onclick = async () => {
+    await initAudio();
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setupProcessing(audioContext.createMediaStreamSource(stream));
+        isRunning = true;
+        micBtn.disabled = true; demoBtn.disabled = true; stopBtn.disabled = false;
+        status.textContent = "マイク動作中";
+    } catch (e) { status.textContent = "マイクアクセス失敗: " + e; }
+};
+
+demoBtn.onclick = async () => {
+    await initAudio();
+    isRunning = true;
+    micBtn.disabled = true; demoBtn.disabled = true; stopBtn.disabled = false;
+    status.textContent = "デモモード動作中";
+
+    const analysisMix = audioContext.createGain();
+    masterGainNode = audioContext.createGain();
+    masterGainNode.gain.value = parseFloat(volumeSlider.value);
+    masterGainNode.connect(audioContext.destination);
+
+    const noise = new NoiseNode(audioContext, { type: 'whitenoise' });
+    const noiseGain = audioContext.createGain();
+    noiseGain.gain.value = 0.01;
+    noise.connect(noiseGain);
+    noiseGain.connect(analysisMix);
+    noiseGain.connect(masterGainNode);
+    demoNodes.push(noise);
+
+    const stations = [
+        { freq: 650,  wpm: 18, jitter: 0.05, vol: 0.3, msg: "CQ CQ DE JA1ABC K" },
+        { freq: 1200, wpm: 25, jitter: 0.1,  vol: 0.1, msg: "CQ CQ DE K1XYZ K" },
+        { freq: 1800, wpm: 35, jitter: 0.02, vol: 0.5, msg: "CQ CQ DE G4ZOO K" },
+        { freq: 2500, wpm: 20, jitter: 0.15, vol: 0.05, msg: "CQ CQ DE JH1UMV K" },
+        { freq: 3200, wpm: 28, jitter: 0.05, vol: 0.2, msg: "CQ CQ DE DF7CB K" }
+    ];
+
+    stations.forEach(s => {
+        const st = new Station(audioContext, s.freq, s.wpm, s.jitter, s.vol, analysisMix);
+        st.gain.connect(masterGainNode);
+        st.play(s.msg);
+        demoNodes.push(st);
+    });
+
+    setupProcessing(analysisMix);
+};
+
+stopBtn.onclick = stopAll;
+
+function setupProcessing(source) {
+    const workletNode = new AudioWorkletNode(audioContext, 'morse-processor', {
+        processorOptions: { hopLength: hopLength }
+    });
+    workletNode.port.onmessage = (e) => {
+        if (isRunning && e.data.type === 'audio_chunk') processAudioChunk(e.data.chunk);
+    };
+    source.connect(workletNode);
+    demoNodes.push(workletNode);
+}
+
+// --- Visualization ---
+
+function drawWaterfall() {
+    if (isRunning && waterfallBuffer.length > 0) {
+        const w = waterfallCanvas.width;
+        const h = waterfallCanvas.height;
+        const numFramesToDraw = waterfallBuffer.length;
+        if (numFramesToDraw > 0) {
+            waterfallCtx.drawImage(waterfallCanvas, -numFramesToDraw, 0);
+            for (let f = 0; f < numFramesToDraw; f++) {
+                const frameData = waterfallBuffer[f];
+                const numBins = frameData.length;
+                const binH = h / numBins;
+                const x = w - numFramesToDraw + f;
+                for (let i = 0; i < numBins; i++) {
+                    const [r, g, b] = getColor(frameData[i]);
+                    waterfallCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                    waterfallCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
+                }
+            }
+            const latestNumBins = waterfallBuffer[waterfallBuffer.length - 1].length;
+            drawOverlay(w, h, latestNumBins, h / latestNumBins);
+            waterfallBuffer = [];
+        }
+    }
+    drawInputSpec();
+    requestAnimationFrame(drawWaterfall);
+}
+
+function drawInputSpec() {
+    if (!isRunning || inputSpecHistory.length === 0) return;
+    const w = inputCanvas.width;
+    const h = inputCanvas.height;
+    
+    if (inputSpecBuffer.length > 0) {
+        const numToDraw = inputSpecBuffer.length;
+        // 1. Shift Background by exactly the number of new frames
+        inputCtx.drawImage(inputCanvas, -numToDraw, 0);
+        
+        // 2. Adaptive Normalization for visualization
+        let minV = Infinity, maxV = -Infinity;
+        const historyToScan = inputSpecHistory.slice(-w);
+        for (let t = 0; t < historyToScan.length; t++) {
+            for (let i = 0; i < 14; i++) {
+                const v = historyToScan[t][i];
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+        }
+        if (maxV <= minV) maxV = minV + 1.0;
+
+        const binH = h / 14;
+        for (let f = 0; f < numToDraw; f++) {
+            const frame = inputSpecBuffer[f];
+            const x = w - numToDraw + f;
+            for (let i = 0; i < 14; i++) {
+                const normalizedVal = (frame[i] - minV) / (maxV - minV);
+                const [r, g, b] = getColor(normalizedVal);
+                inputCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                inputCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
+            }
+        }
+        inputSpecBuffer = [];
+    }
+
+    // 3. Draw Overlay (Signal classification & Decoded chars)
+    drawInputOverlay(w, h);
+}
+
+function drawInputOverlay(w, h) {
+    inputOverlayCtx.clearRect(0, 0, w, h);
+    
+    if (sigHistory.length === 0) return;
+
+    const barH = 12;
+    const sigColors = ['rgba(0,0,0,0)', '#ff4d4d', '#4d79ff', '#ffcc00'];
+
+    sigHistory.forEach(item => {
+        const x = w - (totalFrames - item.pos);
+        if (x < 0 || x >= w) return;
+
+        let maxIdx = 0, maxP = -1;
+        for (let s = 0; s < 4; s++) {
+            if (item.probs[s] > maxP) { maxP = item.probs[s]; maxIdx = s; }
+        }
+        
+        if (maxIdx > 0) {
+            inputOverlayCtx.fillStyle = sigColors[maxIdx];
+            // Each sig output represents 2 input frames
+            inputOverlayCtx.fillRect(x - 1, h - barH, 2, barH);
+        }
+    });
+
+    // Draw Decoded Characters
+    inputOverlayCtx.fillStyle = '#fff';
+    inputOverlayCtx.font = 'bold 16px Courier New';
+    inputOverlayCtx.textAlign = 'center';
+    
+    eventHistory.forEach(ev => {
+        const x = w - (totalFrames - ev.pos);
+        if (x > 0 && x < w) {
+            inputOverlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            inputOverlayCtx.beginPath();
+            inputOverlayCtx.moveTo(x, 0);
+            inputOverlayCtx.lineTo(x, h - barH);
+            inputOverlayCtx.stroke();
+            inputOverlayCtx.fillText(ev.char, x, 20);
+        }
+    });
+}
+
+function drawOverlay(w, h, numBins, binH) {
+    overlayCtx.clearRect(0, 0, w, h);
+    const W = 14 * 31.25;
+    const yCenter = h - (trackedFreq * nFft / sampleRate) * binH;
+    const yHalfWidth = (W / 2 * nFft / sampleRate) * binH;
+
+    overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    overlayCtx.fillRect(0, yCenter - yHalfWidth, w, yHalfWidth * 2);
+    overlayCtx.strokeStyle = 'rgba(255, 0, 0, 0.9)';
+    overlayCtx.lineWidth = 2;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(w - 100, yCenter); overlayCtx.lineTo(w, yCenter);
+    overlayCtx.stroke();
+
+    overlayCtx.fillStyle = '#fff';
+    overlayCtx.font = 'bold 14px Arial';
+    overlayCtx.textAlign = 'right';
+    overlayCtx.shadowColor = 'black'; overlayCtx.shadowBlur = 4;
+    overlayCtx.fillText(`${Math.round(trackedFreq)} Hz`, w - 10, yCenter - 8);
+    overlayCtx.shadowBlur = 0;
+
+    overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    overlayCtx.font = '10px Arial';
+    overlayCtx.textAlign = 'left';
+    for (let f = 0; f <= MAX_FREQ; f += 500) {
+        const y = h - (f * nFft / sampleRate) * binH;
+        if (y < 0 || y > h) continue;
+        overlayCtx.beginPath(); overlayCtx.moveTo(0, y); overlayCtx.lineTo(15, y);
+        overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; overlayCtx.stroke();
+        overlayCtx.fillText(`${f}Hz`, 18, y + 3);
+    }
+}
+
+overlayCanvas.onclick = (e) => {
+    if (!sampleRate) return;
+    const rect = overlayCanvas.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    targetFreq = (rect.height - y) / rect.height * MAX_FREQ;
+    trackedFreq = targetFreq;
+    autoTrackCheck.checked = false;
+    
+    // Reset decoder state and text when changing frequency
+    decodedText = "";
+    document.getElementById('output').textContent = "";
+    lastCharId = 0;
+    currentStates = null; // Re-init states on next inference
+    sigHistory = [];
+    eventHistory = [];
+    
+    status.textContent = `周波数固定: ${Math.round(targetFreq)} Hz`;
+};
+
+volumeSlider.oninput = () => {
+    const vol = parseFloat(volumeSlider.value);
+    volumeValue.textContent = vol.toFixed(2);
+    if (masterGainNode) masterGainNode.gain.setTargetAtTime(vol, audioContext.currentTime, 0.01);
+};
+
+drawWaterfall();

@@ -5,7 +5,7 @@ import config
 def test_model_multi_output():
     batch_size = 2
     seq_len = 100
-    n_mels = config.N_MELS
+    n_mels = config.N_BINS
     num_classes = config.NUM_CLASSES
     
     model = StreamingConformer(n_mels=n_mels, num_classes=num_classes)
@@ -25,7 +25,7 @@ def test_streaming_multi_output():
     model.eval()
     
     chunk_size = 40
-    x = torch.randn(1, chunk_size, config.N_MELS)
+    x = torch.randn(1, chunk_size, config.N_BINS)
     
     with torch.no_grad():
         (logits, signal_logits, boundary_logits), states = model(x)

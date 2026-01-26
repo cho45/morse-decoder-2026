@@ -177,13 +177,14 @@ class ConvSubsampling(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(2, 2), padding=(0, 1))
-        f_out = (config.N_MELS + 2*1 - 3) // 2 + 1
+        f_out = (config.N_BINS + 2*1 - 3) // 2 + 1
         self.out_linear = nn.Linear(out_channels * f_out, out_channels)
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         x = x.unsqueeze(1) # (B, 1, T, F)
         padding_t = 2
         if cache is None:
+            # x.size(3) is the frequency dimension (N_BINS)
             pad = torch.zeros(x.size(0), 1, padding_t, x.size(3), device=x.device)
             x = torch.cat([pad, x], dim=2)
         else:
@@ -210,7 +211,7 @@ class ConvSubsampling(nn.Module):
 
 class StreamingConformer(nn.Module):
     def __init__(self,
-                 n_mels: int = config.N_MELS,
+                 n_mels: int = config.N_BINS,
                  num_classes: int = config.NUM_CLASSES,
                  d_model: int = config.D_MODEL,
                  n_head: int = config.N_HEAD,
@@ -271,7 +272,7 @@ if __name__ == "__main__":
     model = StreamingConformer(num_layers=4).to(device)
     model.eval()
     num_test_frames = config.SUBSAMPLING_RATE * 200
-    dummy_input = torch.randn(1, num_test_frames, config.N_MELS).to(device)
+    dummy_input = torch.randn(1, num_test_frames, config.N_BINS).to(device)
     with torch.no_grad():
         (output, sig_out, bound_out), _ = model(dummy_input)
     print(f"Input shape: {dummy_input.shape}")

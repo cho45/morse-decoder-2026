@@ -1,19 +1,15 @@
 /**
  * CW Decoder - Main Demo Script
  */
+import {
+    N_FFT, HOP_LENGTH, N_BINS, NUM_LAYERS, D_MODEL, N_HEAD, D_K, KERNEL_SIZE,
+    CHARS, ID_TO_CHAR,
+    computeSpecFrame, softmax, sigmoid, initStates
+} from './inference.js';
 
-// --- Constants & Config (Sync with config.py) ---
+// --- Constants & Config ---
 let SAMPLE_RATE = 16000; // Updated by AudioContext
-const N_FFT = 512; // Power of 2 for FFT
 const INPUT_LEN = 400; // Original window size (25ms @ 16kHz)
-const HOP_LENGTH = 160;
-const N_MELS = 16;
-const MAX_CACHE_LEN = 1000;
-const NUM_LAYERS = 4;
-const D_MODEL = 256;
-const N_HEAD = 4;
-const D_K = D_MODEL / N_HEAD;
-const KERNEL_SIZE = 31;
 
 const MORSE_MAP = {
     'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
@@ -25,13 +21,6 @@ const MORSE_MAP = {
     '9': '----.', '0': '-----', '/': '-..-.', '?': '..--..', '.': '.-.-.-',
     ',': '--..--', ' ': ' '
 };
-
-// CTC Vocab (Sync with config.py)
-const STD_CHARS = ",./0123456789?ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-const PROSIGNS = ["<BT>", "<AR>", "<SK>", "<KA>"];
-const CHARS = [...STD_CHARS, ...PROSIGNS];
-const ID_TO_CHAR = {};
-CHARS.forEach((char, i) => { ID_TO_CHAR[i + 1] = char; });
 
 // --- State Variables ---
 let audioContext = null;
@@ -46,8 +35,7 @@ let isRunning = false;
 let isInferenceRunning = false; // 推論の重なりを防止
 let currentStates = null;
 let audioBuffer = new Float32Array(N_FFT); // Sliding window for FFT
-let melFilters = null;
-let melBuffer = []; // Buffer for 2 frames
+let melBuffer = []; // Buffer for frames
 let decodedText = "";
 let lastCharId = 0;
 let decodedEvents = []; // {char: string, pos: number} for visualization
@@ -68,21 +56,11 @@ const ctcCanvas = document.getElementById('ctcCanvas');
 const sigCanvas = document.getElementById('sigCanvas');
 const boundCanvas = document.getElementById('boundCanvas');
 
-function softmax(logits) {
-    const maxLogit = Math.max(...logits);
-    const scores = logits.map(l => Math.exp(l - maxLogit));
-    const sum = scores.reduce((a, b) => a + b, 0);
-    return scores.map(s => s / sum);
-}
-
-function sigmoid(x) {
-    return 1 / (1 + Math.exp(-x));
-}
-
 // --- UI Elements ---
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const resetBtn = document.getElementById('resetBtn');
+const modelSelect = document.getElementById('modelSelect');
 const inputText = document.getElementById('inputText');
 const output = document.getElementById('output');
 const status = document.getElementById('status');
@@ -112,51 +90,24 @@ const updateSliders = () => {
 });
 updateSliders();
 
-// --- DSP Utils ---
-function applyFFTAndMel(samples, filters) {
-    const n = N_FFT;
-    const real = new Float32Array(n);
-    const imag = new Float32Array(n);
-
-    // Apply Hann window and copy to real buffer (with zero padding to 512)
-    for (let i = 0; i < INPUT_LEN; i++) {
-        real[i] = samples[i] * (0.5 * (1 - Math.cos(2 * Math.PI * i / (INPUT_LEN - 1))));
-    }
-
-    DSP.fft(real, imag);
-
-    const num_bins = Math.floor(n / 2) + 1;
-    const power = new Float32Array(num_bins);
-    for (let k = 0; k < num_bins; k++) {
-        power[k] = real[k] * real[k] + imag[k] * imag[k];
-    }
-
-    const mels = new Float32Array(filters.length);
-    for (let i = 0; i < filters.length; i++) {
-        let sum = 0;
-        for (let j = 0; j < num_bins; j++) {
-            sum += power[j] * filters[i][j];
-        }
-        // Match train.py/evaluate_detailed.py scaling: log1p(mel * 100) / 5.0
-        mels[i] = Math.log1p(sum * 100.0) / 5.0;
-    }
-    return mels;
-}
-
-function createMelFilters(n_mels, n_fft, sample_rate) {
-    return DSP.createMelFilters(n_mels, n_fft, sample_rate);
-}
-
 // --- ONNX Inference ---
 async function initONNX() {
     try {
-        status.textContent = "モデル読み込み中...";
+        const modelPath = modelSelect.value;
+        status.textContent = `モデル読み込み中: ${modelPath.split('/').pop()}...`;
         
         // URLハッシュでプロバイダーを切り替え (#webgpu または #wasm)
         const useWebGPU = window.location.hash === '#webgpu';
         const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
         
-        session = await ort.InferenceSession.create('./cw_decoder.onnx', {
+        // 既存のセッションがあれば（もし可能なら）破棄
+        if (session) {
+            // ort-web では明示的なセッション破棄メソッドはないが、
+            // 変数を上書きすることでGC対象にする
+            session = null;
+        }
+
+        session = await ort.InferenceSession.create(modelPath, {
             executionProviders: providers
         });
         
@@ -179,17 +130,8 @@ async function initONNX() {
     }
 }
 
-function initStates() {
-    const states = {
-        sub_cache: new ort.Tensor('float32', new Float32Array(1 * 1 * 2 * N_MELS), [1, 1, 2, N_MELS])
-    };
-    for (let i = 0; i < NUM_LAYERS; i++) {
-        states[`attn_k_${i}`] = new ort.Tensor('float32', new Float32Array(0), [1, N_HEAD, 0, D_K]);
-        states[`attn_v_${i}`] = new ort.Tensor('float32', new Float32Array(0), [1, N_HEAD, 0, D_K]);
-        states[`offset_${i}`] = new ort.Tensor('int64', new BigInt64Array([0n]), []);
-        states[`conv_cache_${i}`] = new ort.Tensor('float32', new Float32Array(1 * D_MODEL * (KERNEL_SIZE - 1)), [1, D_MODEL, KERNEL_SIZE - 1]);
-    }
-    return states;
+function initStatesWrapper() {
+    return initStates(ort);
 }
 
 async function runInference(melFrame, tLen = 1) {
@@ -206,7 +148,7 @@ async function runInference(melFrame, tLen = 1) {
     const start = performance.now();
     let x = null;
     try {
-        x = new ort.Tensor('float32', melFrame, [1, tLen, N_MELS]);
+        x = new ort.Tensor('float32', melFrame, [1, tLen, N_BINS]);
         const inputs = { x, ...currentStates };
 
         const results = await session.run(inputs);
@@ -235,11 +177,14 @@ async function runInference(melFrame, tLen = 1) {
             }
         });
 
-    // Data for visualization (only last frame of the chunk for simplicity in history)
+    // Data for visualization
+    const subsamplingRate = 2; // Sync with config.py
+    const expectedOutFrames = Math.floor((tLen + subsamplingRate - 1) / subsamplingRate);
     const numOutFrames = results.logits.dims[1];
-    for (let t = 0; t < numOutFrames; t++) {
+    
+    for (let t = 0; t < Math.min(numOutFrames, expectedOutFrames); t++) {
         const ctcLogits = results.logits.data.slice(t * (CHARS.length + 1), (t + 1) * (CHARS.length + 1));
-        const sigLogits = results.signal_logits.data.slice(t * 6, (t + 1) * 6);
+        const sigLogits = results.signal_logits.data.slice(t * 4, (t + 1) * 4);
         const boundLogit = results.boundary_logits.data[t];
 
         const ctcProbs = softmax(Array.from(ctcLogits));
@@ -266,8 +211,17 @@ async function runInference(melFrame, tLen = 1) {
         }
 
         if (maxId !== 0 && maxId !== lastCharId) {
-            // Check for inter-word space (class 5)
-            if (sigProbs[5] > 0.5 && !decodedText.endsWith(" ")) {
+            // Check for inter-word space (class 3)
+            // Use same logic as inference.js decodeFull
+            let maxSigId = 0;
+            let maxSigVal = -Infinity;
+            for (let s = 0; s < 4; s++) {
+                if (sigProbs[s] > maxSigVal) {
+                    maxSigVal = sigProbs[s];
+                    maxSigId = s;
+                }
+            }
+            if (maxSigId === 3 && !decodedText.endsWith(" ")) {
                 decodedText += " ";
                 decodedEvents.push({char: " ", pos: totalFrames - 1});
             }
@@ -283,7 +237,7 @@ async function runInference(melFrame, tLen = 1) {
 
     // Mel History (always 2 frames for the chunk)
     for (let t = 0; t < tLen; t++) {
-        melHistory.push(melFrame.slice(t * N_MELS, (t + 1) * N_MELS));
+        melHistory.push(melFrame.slice(t * N_BINS, (t + 1) * N_BINS));
         if (melHistory.length > HISTORY_LEN * 2) melHistory.shift();
     }
     
@@ -344,7 +298,7 @@ function updateDebugInfo(startTime = null) {
 function drawVisualizations() {
     drawMel();
     drawProbs(ctcCanvas, ctcHistory, ["blank", ...CHARS], true);
-    drawProbs(sigCanvas, sigHistory, ["None", "Dit", "Dah", "Intra", "Inter-Char", "Inter-Word"]);
+    drawProbs(sigCanvas, sigHistory, ["Space", "Dit", "Dah", "Inter-Word"]);
     drawBoundary();
 }
 
@@ -357,7 +311,7 @@ function drawMel() {
     ctx.fillRect(0, 0, w, h);
 
     const cellW = w / (HISTORY_LEN * 2);
-    const cellH = h / N_MELS;
+    const cellH = h / N_BINS;
 
     // Accurate Viridis colormap points
     const viridis = [
@@ -392,7 +346,7 @@ function drawMel() {
     let minV = Infinity;
     let maxV = -Infinity;
     for (let t = 0; t < melHistory.length; t++) {
-        for (let f = 0; f < N_MELS; f++) {
+        for (let f = 0; f < N_BINS; f++) {
             const v = melHistory[t][f];
             if (v < minV) minV = v;
             if (v > maxV) maxV = v;
@@ -401,7 +355,7 @@ function drawMel() {
     if (maxV <= minV) maxV = minV + 1;
 
     for (let t = 0; t < melHistory.length; t++) {
-        for (let f = 0; f < N_MELS; f++) {
+        for (let f = 0; f < N_BINS; f++) {
             const val = (melHistory[t][f] - minV) / (maxV - minV);
             const [r, g, b] = getColor(val);
             ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
@@ -448,7 +402,7 @@ function drawProbs(canvas, history, labels, onlyTop = false) {
     }
 
     // Draw Labels for Signal Canvas
-    if (labels.length === 6) {
+    if (labels.length === 4) {
         ctx.font = '10px monospace';
         labels.forEach((l, i) => {
             ctx.fillStyle = colors[i % colors.length];
@@ -580,11 +534,10 @@ function createWhiteNoise(durationSeconds, snr) {
     const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
     const data = buffer.getChannelData(0);
 
-    // Match data_gen.py: SNR is based on mean power of the signal
-    // Standard Morse duty cycle is ~40%. Sine wave power at amp 1.0 is 0.5.
-    // So mean signal power is roughly 0.5 * 0.4 = 0.2
-    const sigAvgWatts = 0.2;
-    const noiseAvgWatts = sigAvgWatts / Math.pow(10, snr / 10);
+    // Match data_gen.py: SNR is based on the average power of the signal during the MARK (ON) state.
+    // For a sine wave with amplitude 1.0, the power is 0.5.
+    const sigMarkWatts = 0.5;
+    const noiseAvgWatts = sigMarkWatts / Math.pow(10, snr / 10);
     const sigma = Math.sqrt(noiseAvgWatts);
 
     // Box-Muller transform for Gaussian noise
@@ -615,9 +568,8 @@ async function ensureAudioContext() {
         await audioContext.resume();
     }
     // Always update to actual sample rate
-    if (SAMPLE_RATE !== audioContext.sampleRate || !melFilters) {
+    if (SAMPLE_RATE !== audioContext.sampleRate) {
         SAMPLE_RATE = audioContext.sampleRate;
-        melFilters = createMelFilters(N_MELS, N_FFT, SAMPLE_RATE);
         console.log(`AudioContext initialized at ${SAMPLE_RATE}Hz`);
     }
 }
@@ -643,13 +595,14 @@ startBtn.onclick = async () => {
         if (e.data.type === 'audio_chunk') {
             audioBuffer.set(audioBuffer.subarray(HOP_LENGTH));
             audioBuffer.set(e.data.chunk, N_FFT - HOP_LENGTH);
-            const mel = applyFFTAndMel(audioBuffer, melFilters);
+            // Use computeSpecFrame from inference.js
+            const mel = computeSpecFrame(audioBuffer);
             melBuffer.push(mel);
             // チャンクサイズを 10フレーム (100ms) に拡大してオーバーヘッドを削減
             if (melBuffer.length >= 10) {
-                const combinedMel = new Float32Array(N_MELS * 10);
+                const combinedMel = new Float32Array(N_BINS * 10);
                 for (let i = 0; i < 10; i++) {
-                    combinedMel.set(melBuffer[i], i * N_MELS);
+                    combinedMel.set(melBuffer[i], i * N_BINS);
                 }
                 runInference(combinedMel, 10);
                 melBuffer = [];
@@ -746,7 +699,7 @@ stopBtn.onclick = () => {
 resetBtn.onclick = () => {
     decodedText = "";
     output.textContent = "";
-    currentStates = initStates();
+    currentStates = initStatesWrapper();
     melBuffer = [];
     melHistory = [];
     ctcHistory = [];
@@ -758,6 +711,13 @@ resetBtn.onclick = () => {
     skipCount = 0;
     drawVisualizations();
     updateDebugInfo();
+};
+
+modelSelect.onchange = () => {
+    if (isRunning) {
+        stopBtn.onclick();
+    }
+    initONNX();
 };
 
 initONNX();

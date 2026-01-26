@@ -22,7 +22,7 @@ class TestTrainBoundary(unittest.TestCase):
         # ダミーデータの作成
         batch_size = 4
         time_len = 50
-        num_mels = config.N_MELS
+        num_mels = config.N_BINS
         
         mels = torch.randn(batch_size, time_len, num_mels).to(trainer.device)
         input_lengths = torch.full((batch_size,), time_len, dtype=torch.long).to(trainer.device)

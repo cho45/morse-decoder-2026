@@ -58,7 +58,7 @@ class ONNXWrapper(nn.Module):
 def create_initial_states(batch_size, num_layers, device='cpu'):
     """Create initial cache states with zero values."""
     d_k = config.D_MODEL // config.N_HEAD
-    sub_cache = torch.zeros(batch_size, 1, 2, config.N_MELS, device=device)
+    sub_cache = torch.zeros(batch_size, 1, 2, config.N_BINS, device=device)
 
     layer_states_flat = []
     for _ in range(num_layers):
@@ -75,7 +75,7 @@ def export_model_to_onnx(model, onnx_path, seq_len=40):
     wrapper = ONNXWrapper(model)
     wrapper.eval()  # Ensure wrapper is in eval mode
     batch_size = 1
-    x = torch.randn(batch_size, seq_len, config.N_MELS)
+    x = torch.randn(batch_size, seq_len, config.N_BINS)
     sub_cache, layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
     input_names = ['x', 'sub_cache']
@@ -177,7 +177,7 @@ class TestONNXOutputEquivalence:
         model, wrapper, session, input_names, output_names = model_and_session
 
         batch_size = 1
-        x = torch.randn(batch_size, seq_len, config.N_MELS)
+        x = torch.randn(batch_size, seq_len, config.N_BINS)
         sub_cache, layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
         # PyTorch inference
@@ -232,7 +232,7 @@ class TestONNXStreamingEquivalence:
 
         batch_size = 1
         total_seq_len = 200
-        x_full = torch.randn(batch_size, total_seq_len, config.N_MELS)
+        x_full = torch.randn(batch_size, total_seq_len, config.N_BINS)
 
         # Initialize states
         pt_sub_cache, pt_layer_states_flat = create_initial_states(batch_size, num_layers)
@@ -298,7 +298,7 @@ class TestONNXCacheStatesEquivalence:
             ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
             for chunk_idx in range(num_chunks):
-                x_chunk = torch.randn(batch_size, chunk_size, config.N_MELS)
+                x_chunk = torch.randn(batch_size, chunk_size, config.N_BINS)
 
                 # PyTorch
                 with torch.no_grad():
@@ -381,7 +381,7 @@ class TestONNXCacheLimitBehavior:
             ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
             for chunk_idx in range(num_chunks):
-                x_chunk = torch.randn(batch_size, chunk_size, config.N_MELS)
+                x_chunk = torch.randn(batch_size, chunk_size, config.N_BINS)
 
                 # PyTorch
                 with torch.no_grad():

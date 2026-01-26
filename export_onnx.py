@@ -44,7 +44,7 @@ class ONNXWrapper(nn.Module):
 def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     device = torch.device("cpu")
     model = StreamingConformer(
-        n_mels=config.N_MELS,
+        n_mels=config.N_BINS,
         num_classes=config.NUM_CLASSES,
         d_model=config.D_MODEL,
         num_layers=config.NUM_LAYERS
@@ -67,9 +67,9 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     # Dummy inputs
     batch_size = 1
     seq_len = 40 # Multiple of 4
-    x = torch.randn(batch_size, seq_len, config.N_MELS)
+    x = torch.randn(batch_size, seq_len, config.N_BINS)
     
-    sub_cache = torch.zeros(batch_size, 1, 2, config.N_MELS) # Initial sub_cache
+    sub_cache = torch.zeros(batch_size, 1, 2, config.N_BINS) # Initial sub_cache
     
     layer_states_flat = []
     for _ in range(config.NUM_LAYERS):

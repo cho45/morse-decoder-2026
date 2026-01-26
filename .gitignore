@@ -1,5 +1,7 @@
 __pycache__/
+.pytest_cache/
 *.wav
 checkpoints/
 evaluation_results/
+node_modules/
 

@@ -27,7 +27,7 @@ class TestExtremeCurriculum(unittest.TestCase):
             fading_speed_min=0.1, fading_speed_max=0.5
         )
         
-        waveform, label, wpm, signal_labels, boundary_labels = dataset[0]
+        waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[0]
         self.assertTrue(torch.is_tensor(waveform))
         print(f"Dataset extreme sample generated: SNR range [-15, -10], label: {label}")
 

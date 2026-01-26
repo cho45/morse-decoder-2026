@@ -40,8 +40,8 @@ class CTCDecoder:
         
         decoded_str = ""
         for t in range(len(ids)):
-            # Signal Head が語間空白 (5) を予測したらスペース待機フラグを立てる
-            if sig_ids[t] == 5:
+            # Signal Head が語間空白 (3) を予測したらスペース待機フラグを立てる
+            if sig_ids[t] == 3:
                 self.space_pending = True
 
             # 境界予測によるゲート制御: 境界と確信した瞬間以外は出力を無視
@@ -67,7 +67,7 @@ class StreamDecoder:
         train_args = checkpoint['args']
         
         self.model = StreamingConformer(
-            n_mels=config.N_MELS,
+            n_mels=config.N_BINS,
             num_classes=NUM_CLASSES,
             d_model=config.D_MODEL,
             n_head=config.N_HEAD,
@@ -79,15 +79,18 @@ class StreamDecoder:
         
         self.n_fft = config.N_FFT
         self.hop_length = config.HOP_LENGTH
-        self.n_mels = config.N_MELS
+        self.n_bins = config.N_BINS
         self.sample_rate = config.SAMPLE_RATE
-        self.mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=self.sample_rate,
+        self.spec_transform = torchaudio.transforms.Spectrogram(
             n_fft=self.n_fft,
             hop_length=self.hop_length,
-            n_mels=self.n_mels,
+            power=2.0,
             center=False
         ).to(self.device)
+
+        # Calculate bin indices for cropping
+        self.bin_start = int(round(config.F_MIN * config.N_FFT / config.SAMPLE_RATE))
+        self.bin_end = self.bin_start + config.N_BINS
         
         self.decoder = CTCDecoder(ID_TO_CHAR)
         self.states = None
@@ -97,12 +100,19 @@ class StreamDecoder:
 
     def preprocess(self, waveform: np.ndarray) -> torch.Tensor:
         """
-        Convert waveform to mel spectrogram.
+        Convert waveform to spectrogram.
         waveform: (T_raw,)
         """
         x = torch.from_numpy(waveform).to(self.device).unsqueeze(0) # (1, T_raw)
-        mels = self.mel_transform(x)
-        mels = (mels + 1e-9).log()
+        spec = self.spec_transform(x)
+        
+        # Crop frequency bins
+        spec = spec[:, self.bin_start:self.bin_end, :] # (1, N_BINS, T)
+
+        # Log scaling and normalization (match train.py)
+        mels = torch.log1p(spec * 100.0)
+        mels = mels / 5.0
+
         mels = mels.transpose(1, 2) # (1, T_mel, F)
         return mels
 
@@ -113,34 +123,32 @@ class StreamDecoder:
         # Combine with previous overlap
         combined = np.append(self.audio_buffer, audio_chunk)
         
-        # Subsampling rate from config
-        # We process in multiples of SUBSAMPLING_RATE frames
-        hop_size = self.hop_length * config.SUBSAMPLING_RATE
+        # Subsampling rate from config (2x)
+        # We need at least N_FFT samples to get the first frame,
+        # and then SUBSAMPLING_RATE * HOP_LENGTH samples for each subsequent model step.
+        subsampling_samples = self.hop_length * config.SUBSAMPLING_RATE
         
-        num_hops = len(combined) // hop_size
-        if num_hops == 0:
+        if len(combined) < self.n_fft:
             self.audio_buffer = combined
             return
 
-        # Samples we can actually process (multiples of hop_size)
-        process_len = num_hops * hop_size
+        # Calculate how many model steps we can take
+        # Total frames available: (len(combined) - n_fft) // hop + 1
+        total_frames = (len(combined) - self.n_fft) // self.hop_length + 1
+        num_steps = total_frames // config.SUBSAMPLING_RATE
         
-        # We need to include the samples for STFT windowing
-        # To get exactly 'num_hops * SUBSAMPLING_RATE' frames, we need:
-        # (L - n_fft) // hop + 1 = num_hops * SUBSAMPLING_RATE
-        # L = (num_hops * SUBSAMPLING_RATE - 1) * hop + n_fft
-        
-        n_frames = num_hops * config.SUBSAMPLING_RATE
-        samples_needed = (n_frames - 1) * self.hop_length + self.n_fft
-        
-        if len(combined) < samples_needed:
+        if num_steps == 0:
             self.audio_buffer = combined
             return
-            
+
+        # Number of frames to actually process
+        n_frames = num_steps * config.SUBSAMPLING_RATE
+        # Samples needed to produce exactly n_frames
+        samples_needed = (n_frames - 1) * self.hop_length + self.n_fft
+        
         chunk_to_process = combined[:samples_needed]
-        # Keep the rest for next time, but we need to keep overlap
-        # The next STFT will start at process_len
-        self.audio_buffer = combined[process_len:]
+        # Keep the rest for next time. The next frame 0 will start after n_frames * hop_length samples
+        self.audio_buffer = combined[num_steps * subsampling_samples:]
         
         with torch.no_grad():
             mels = self.preprocess(chunk_to_process)
