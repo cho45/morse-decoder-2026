@@ -332,7 +332,8 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
                     fading_speed: float = 0.1, min_fading: float = 0.05,
                     frequency: float = 700.0,
                     tx_lowpass: float = None,
-                    rise_time: float = 0.005) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    rise_time: float = 0.005,
+                    min_gain_db: float = 0.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
@@ -357,10 +358,15 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
         # Truly clean: no noise, no filter, no fading
         pass
     
-    # Normalize
+    # Normalize and apply random gain augmentation
     max_val = np.max(np.abs(waveform))
     if max_val > 0:
         waveform /= max_val
+        # Apply random gain in dB scale if min_gain_db < 0.0
+        if min_gain_db < 0.0:
+            gain_db = random.uniform(min_gain_db, 0.0)
+            gain = 10 ** (gain_db / 20)
+            waveform *= gain
         
     return torch.from_numpy(waveform).float(), text, torch.from_numpy(signal_labels).float(), torch.from_numpy(boundary_labels).float()
 
@@ -376,7 +382,8 @@ class CWDataset(Dataset):
                  min_freq: float = 650.0,
                  max_freq: float = 750.0,
                  tx_lowpass_prob: float = 0.8,
-                 rise_time_max: float = 0.025):
+                 rise_time_max: float = 0.025,
+                 min_gain_db: float = 0.0):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -399,6 +406,7 @@ class CWDataset(Dataset):
         self.max_freq = max_freq
         self.tx_lowpass_prob = tx_lowpass_prob
         self.rise_time_max = rise_time_max
+        self.min_gain_db = min_gain_db
         self.gen = MorseGenerator()
 
     def generate_random_callsign(self) -> str:
@@ -516,7 +524,8 @@ class CWDataset(Dataset):
             fading_speed=fading_speed, min_fading=self.min_fading,
             frequency=frequency,
             tx_lowpass=tx_lowpass,
-            rise_time=rise_time
+            rise_time=rise_time,
+            min_gain_db=self.min_gain_db
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels, is_phrase

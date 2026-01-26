@@ -226,7 +226,7 @@ class Trainer:
                 # Now we expand to more steps for smoother SNR transition and fading resistance
                 # Koch Phases: (len(KOCH_CHARS) - 4) + 2
                 # Additional SNR/Fading Phases: 11
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 11
+                max_phase = (len(KOCH_CHARS) - 4) + 2 + 14
                 
                 if self.current_phase < max_phase:
                     print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
@@ -451,6 +451,7 @@ class Trainer:
         self.train_dataset.max_wpm = 40
         self.train_dataset.min_freq = 650.0
         self.train_dataset.max_freq = 750.0
+        self.train_dataset.min_gain_db = 0.0 # Default: 0dB (full scale)
 
         if num_chars <= len(KOCH_CHARS):
             # Koch Phases: Gradually increase character set
@@ -580,38 +581,69 @@ class Trainer:
             print(f"Epoch {epoch} | Phase {phase}: Negative SNR 2 (-8 to 2dB, Fading min=0.8)")
 
         elif phase == max_koch_phase + 8:
-            # Phase max+8: Human Limit (人間の限界領域)
+            # Phase max+8: Negative SNR 2 (-8 to 2dB)
+            self.train_dataset.min_snr = -8.0
+            self.train_dataset.max_snr = 2.0
+            self.train_dataset.min_fading = 0.8
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 2 (-8 to 2dB, Fading min=0.8)")
+
+        elif phase == max_koch_phase + 9:
+            # Phase max+9: Volume Augmentation 1 (Mid gain)
+            # SNR is kept at Phase 42 level (-8 to 2dB) to stabilize learning
+            self.train_dataset.min_snr = -8.0
+            self.train_dataset.max_snr = 2.0
+            self.train_dataset.min_fading = 0.8
+            self.train_dataset.min_gain_db = -12.0 # approx 0.25 linear
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Volume Augmentation 1 (-8 to 2dB, Gain -12dB to 0dB)")
+
+        elif phase == max_koch_phase + 10:
+            # Phase max+10: Volume Augmentation 2 (Low gain)
+            self.train_dataset.min_snr = -8.0
+            self.train_dataset.max_snr = 2.0
+            self.train_dataset.min_fading = 0.8
+            self.train_dataset.min_gain_db = -26.0 # approx 0.05 linear
+            self.train_dataset.phrase_prob = 0.5
+            print(f"Epoch {epoch} | Phase {phase}: Volume Augmentation 2 (-8 to 2dB, Gain -26dB to 0dB)")
+
+        elif phase == max_koch_phase + 11:
+            # Phase max+11: Human Limit (人間の限界領域)
             self.train_dataset.min_snr = -12.0
             self.train_dataset.max_snr = -2.0
             self.train_dataset.min_fading = 0.9
+            self.train_dataset.min_gain_db = -40.0 # approx 0.01 linear
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Human Limit SNR (-12 to -2dB, Fading min=0.9)")
+            print(f"Epoch {epoch} | Phase {phase}: Human Limit SNR (-12 to -2dB, Gain -40dB to 0dB)")
 
-        elif phase == max_koch_phase + 9:
-            # Phase max+9: True Extreme (最終到達目標)
+        elif phase == max_koch_phase + 12:
+            # Phase max+12: True Extreme (最終到達目標)
             self.train_dataset.min_snr = -15.0
             self.train_dataset.max_snr = -5.0
             self.train_dataset.min_fading = 0.9
+            self.train_dataset.min_gain_db = -40.0
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB, Fading min=0.9)")
+            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB, Gain -40dB to 0dB)")
 
-        elif phase == max_koch_phase + 10:
-            # Phase max+10: Fading Specialization (SNRは高めで深いフェージングを学習)
+        elif phase == max_koch_phase + 13:
+            # Phase max+13: Fading Specialization
             self.train_dataset.min_snr = -5.0
             self.train_dataset.max_snr = 5.0
             self.train_dataset.min_fading = 0.3
+            self.train_dataset.min_gain_db = -40.0
             self.train_dataset.fading_speed_max = 0.2
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Fading Specialization (-5 to 5dB, Deep Fading min=0.3)")
+            print(f"Epoch {epoch} | Phase {phase}: Fading Specialization (-5 to 5dB, Deep Fading, Gain -40dB to 0dB)")
 
         else:
-            # Phase max+11: Final Refine (SNRを下げ、代わりにフェージングを緩和)
+            # Phase max+14: Final Refine
             self.train_dataset.min_snr = -10.0
             self.train_dataset.max_snr = 0.0
             self.train_dataset.min_fading = 0.5
+            self.train_dataset.min_gain_db = -40.0
             self.train_dataset.fading_speed_max = 0.3
             self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Final Refine (-10 to 0dB, Moderate Fading min=0.5)")
+            print(f"Epoch {epoch} | Phase {phase}: Final Refine (-10 to 0dB, Gain -40dB to 0dB)")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm
@@ -623,6 +655,7 @@ class Trainer:
         self.val_dataset.fading_speed_min = self.train_dataset.fading_speed_min
         self.val_dataset.fading_speed_max = self.train_dataset.fading_speed_max
         self.val_dataset.min_fading = self.train_dataset.min_fading
+        self.val_dataset.min_gain_db = self.train_dataset.min_gain_db
         self.val_dataset.chars = self.train_dataset.chars
         self.val_dataset.min_len = self.train_dataset.min_len
         self.val_dataset.max_len = self.train_dataset.max_len
