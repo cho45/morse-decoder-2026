@@ -23,6 +23,7 @@ let isInferenceRunning = false;
 let stream = null;
 let demoNodes = [];
 let masterGainNode = null;
+let userFilterNode = null;
 
 let currentStates = null;
 let decodedText = "";
@@ -45,6 +46,7 @@ const INFERENCE_CHUNK_SIZE = 12; // 120ms。推論を実行するチャンクの
 // Peak Tracking State
 let targetFreq = 800;
 let trackedFreq = 800;
+let lastTrackedFreq = 800;
 let peakLockTimer = 0;
 const peakSmoothing = 0.7;
 
@@ -239,6 +241,13 @@ async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
 
 // --- Core Logic ---
 
+function updateUserFilter() {
+    if (userFilterNode && Math.abs(trackedFreq - lastTrackedFreq) > 10) {
+        userFilterNode.frequency.setTargetAtTime(trackedFreq, audioContext.currentTime, 0.1);
+        lastTrackedFreq = trackedFreq;
+    }
+}
+
 function peakDetect(magnitudes) {
     const numBins = magnitudes.length;
     let peaks = [];
@@ -267,6 +276,7 @@ function peakDetect(magnitudes) {
     } else {
         trackedFreq = targetFreq;
     }
+    updateUserFilter();
 }
 
 function processAudioChunk(chunk) {
@@ -370,6 +380,10 @@ function stopAll() {
     demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
     demoNodes = [];
     masterGainNode = null;
+    if (userFilterNode) {
+        userFilterNode.disconnect();
+        userFilterNode = null;
+    }
     micBtn.disabled = false; demoBtn.disabled = false; stopBtn.disabled = true;
     status.textContent = "停止中";
 }
@@ -380,7 +394,23 @@ micBtn.onclick = async () => {
     await initAudio();
     try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setupProcessing(audioContext.createMediaStreamSource(stream));
+        const source = audioContext.createMediaStreamSource(stream);
+        setupProcessing(source);
+
+        // Create bandpass filter for user listening (analysis path remains unfiltered)
+        userFilterNode = audioContext.createBiquadFilter();
+        userFilterNode.type = 'bandpass';
+        userFilterNode.frequency.value = trackedFreq;
+        userFilterNode.Q.value = 10;
+
+        const outputGain = audioContext.createGain();
+        outputGain.gain.value = parseFloat(volumeSlider.value);
+        masterGainNode = outputGain;
+
+        source.connect(userFilterNode);
+        userFilterNode.connect(outputGain);
+        outputGain.connect(audioContext.destination);
+
         isRunning = true;
         micBtn.disabled = true; demoBtn.disabled = true; stopBtn.disabled = false;
         status.textContent = "マイク動作中";
@@ -398,7 +428,15 @@ demoBtn.onclick = async () => {
     const analysisMix = audioContext.createGain();
     masterGainNode = audioContext.createGain();
     masterGainNode.gain.value = parseFloat(volumeSlider.value);
-    masterGainNode.connect(audioContext.destination);
+
+    // Create bandpass filter for user listening (centered on trackedFreq)
+    userFilterNode = audioContext.createBiquadFilter();
+    userFilterNode.type = 'bandpass';
+    userFilterNode.frequency.value = trackedFreq;
+    userFilterNode.Q.value = 10; // Narrow bandwidth for focusing on single CW signal
+
+    masterGainNode.connect(userFilterNode);
+    userFilterNode.connect(audioContext.destination);
 
     const noise = new NoiseNode(audioContext, { type: 'whitenoise' });
     const noiseGain = audioContext.createGain();
@@ -605,8 +643,14 @@ overlayCanvas.onclick = (e) => {
     const y = e.clientY - rect.top;
     targetFreq = (rect.height - y) / rect.height * MAX_FREQ;
     trackedFreq = targetFreq;
+    lastTrackedFreq = targetFreq;
     autoTrackCheck.checked = false;
-    
+
+    // Update filter immediately
+    if (userFilterNode) {
+        userFilterNode.frequency.value = trackedFreq;
+    }
+
     // Reset decoder state and text when changing frequency
     decodedText = "";
     document.getElementById('output').textContent = "";
@@ -614,7 +658,7 @@ overlayCanvas.onclick = (e) => {
     currentStates = null; // Re-init states on next inference
     sigHistory = [];
     eventHistory = [];
-    
+
     status.textContent = `周波数固定: ${Math.round(targetFreq)} Hz`;
 };
 
