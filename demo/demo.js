@@ -8,6 +8,8 @@ import {
 } from './inference.js';
 import { MORSE_DICT } from './data_gen.js';
 
+// ort.env.webgpu.profiling = { mode: 'default' };
+
 // --- Constants & Config ---
 const SAMPLE_RATE = 16000; // Model expected sample rate
 const INPUT_LEN = 400; // Original window size (25ms @ 16kHz)
@@ -37,6 +39,7 @@ let decodedEvents = []; // {char: string, pos: number} for visualization
 let morseAbortController = null;
 let totalFrames = 0;
 let skipCount = 0;
+let useWebGPU = false;
 
 // Visualization Buffers (History)
 const HISTORY_LEN = 200; // Number of frames to show
@@ -86,15 +89,29 @@ const updateSliders = () => {
 updateSliders();
 
 // --- ONNX Inference ---
+async function warmupWebGPU(session, ort) {
+    const warmupStart = performance.now();
+    console.log('Starting WebGPU warmup...');
+
+    const chunkSize = 4;
+    const dummyMel = new Float32Array(N_BINS * chunkSize);
+    const dummyStates = initStates(ort);
+
+    // 初回の推論のみ実行（パイプラインコンパイルのため）
+    const result = await runChunkInference(session, dummyMel, dummyStates, ort);
+
+    // GPU 操作を完了させるために待機
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const warmupTime = performance.now() - warmupStart;
+    console.log(`WebGPU warmup completed in ${warmupTime.toFixed(1)}ms`);
+}
+
 async function initONNX() {
     try {
         const modelPath = modelSelect.value;
         status.textContent = `モデル読み込み中: ${modelPath.split('/').pop()}...`;
-        
-        // URLハッシュでプロバイダーを切り替え (#webgpu または #wasm)
-        const useWebGPU = window.location.hash === '#webgpu';
-        const providers = useWebGPU ? ['webgpu', 'wasm'] : ['wasm'];
-        
+
         // 既存のセッションがあれば（もし可能なら）破棄
         if (session) {
             // ort-web では明示的なセッション破棄メソッドはないが、
@@ -102,23 +119,24 @@ async function initONNX() {
             session = null;
         }
 
+        // URLハッシュでプロバイダーを切り替え (#webgpu または #wasm)
+        useWebGPU = window.location.hash === '#webgpu';
+        console.log('URL hash:', window.location.hash);
+        console.log('Use WebGPU:', useWebGPU);
+        const providers = useWebGPU ? ['webgpu'] : ['wasm'];
+
+        console.log(`Loading model with providers: ${providers}`);
+        console.log(`Model path: ${modelPath}`);
+
         session = await ort.InferenceSession.create(modelPath, {
-            executionProviders: providers
+            executionProviders: providers,
+            // enableGraphCapture: true,
+            graphOptimizationLevel: 'all',
+            executionMode: 'sequential'
         });
-        
-        // 実際に使用されているプロバイダー名を取得
-        let provider = 'unknown';
-        if (session.executionProviders && session.executionProviders.length > 0) {
-            provider = session.executionProviders[0];
-        } else if (session.handler) {
-            // handler の型名から判定を試みる (OnnxruntimeWebBackendWasm, OnnxruntimeWebBackendWebgpu など)
-            const handlerName = session.handler.constructor.name.toLowerCase();
-            if (handlerName.includes('webgpu')) provider = 'webgpu';
-            else if (handlerName.includes('wasm')) provider = 'wasm';
-            else provider = session.handler.epName || handlerName;
-        }
-        status.textContent = `準備完了 (${provider})`;
-        debugInfo.innerHTML = `モデル: 読み込み完了 (${provider})<br>モード切替: URLに #webgpu または #wasm を追加<br>スキップ数: 0`;
+
+        status.textContent = `準備完了 (${useWebGPU ? 'webgpu' : 'wasm'})`;
+        debugInfo.innerHTML = `モデル: 読み込み完了 (${useWebGPU ? 'webgpu' : 'wasm'})<br>モード切替: URLに #webgpu または #wasm を追加<br>スキップ数: 0`;
     } catch (e) {
         status.textContent = "モデル読み込み失敗: " + e;
         console.error(e);
@@ -141,22 +159,28 @@ async function runInference(melFrame, tLen = 1) {
     isInferenceRunning = true;
 
     const start = performance.now();
+    let inferenceTime = null;
     try {
         // Use the centralized runChunkInference to handle PCEN and states
         const result = await runChunkInference(session, melFrame, currentStates, ort);
-        
+        inferenceTime = performance.now() - start;
+
         const oldStateValues = Object.values(currentStates);
         currentStates = result.nextStates;
 
-        // WebGPU memory cleanup
-        const nextStateValues = Object.values(currentStates);
-        oldStateValues.forEach(t => {
-            if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
-                if (!nextStateValues.includes(t)) {
-                    t.dispose();
+        // WebGPU: 古いテンソルを dispose すると、次回推論時に GPU で再確保されるためオーバーヘッドになる
+        // したがって、WebGPU モードでは dispose をスキップする
+        // WASM モードでのみメモリを解放
+        if (!useWebGPU) {
+            const nextStateValues = Object.values(currentStates);
+            oldStateValues.forEach(t => {
+                if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
+                    if (!nextStateValues.includes(t)) {
+                        t.dispose();
+                    }
                 }
-            }
-        });
+            });
+        }
 
     // Data for visualization and decoding
     const numOutFrames = result.logits.length / result.numClasses;
@@ -207,7 +231,7 @@ async function runInference(melFrame, tLen = 1) {
     }
 
     drawVisualizations();
-    updateDebugInfo(start);
+    updateDebugInfo(start, inferenceTime);
 
     } catch (e) {
         console.error("Inference error:", e);
@@ -216,18 +240,17 @@ async function runInference(melFrame, tLen = 1) {
     }
 }
 
-function updateDebugInfo(startTime = null) {
+// Performance stats tracking
+let perfStats = {
+    avgInferenceTime: 0,
+    maxInferenceTime: 0,
+    minInferenceTime: Infinity,
+    count: 0,
+    lastInferenceTime: 0
+};
+
+function updateDebugInfo(startTime = null, inferenceTime = null) {
     if (!session || !currentStates) return;
-    
-    let provider = 'unknown';
-    if (session.executionProviders && session.executionProviders.length > 0) {
-        provider = session.executionProviders[0];
-    } else if (session.handler) {
-        const handlerName = session.handler.constructor.name.toLowerCase();
-        if (handlerName.includes('webgpu')) provider = 'webgpu';
-        else if (handlerName.includes('wasm')) provider = 'wasm';
-        else provider = session.handler.epName || 'unknown';
-    }
 
     const offset = currentStates.offset_0.data[0];
     const offsetNum = typeof offset === 'bigint' ? Number(offset) : offset;
@@ -235,12 +258,22 @@ function updateDebugInfo(startTime = null) {
     let latencyInfo = "";
     if (startTime) {
         const end = performance.now();
-        latencyInfo = `<br>レイテンシ: ${(end - startTime).toFixed(1)}ms`;
+        latencyInfo = `<br>総レイテンシ: ${(end - startTime).toFixed(1)}ms`;
+    }
+    
+    if (inferenceTime !== null) {
+        perfStats.count++;
+        perfStats.lastInferenceTime = inferenceTime;
+        perfStats.avgInferenceTime = (perfStats.avgInferenceTime * (perfStats.count - 1) + inferenceTime) / perfStats.count;
+        perfStats.maxInferenceTime = Math.max(perfStats.maxInferenceTime, inferenceTime);
+        perfStats.minInferenceTime = Math.min(perfStats.minInferenceTime, inferenceTime);
     }
 
-    debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${provider})<br>` +
+    debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${useWebGPU ? 'webgpu' : 'wasm'})<br>` +
                          `処理フレーム数: ${Math.floor(offsetNum)}<br>` +
-                         `スキップ数: ${skipCount}${latencyInfo}`;
+                         `スキップ数: ${skipCount}${latencyInfo}` +
+                         (inferenceTime !== null ? `<br>推論時間: ${inferenceTime.toFixed(1)}ms<br>` +
+                         `平均: ${perfStats.avgInferenceTime.toFixed(1)}ms / 最大: ${perfStats.maxInferenceTime.toFixed(1)}ms / 最小: ${perfStats.minInferenceTime.toFixed(1)}ms` : '');
 }
 
 
@@ -670,6 +703,13 @@ resetBtn.onclick = () => {
     decodedEvents = [];
     totalFrames = 0;
     skipCount = 0;
+    perfStats = {
+        avgInferenceTime: 0,
+        maxInferenceTime: 0,
+        minInferenceTime: Infinity,
+        count: 0,
+        lastInferenceTime: 0
+    };
     drawVisualizations();
     updateDebugInfo();
 };

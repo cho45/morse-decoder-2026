@@ -142,9 +142,16 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
         );
     }
 
+    const tensorStart = performance.now();
     const x = new ort.Tensor('float32', chunkFrames, [1, currentLen, N_BINS]);
+    const tensorTime = performance.now() - tensorStart;
+
     const inputs = { x, ...states };
+    const sessionStart = performance.now();
     const results = await session.run(inputs);
+    const sessionTime = performance.now() - sessionStart;
+
+    console.log(`ONNX Runtime session.run: ${sessionTime.toFixed(2)}ms`);
 
     const numClasses = results.logits.dims[2];
     const actualOutFrames = results.logits.dims[1];

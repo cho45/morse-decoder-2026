@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.min.js"></script>
+
     <title>CW Decoder - Real-time Demo</title>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -140,8 +141,8 @@
             <div class="control-group">
                 <label for="modelSelect">使用モデル</label>
                 <select id="modelSelect">
-                    <option value="./cw_decoder_quantized.onnx" selected>軽量 (INT8) - 11MB</option>
-                    <option value="./cw_decoder.onnx">標準 (FP32) - 30MB</option>
+                    <option value="./cw_decoder_quantized.onnx" selected>軽量 (INT8) - 8.3MB</option>
+                    <option value="./cw_decoder.onnx">標準 (FP32) - 29MB</option>
                 </select>
             </div>
         </div>
