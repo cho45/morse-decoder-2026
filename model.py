@@ -7,20 +7,15 @@ import config
 
 class RelPositionalEncoding(nn.Module):
     """Relative Positional Encoding."""
-    def __init__(self, d_model: int, max_len: int = 5000): # Increased default max_len
+    def __init__(self, d_model: int, max_len: int = config.MAX_CACHE_LEN * 2):
         super().__init__()
         self.d_model = d_model
         self.max_len = max_len
-        self.extend_pe(max_len)
-
-    def extend_pe(self, length: int, device: torch.device = torch.device('cpu')):
-        pe = torch.zeros(length, self.d_model, device=device)
-        position = torch.arange(0, length, dtype=torch.float, device=device).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=device).float() * -(math.log(10000.0) / self.d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe, persistent=False)
-        self.max_len = length
+        self.register_buffer('pe', torch.zeros(max_len, d_model))
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
+        self.pe[:, 0::2] = torch.sin(position * div_term)
+        self.pe[:, 1::2] = torch.cos(position * div_term)
 
     def forward(self, length: int, offset=0):
         """
@@ -28,17 +23,10 @@ class RelPositionalEncoding(nn.Module):
             length: シーケンス長 (Python int, x.size() から取得)
             offset: 開始位置 (テンソルまたは整数)
         """
-        # offset をテンソルに変換
         if torch.is_tensor(offset):
             o = offset.reshape(())
         else:
             o = torch.tensor(offset, device=self.pe.device, dtype=torch.long)
-
-        # トレーシング中はサイズ拡張を行わない
-        if not torch.jit.is_tracing():
-            o_val = int(o.item())
-            if o_val + length > self.max_len:
-                self.extend_pe(o_val + length + 1000, self.pe.device)
 
         # index_select を使用して ONNX 互換のスライスを行う
         indices = torch.arange(length, device=self.pe.device, dtype=torch.long) + o
@@ -51,12 +39,16 @@ class CausalMultiHeadAttention(nn.Module):
         self.d_model = d_model
         self.n_head = n_head
         self.d_k = d_model // n_head
-        
+
         self.q_linear = nn.Linear(d_model, d_model)
         self.k_linear = nn.Linear(d_model, d_model)
         self.v_linear = nn.Linear(d_model, d_model)
         self.out_linear = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
+
+        max_seq_len = config.MAX_CACHE_LEN + 100
+        causal_mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
+        self.register_buffer('causal_mask', causal_mask)
 
     def forward(self, x: torch.Tensor,
                 cache: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -81,12 +73,10 @@ class CausalMultiHeadAttention(nn.Module):
             
         new_cache = (k, v, new_offset)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
-        
-        # Causal mask
+
         k_len = k.size(2)
-        q_idx = torch.arange(seq_len, device=x.device).unsqueeze(1) + (new_offset - seq_len)
-        k_idx = torch.arange(k_len, device=x.device).unsqueeze(0)
-        mask = q_idx < k_idx
+        q_start = new_offset - seq_len
+        mask = self.causal_mask[q_start:q_start+seq_len, :k_len]
         scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
         attn = F.softmax(scores, dim=-1)
@@ -109,6 +99,7 @@ class ConformerConvModule(nn.Module):
         self.batch_norm = nn.LayerNorm(d_model)
         self.pointwise_conv2 = nn.Conv1d(d_model, d_model, kernel_size=1)
         self.activation = nn.SiLU()
+        self.register_buffer('cache_pad', torch.zeros(1, d_model, kernel_size - 1))
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: (B, L, D)
@@ -120,7 +111,7 @@ class ConformerConvModule(nn.Module):
         if cache is not None:
             x = torch.cat([cache, x], dim=2)
         else:
-            pad = torch.zeros(x.size(0), x.size(1), cache_len, device=x.device)
+            pad = self.cache_pad.expand(x.size(0), -1, -1)
             x = torch.cat([pad, x], dim=2)
         
         # Save new cache
@@ -179,13 +170,13 @@ class ConvSubsampling(nn.Module):
         self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(2, 2), padding=(0, 1))
         f_out = (config.N_BINS + 2*1 - 3) // 2 + 1
         self.out_linear = nn.Linear(out_channels * f_out, out_channels)
+        self.padding_t = 2
+        self.register_buffer('pad_buffer', torch.zeros(1, 1, 2, config.N_BINS))
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = x.unsqueeze(1) # (B, 1, T, F)
-        padding_t = 2
+        x = x.unsqueeze(1)
         if cache is None:
-            # x.size(3) is the frequency dimension (N_BINS)
-            pad = torch.zeros(x.size(0), 1, padding_t, x.size(3), device=x.device)
+            pad = self.pad_buffer.expand(x.size(0), -1, -1, -1)
             x = torch.cat([pad, x], dim=2)
         else:
             x = torch.cat([cache, x], dim=2)
