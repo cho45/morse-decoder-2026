@@ -4,23 +4,19 @@
 import {
     N_FFT, HOP_LENGTH, N_BINS, NUM_LAYERS, D_MODEL, N_HEAD, D_K, KERNEL_SIZE,
     CHARS, ID_TO_CHAR,
-    computeSpecFrame, softmax, sigmoid, initStates
+    computeSpecFrame, softmax, sigmoid, initStates, runChunkInference, ChunkedDecoder
 } from './inference.js';
+import { MORSE_DICT } from './data_gen.js';
 
 // --- Constants & Config ---
-let SAMPLE_RATE = 16000; // Updated by AudioContext
+const SAMPLE_RATE = 16000; // Model expected sample rate
 const INPUT_LEN = 400; // Original window size (25ms @ 16kHz)
-
-const MORSE_MAP = {
-    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
-    'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
-    'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
-    'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
-    'Y': '-.--', 'Z': '--..', '1': '.----', '2': '..---', '3': '...--',
-    '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..',
-    '9': '----.', '0': '-----', '/': '-..-.', '?': '..--..', '.': '.-.-.-',
-    ',': '--..--', ' ': ' '
-};
+const INFERENCE_CHUNK_SIZE = 12; // 120ms。推論を実行するチャンクのフレーム数。
+// 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数（SUBSAMPLING_RATE=2 の二乗）である必要があります。
+// 4 の倍数でないチャンク（10等）を入力すると、runChunkInference がエラーを投げます。
+// これは ONNX Runtime の制限によるものです：state updates が output より前に実行されるため、
+// パディングを行うとモデルの内部キャッシュ（ConvSubsampling, ConformerConvModule, Attention）が
+// 破損してしまいます。
 
 // --- State Variables ---
 let audioContext = null;
@@ -34,10 +30,9 @@ let session = null;
 let isRunning = false;
 let isInferenceRunning = false; // 推論の重なりを防止
 let currentStates = null;
+let decoder = null; // ChunkedDecoder instance for streaming CTC decoding
 let audioBuffer = new Float32Array(N_FFT); // Sliding window for FFT
 let melBuffer = []; // Buffer for frames
-let decodedText = "";
-let lastCharId = 0;
 let decodedEvents = []; // {char: string, pos: number} for visualization
 let morseAbortController = null;
 let totalFrames = 0;
@@ -146,28 +141,14 @@ async function runInference(melFrame, tLen = 1) {
     isInferenceRunning = true;
 
     const start = performance.now();
-    let x = null;
     try {
-        x = new ort.Tensor('float32', melFrame, [1, tLen, N_BINS]);
-        const inputs = { x, ...currentStates };
-
-        const results = await session.run(inputs);
+        // Use the centralized runChunkInference to handle PCEN and states
+        const result = await runChunkInference(session, melFrame, currentStates, ort);
         
-        // 新しい状態をセットし、古い状態をリストアップ
         const oldStateValues = Object.values(currentStates);
-        
-        const nextStates = {};
-        nextStates.sub_cache = results.new_sub_cache;
-        for (let i = 0; i < NUM_LAYERS; i++) {
-            nextStates[`attn_k_${i}`] = results[`new_attn_k_${i}`];
-            nextStates[`attn_v_${i}`] = results[`new_attn_v_${i}`];
-            nextStates[`offset_${i}`] = results[`new_offset_${i}`];
-            nextStates[`conv_cache_${i}`] = results[`new_conv_cache_${i}`];
-        }
-        currentStates = nextStates;
+        currentStates = result.nextStates;
 
-        // 古い状態テンソルを明示的に破棄 (WebGPU メモリ解放)
-        // 初期状態の空テンソルや、新しい状態と同一のインスタンスは破棄しない
+        // WebGPU memory cleanup
         const nextStateValues = Object.values(currentStates);
         oldStateValues.forEach(t => {
             if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
@@ -177,20 +158,19 @@ async function runInference(melFrame, tLen = 1) {
             }
         });
 
-    // Data for visualization
-    const subsamplingRate = 2; // Sync with config.py
-    const expectedOutFrames = Math.floor((tLen + subsamplingRate - 1) / subsamplingRate);
-    const numOutFrames = results.logits.dims[1];
-    
-    for (let t = 0; t < Math.min(numOutFrames, expectedOutFrames); t++) {
-        const ctcLogits = results.logits.data.slice(t * (CHARS.length + 1), (t + 1) * (CHARS.length + 1));
-        const sigLogits = results.signal_logits.data.slice(t * 4, (t + 1) * 4);
-        const boundLogit = results.boundary_logits.data[t];
+    // Data for visualization and decoding
+    const numOutFrames = result.logits.length / result.numClasses;
+
+    for (let t = 0; t < numOutFrames; t++) {
+        const ctcLogits = result.logits.slice(t * result.numClasses, (t + 1) * result.numClasses);
+        const sigLogits = result.signalLogits.slice(t * 4, (t + 1) * 4);
+        const boundLogit = result.boundaryLogits[t];
 
         const ctcProbs = softmax(Array.from(ctcLogits));
         const sigProbs = softmax(Array.from(sigLogits));
         const boundProb = sigmoid(boundLogit);
 
+        // Visualization History
         ctcHistory.push(ctcProbs);
         sigHistory.push(sigProbs);
         boundHistory.push(boundProb);
@@ -200,39 +180,19 @@ async function runInference(melFrame, tLen = 1) {
         if (sigHistory.length > HISTORY_LEN) sigHistory.shift();
         if (boundHistory.length > HISTORY_LEN) boundHistory.shift();
 
-        // CTC Decoding with Space Reconstruction
-        let maxId = 0;
-        let maxVal = -Infinity;
-        for (let i = 0; i < ctcProbs.length; i++) {
-            if (ctcProbs[i] > maxVal) {
-                maxVal = ctcProbs[i];
-                maxId = i;
-            }
-        }
+        // CTC Decoding with ChunkedDecoder
+        const decodeResult = decoder.decodeFrame(ctcLogits, sigLogits, boundProb);
 
-        if (maxId !== 0 && maxId !== lastCharId) {
-            // Check for inter-word space (class 3)
-            // Use same logic as inference.js decodeFull
-            let maxSigId = 0;
-            let maxSigVal = -Infinity;
-            for (let s = 0; s < 4; s++) {
-                if (sigProbs[s] > maxSigVal) {
-                    maxSigVal = sigProbs[s];
-                    maxSigId = s;
-                }
-            }
-            if (maxSigId === 3 && !decodedText.endsWith(" ")) {
-                decodedText += " ";
+        // Update UI and events when new character is emitted
+        if (decodeResult.newChar) {
+            // If space was inserted before this character, add space event
+            if (decodeResult.spaceInserted) {
                 decodedEvents.push({char: " ", pos: totalFrames - 1});
             }
-            const char = ID_TO_CHAR[maxId];
-            if (char) {
-                decodedText += char;
-                decodedEvents.push({char: char, pos: totalFrames - 1});
-                output.textContent = decodedText;
-            }
+            // Add character event
+            decodedEvents.push({char: decodeResult.newChar, pos: totalFrames - 1});
+            output.textContent = decodeResult.text;
         }
-        lastCharId = maxId;
     }
 
     // Mel History (always 2 frames for the chunk)
@@ -249,20 +209,9 @@ async function runInference(melFrame, tLen = 1) {
     drawVisualizations();
     updateDebugInfo(start);
 
-    // 出力テンソルの破棄 (results 内の各テンソル)
-        Object.values(results).forEach(t => {
-            // ただし、currentStates に代入したものは破棄してはいけない
-            // ここでは logits など、状態以外のテンソルを破棄する
-            // 実際には、currentStates に代入しなかったものだけを特定して破棄する
-            if (t && t.dispose && !Object.values(currentStates).includes(t)) {
-                t.dispose();
-            }
-        });
-
     } catch (e) {
         console.error("Inference error:", e);
     } finally {
-        if (x) x.dispose();
         isInferenceRunning = false;
     }
 }
@@ -342,21 +291,28 @@ function drawMel() {
         ];
     };
 
-    // Adaptive normalization for display (matches matplotlib's imshow default)
-    let minV = Infinity;
-    let maxV = -Infinity;
-    for (let t = 0; t < melHistory.length; t++) {
+    // Use log scale (dB) for visibility, matching Python's visualize_curriculum_phases.py
+    // Calculate adaptive range in dB space
+    let minDB = Infinity;
+    let maxDB = -Infinity;
+    const dbHistory = melHistory.map(frame => {
+        return Array.from(frame).map(p => 10 * Math.log10(p + 1e-9));
+    });
+
+    for (let t = 0; t < dbHistory.length; t++) {
         for (let f = 0; f < N_BINS; f++) {
-            const v = melHistory[t][f];
-            if (v < minV) minV = v;
-            if (v > maxV) maxV = v;
+            const db = dbHistory[t][f];
+            if (db < minDB) minDB = db;
+            if (db > maxDB) maxDB = db;
         }
     }
-    if (maxV <= minV) maxV = minV + 1;
+    // Ensure a minimum range to avoid division by zero
+    if (maxDB <= minDB) maxDB = minDB + 1;
 
-    for (let t = 0; t < melHistory.length; t++) {
+    for (let t = 0; t < dbHistory.length; t++) {
         for (let f = 0; f < N_BINS; f++) {
-            const val = (melHistory[t][f] - minV) / (maxV - minV);
+            const db = dbHistory[t][f];
+            const val = (db - minDB) / (maxDB - minDB);
             const [r, g, b] = getColor(val);
             ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
             
@@ -485,7 +441,7 @@ async function playMorse(text, signal) {
                 continue;
             }
 
-            const code = MORSE_MAP[char];
+            const code = MORSE_DICT[char];
             if (!code) continue;
 
             for (let j = 0; j < code.length; j++) {
@@ -560,18 +516,14 @@ function createWhiteNoise(durationSeconds, snr) {
 // --- Lifecycle ---
 async function ensureAudioContext() {
     if (!audioContext) {
-        // Many browsers ignore the requested sampleRate, so we must adapt to what we get
+        // Note: Browsers may not respect the requested sampleRate
         audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         await audioContext.audioWorklet.addModule('audio-processor.js');
     }
     if (audioContext.state === 'suspended') {
         await audioContext.resume();
     }
-    // Always update to actual sample rate
-    if (SAMPLE_RATE !== audioContext.sampleRate) {
-        SAMPLE_RATE = audioContext.sampleRate;
-        console.log(`AudioContext initialized at ${SAMPLE_RATE}Hz`);
-    }
+    console.log(`AudioContext sampleRate: ${audioContext.sampleRate}Hz (Target: ${SAMPLE_RATE}Hz)`);
 }
 
 startBtn.onclick = async () => {
@@ -587,7 +539,11 @@ startBtn.onclick = async () => {
     stopBtn.disabled = false;
 
     // --- Receiver Pipeline ---
-    morseNode = new AudioWorkletNode(audioContext, 'morse-processor');
+    morseNode = new AudioWorkletNode(audioContext, 'morse-processor', {
+        processorOptions: {
+            hopLength: HOP_LENGTH
+        }
+    });
     morseNode.connect(audioContext.destination);
     
     morseNode.port.onmessage = (e) => {
@@ -595,16 +551,21 @@ startBtn.onclick = async () => {
         if (e.data.type === 'audio_chunk') {
             audioBuffer.set(audioBuffer.subarray(HOP_LENGTH));
             audioBuffer.set(e.data.chunk, N_FFT - HOP_LENGTH);
-            // Use computeSpecFrame from inference.js
-            const mel = computeSpecFrame(audioBuffer);
+            // Use computeSpecFrame from inference.js with fixed 16kHz (input is resampled)
+            const mel = computeSpecFrame(audioBuffer, 16000);
             melBuffer.push(mel);
-            // チャンクサイズを 10フレーム (100ms) に拡大してオーバーヘッドを削減
-            if (melBuffer.length >= 10) {
-                const combinedMel = new Float32Array(N_BINS * 10);
-                for (let i = 0; i < 10; i++) {
+            // チャンクサイズごとに推論を実行。
+            // 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数（SUBSAMPLING_RATE=2 の二乗）である必要があります。
+            // 4 の倍数でないチャンク（10等）を入力すると、runChunkInference がエラーを投げます。
+            // これは ONNX Runtime の制限によるものです：state updates が output より前に実行されるため、
+            // パディングを行うとモデルの内部キャッシュ（ConvSubsamplingやConformerConvModuleの状態）が
+            // 破損してしまいます。
+            if (melBuffer.length >= INFERENCE_CHUNK_SIZE) {
+                const combinedMel = new Float32Array(N_BINS * INFERENCE_CHUNK_SIZE);
+                for (let i = 0; i < INFERENCE_CHUNK_SIZE; i++) {
                     combinedMel.set(melBuffer[i], i * N_BINS);
                 }
-                runInference(combinedMel, 10);
+                runInference(combinedMel, INFERENCE_CHUNK_SIZE);
                 melBuffer = [];
             }
         }
@@ -697,16 +658,16 @@ stopBtn.onclick = () => {
 };
 
 resetBtn.onclick = () => {
-    decodedText = "";
     output.textContent = "";
     currentStates = initStatesWrapper();
+    // Initialize decoder with the correct number of classes
+    decoder = new ChunkedDecoder(CHARS.length + 1); // +1 for blank
     melBuffer = [];
     melHistory = [];
     ctcHistory = [];
     sigHistory = [];
     boundHistory = [];
     decodedEvents = [];
-    lastCharId = 0;
     totalFrames = 0;
     skipCount = 0;
     drawVisualizations();

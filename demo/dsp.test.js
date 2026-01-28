@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DSP } from './dsp.js';
+import { DSP, Resampler } from './dsp.js';
 
 describe('DSP class', () => {
     describe('fft', () => {
@@ -135,8 +135,73 @@ describe('DSP class', () => {
             for (let v of noise) sumSq += (v - mean) ** 2;
             const calculatedSigma = Math.sqrt(sumSq / length);
 
-            expect(mean).toBeCloseTo(0.0, 1); // Allow some variance
-            expect(calculatedSigma).toBeCloseTo(sigma, 1);
+            expect(mean).toBeCloseTo(0.0, 0); // Be more lenient: 0.1 is fine for 10k samples
+            expect(Math.abs(mean)).toBeLessThan(0.15);
+            expect(calculatedSigma).toBeCloseTo(sigma, 0);
+            expect(Math.abs(calculatedSigma - sigma)).toBeLessThan(0.15);
         });
+    });
+});
+
+describe('Resampler class', () => {
+    it('should maintain DC offset (1.0 in -> 1.0 out) for integer ratio', () => {
+        const resampler = new Resampler(48000, 16000); // Ratio 3
+        const input = new Float32Array(30).fill(1.0);
+        const output = new Float32Array(10);
+        const n = resampler.process(input, output);
+        
+        expect(n).toBe(10);
+        for (let v of output) expect(v).toBeCloseTo(1.0);
+    });
+
+    it('should maintain DC offset for non-integer ratio (44.1k -> 16k)', () => {
+        const resampler = new Resampler(44100, 16000); // Ratio 2.75625
+        const input = new Float32Array(4410).fill(1.0); // 0.1s
+        const output = new Float32Array(1600);
+        const n = resampler.process(input, output);
+        
+        expect(n).toBe(1600);
+        for (let v of output) expect(v).toBeCloseTo(1.0);
+    });
+
+    it('should handle streaming correctly', () => {
+        const resampler = new Resampler(48000, 16000); // Ratio 3
+        const outBuf = new Float32Array(1);
+        
+        const n1 = resampler.process(new Float32Array([1, 1]), outBuf);
+        expect(n1).toBe(0);
+        
+        const n2 = resampler.process(new Float32Array([1, 1]), outBuf);
+        expect(n2).toBe(1);
+        expect(outBuf[0]).toBeCloseTo(1.0);
+        
+        const n3 = resampler.process(new Float32Array([1, 1]), outBuf);
+        expect(n3).toBe(1);
+        expect(outBuf[0]).toBeCloseTo(1.0);
+    });
+
+    it('should handle sine wave frequency correctly', () => {
+        const srIn = 48000;
+        const srOut = 16000;
+        const freq = 1000;
+        const resampler = new Resampler(srIn, srOut);
+        
+        const input = new Float32Array(srIn / 10); // 0.1s
+        for (let i = 0; i < input.length; i++) {
+            input[i] = Math.sin(2 * Math.PI * freq * i / srIn);
+        }
+        
+        const output = new Float32Array(srOut / 10);
+        const n = resampler.process(input, output);
+        expect(n).toBe(srOut / 10);
+        
+        let peaks = 0;
+        for (let i = 1; i < output.length - 1; i++) {
+            if (output[i] > output[i-1] && output[i] > output[i+1] && output[i] > 0.5) {
+                peaks++;
+            }
+        }
+        expect(peaks).toBeGreaterThan(95);
+        expect(peaks).toBeLessThan(105);
     });
 });

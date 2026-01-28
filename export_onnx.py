@@ -13,9 +13,10 @@ class ONNXWrapper(nn.Module):
         self.model = model
         self.num_layers = len(model.layers)
 
-    def forward(self, x, sub_cache, *layer_states_flat):
+    def forward(self, x, pcen_state, sub_cache, *layer_states_flat):
         """
         x: (B, T, F)
+        pcen_state: (B, 1, F)
         sub_cache: (B, 1, T_sub, F)
         layer_states_flat: [attn_k_0, attn_v_0, offset_0, conv_cache_0, attn_k_1, ...]
         """
@@ -27,12 +28,12 @@ class ONNXWrapper(nn.Module):
             conv = layer_states_flat[i+3]
             layer_states.append(((k, v, offset), conv))
         
-        states = (sub_cache, layer_states)
+        states = (pcen_state, sub_cache, layer_states)
         
-        (logits, signal_logits, boundary_logits), (new_sub_cache, new_layer_states) = self.model(x, states)
+        (logits, signal_logits, boundary_logits), (new_pcen_state, new_sub_cache, new_layer_states) = self.model(x, states)
         
         # Flatten new states
-        new_states_flat = [new_sub_cache]
+        new_states_flat = [new_pcen_state, new_sub_cache]
         for (new_attn, new_conv) in new_layer_states:
             new_states_flat.append(new_attn[0]) # k
             new_states_flat.append(new_attn[1]) # v
@@ -67,8 +68,10 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     # Dummy inputs
     batch_size = 1
     seq_len = 40 # Multiple of 4
-    x = torch.randn(batch_size, seq_len, config.N_BINS)
+    # Use positive values for spectrogram dummy input to avoid NaNs in PCEN (log/pow)
+    x = torch.rand(batch_size, seq_len, config.N_BINS)
     
+    pcen_state = torch.zeros(batch_size, 1, config.N_BINS)
     sub_cache = torch.zeros(batch_size, 1, 2, config.N_BINS) # Initial sub_cache
     
     layer_states_flat = []
@@ -81,15 +84,17 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
         # conv_cache: (B, d_model, kernel_size - 1)
         layer_states_flat.append(torch.zeros(batch_size, config.D_MODEL, config.KERNEL_SIZE - 1))
 
-    input_names = ['x', 'sub_cache']
-    output_names = ['logits', 'signal_logits', 'boundary_logits', 'new_sub_cache']
+    input_names = ['x', 'pcen_state', 'sub_cache']
+    output_names = ['logits', 'signal_logits', 'boundary_logits', 'new_pcen_state', 'new_sub_cache']
     
     dynamic_axes = {
         'x': {0: 'batch_size', 1: 'seq_len'},
+        'pcen_state': {0: 'batch_size'},
         'sub_cache': {0: 'batch_size', 2: 'sub_cache_len'},
         'logits': {0: 'batch_size', 1: 'out_seq_len'},
         'signal_logits': {0: 'batch_size', 1: 'out_seq_len'},
         'boundary_logits': {0: 'batch_size', 1: 'out_seq_len'},
+        'new_pcen_state': {0: 'batch_size'},
         'new_sub_cache': {0: 'batch_size', 2: 'new_sub_cache_len'},
     }
 
@@ -109,7 +114,7 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
 
     torch.onnx.export(
         wrapper,
-        (x, sub_cache, *layer_states_flat),
+        (x, pcen_state, sub_cache, *layer_states_flat),
         output_path,
         input_names=input_names,
         output_names=output_names,
@@ -131,6 +136,7 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     # Prepare inputs for ORT
     ort_inputs = {
         'x': to_numpy(x),
+        'pcen_state': to_numpy(pcen_state),
         'sub_cache': to_numpy(sub_cache)
     }
     for i in range(config.NUM_LAYERS):
@@ -141,7 +147,7 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
 
     # PyTorch inference
     with torch.no_grad():
-        pt_outputs = wrapper(x, sub_cache, *layer_states_flat)
+        pt_outputs = wrapper(x, pcen_state, sub_cache, *layer_states_flat)
     
     # ORT inference
     ort_outputs = ort_session.run(None, ort_inputs)

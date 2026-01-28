@@ -16,6 +16,7 @@ def draw_architecture():
     # 色定義
     input_color = '#E8F4F8'
     subsample_color = '#B8E6F0'
+    pcen_color = '#D1C4E9'
     encoder_color = '#FFE5B4'
     attention_color = '#FFD4A3'
     conv_color = '#C7E9C0'
@@ -65,7 +66,12 @@ def draw_architecture():
             ha='center', va='center', fontsize=16, weight='bold')
 
     # 入力
-    y_pos = draw_box(y_pos, f'Input: Linear Spectrogram\n(B, T, {config.N_BINS})', input_color)
+    y_pos = draw_box(y_pos, f'Input: Linear Spectrogram (Power)\n(B, T, {config.N_BINS})', input_color)
+    draw_arrow(y_pos, y_pos - 0.4)
+    y_pos -= 0.4
+
+    # PCEN
+    y_pos = draw_box(y_pos, f'PCEN (Adaptive Normalization)\nLearnable s, alpha, delta, r\n+ Learnable Input Scale', pcen_color, height=0.8)
     draw_arrow(y_pos, y_pos - 0.4)
     y_pos -= 0.4
 
@@ -147,6 +153,7 @@ def draw_architecture():
     legend_elements = [
         mpatches.Patch(facecolor=input_color, edgecolor='black', label='Input/Output'),
         mpatches.Patch(facecolor=subsample_color, edgecolor='black', label='Preprocessing'),
+        mpatches.Patch(facecolor=pcen_color, edgecolor='black', label='PCEN (AGC)'),
         mpatches.Patch(facecolor=attention_color, edgecolor='black', label='Attention'),
         mpatches.Patch(facecolor=conv_color, edgecolor='black', label='Convolution'),
         mpatches.Patch(facecolor=ff_color, edgecolor='black', label='Feed-Forward'),

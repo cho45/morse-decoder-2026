@@ -5,8 +5,9 @@ import { DSP } from './dsp.js';
 import { NoiseNode } from './noise-node.js';
 import {
     N_BINS, NUM_LAYERS, CHARS, ID_TO_CHAR,
-    softmax, sigmoid, initStates
+    softmax, sigmoid, initStates, runChunkInference
 } from './inference.js';
+import { MORSE_DICT } from './data_gen.js';
 
 // --- Constants & Config ---
 const WINDOW_MS = 32;
@@ -28,14 +29,18 @@ let decodedText = "";
 let lastCharId = 0;
 
 // FFT & Processing Parameters
-let sampleRate = 0;
+const TARGET_SAMPLE_RATE = 16000;
+let sampleRate = 0; // Actual AudioContext sample rate
 let windowSize = 0;
 let hopLength = 0;
 let nFft = 0;
 
 // Inference Buffering
 let inferenceBuffer = [];
-const INFERENCE_CHUNK_SIZE = 10;
+const INFERENCE_CHUNK_SIZE = 12; // 120ms。推論を実行するチャンクのフレーム数。
+// 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数である必要があります。
+// 4 の倍数でないチャンクを入力すると、runChunkInference 内部での末尾パディング(0)によって
+// モデルの内部キャッシュが汚染され、次のチャンクの推論結果が破壊されるためです。
 
 // Peak Tracking State
 let targetFreq = 800;
@@ -95,16 +100,6 @@ function getColor(v) {
 }
 
 // --- Station Class for Demo Mode ---
-const MORSE_MAP = {
-    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
-    'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
-    'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
-    'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
-    'Y': '-.--', 'Z': '--..', '1': '.----', '2': '..---', '3': '...--',
-    '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..',
-    '9': '----.', '0': '-----', '/': '-..-.', '?': '..--..', '.': '.-.-.-',
-    ',': '--..--', ' ': ' '
-};
 
 class Station {
     constructor(ctx, freq, wpm, jitter, volume, destination) {
@@ -135,7 +130,7 @@ class Station {
             for (const char of text.toUpperCase()) {
                 if (!this.active || !isRunning) break;
                 if (char === ' ') { schedTime += getLen(4); continue; }
-                const code = MORSE_MAP[char];
+                const code = MORSE_DICT[char];
                 if (!code) continue;
                 for (const symbol of code) {
                     const duration = getLen(symbol === '.' ? 1 : 3);
@@ -179,43 +174,34 @@ async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
     if (!currentStates) currentStates = initStates(ort);
 
     try {
-        const x = new ort.Tensor('float32', combinedSpecFrames, [1, tLen, N_BINS]);
-        const inputs = { x, ...currentStates };
-        const results = await session.run(inputs);
+        // Use centralized inference logic
+        const result = await runChunkInference(session, combinedSpecFrames, currentStates, ort);
 
         // Map output frames back to global timeline.
-        // MODEL_DELAY accounts for the model's internal lookahead/processing lag.
-        // Set to 0 to align with the natural buffering delay.
         const MODEL_DELAY = 0;
         const startFramePos = (capturedTotalFrames - INFERENCE_CHUNK_SIZE + 1) - MODEL_DELAY;
 
-        const nextStates = { sub_cache: results.new_sub_cache };
-        for (let i = 0; i < NUM_LAYERS; i++) {
-            nextStates[`attn_k_${i}`] = results[`new_attn_k_${i}`];
-            nextStates[`attn_v_${i}`] = results[`new_attn_v_${i}`];
-            nextStates[`offset_${i}`] = results[`new_offset_${i}`];
-            nextStates[`conv_cache_${i}`] = results[`new_conv_cache_${i}`];
-        }
+        const oldStateValues = Object.values(currentStates);
+        currentStates = result.nextStates;
         
-        Object.values(currentStates).forEach(t => {
-            if (t && t.dispose && !Object.values(nextStates).includes(t)) t.dispose();
+        const nextStateValues = Object.values(currentStates);
+        oldStateValues.forEach(t => {
+            if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
+                if (!nextStateValues.includes(t)) t.dispose();
+            }
         });
-        currentStates = nextStates;
 
-        const numOutFrames = results.logits.dims[1];
-        const numClasses = CHARS.length + 1;
-        const logits = results.logits.data;
-        const sigLogits = results.signal_logits.data;
+        const numOutFrames = result.logits.length / result.numClasses;
 
         for (let t = 0; t < numOutFrames; t++) {
             const pos = startFramePos + (t * 2);
-            const sigProbs = softmax(Array.from(sigLogits.slice(t * 4, (t + 1) * 4)));
+            const sigProbs = softmax(Array.from(result.signalLogits.slice(t * 4, (t + 1) * 4)));
             sigHistory.push({ probs: sigProbs, pos: pos });
             if (sigHistory.length > 800) sigHistory.shift();
 
             let maxId = 0, maxVal = -Infinity;
-            for (let i = 0; i < numClasses; i++) {
-                const val = logits[t * numClasses + i];
+            for (let i = 0; i < result.numClasses; i++) {
+                const val = result.logits[t * result.numClasses + i];
                 if (val > maxVal) { maxVal = val; maxId = i; }
             }
 
@@ -228,6 +214,7 @@ async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
                 if (maxSigId === 3 && decodedText.length > 0 && !decodedText.endsWith(" ")) {
                     decodedText += " ";
                     eventHistory.push({ char: " ", pos: pos });
+                    lastCharId = -1;
                 }
 
                 const char = ID_TO_CHAR[maxId];
@@ -243,11 +230,6 @@ async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
         while (eventHistory.length > 0 && eventHistory[0].pos < totalFrames - 800) {
             eventHistory.shift();
         }
-
-        x.dispose();
-        Object.values(results).forEach(t => {
-            if (t && t.dispose && !Object.values(currentStates).includes(t)) t.dispose();
-        });
     } catch (e) {
         console.error("Inference error:", e);
     } finally {
@@ -267,7 +249,7 @@ function peakDetect(magnitudes) {
 
     for (let j = 1; j < numBins - 1; j++) {
         if (magnitudes[j] > threshold && magnitudes[j] > magnitudes[j - 1] && magnitudes[j] > magnitudes[j + 1]) {
-            peaks.push({ p: magnitudes[j], k: j, f: j * sampleRate / nFft });
+            peaks.push({ p: magnitudes[j], k: j, f: j * TARGET_SAMPLE_RATE / nFft });
         }
     }
     peaks.sort((a, b) => b.p - a.p);
@@ -299,7 +281,9 @@ function processAudioChunk(chunk) {
     }
     DSP.fft(real, imag);
 
-    const numBins = Math.floor(MAX_FREQ * nFft / sampleRate);
+    // Note: magnitudes for peak detection are still based on the resampled 16kHz stream
+    // but nFft/windowSize are calculated based on 16kHz.
+    const numBins = Math.floor(MAX_FREQ * nFft / TARGET_SAMPLE_RATE);
     const magnitudes = new Float32Array(numBins);
     for (let j = 0; j < numBins; j++) magnitudes[j] = real[j] * real[j] + imag[j] * imag[j];
 
@@ -307,12 +291,13 @@ function processAudioChunk(chunk) {
     peakDetect(magnitudes);
 
     // 2. Inference Sampling & Buffering
-    const W = 14 * 31.25;
-    const fStart = trackedFreq - W/2 + 31.25/2;
+    const binBW = TARGET_SAMPLE_RATE / nFft;
+    const W = 14 * binBW;
+    const fStart = trackedFreq - W/2 + binBW/2;
     const specFrame = new Float32Array(14);
     for (let i = 0; i < 14; i++) {
-        const f = fStart + i * 31.25;
-        const k = f * nFft / sampleRate;
+        const f = fStart + i * binBW;
+        const k = f * nFft / TARGET_SAMPLE_RATE;
         const kIdx = Math.floor(k);
         const kFrac = k - kIdx;
         if (kIdx >= 0 && kIdx < nFft - 1) {
@@ -320,7 +305,7 @@ function processAudioChunk(chunk) {
             const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
             const p = p1 * (1 - kFrac) + p2 * kFrac;
             
-            specFrame[i] = Math.log1p(p * 100.0) / 5.0;
+            specFrame[i] = p;
         }
     }
     
@@ -358,11 +343,13 @@ async function initAudio() {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         sampleRate = audioContext.sampleRate;
         await NoiseNode.addModule(audioContext);
-        windowSize = Math.floor(sampleRate * (WINDOW_MS / 1000));
-        hopLength = Math.floor(sampleRate * (HOP_MS / 1000));
+        
+        // windowSize/hopLength are now based on 16kHz
+        windowSize = Math.floor(TARGET_SAMPLE_RATE * (WINDOW_MS / 1000));
+        hopLength = Math.floor(TARGET_SAMPLE_RATE * (HOP_MS / 1000));
         nFft = Math.pow(2, Math.ceil(Math.log2(windowSize)));
         audioBuf = new Float32Array(nFft);
-        debugInfo.innerHTML = `サンプルレート: ${sampleRate} Hz | FFTサイズ: ${nFft} | フレーム間隔: ${HOP_MS} ms`;
+        debugInfo.innerHTML = `入力レート: ${sampleRate} Hz -> 処理レート: ${TARGET_SAMPLE_RATE} Hz | FFTサイズ: ${nFft} | フレーム間隔: ${HOP_MS} ms`;
         await audioContext.audioWorklet.addModule('audio-processor.js');
     }
     if (audioContext.state === 'suspended') await audioContext.resume();
@@ -443,7 +430,10 @@ stopBtn.onclick = stopAll;
 
 function setupProcessing(source) {
     const workletNode = new AudioWorkletNode(audioContext, 'morse-processor', {
-        processorOptions: { hopLength: hopLength }
+        processorOptions: {
+            sampleRate: audioContext.sampleRate,
+            hopLength: hopLength
+        }
     });
     workletNode.port.onmessage = (e) => {
         if (isRunning && e.data.type === 'audio_chunk') processAudioChunk(e.data.chunk);
@@ -495,24 +485,29 @@ function drawInputSpec() {
         // 1. Shift Background by exactly the number of new frames
         inputCtx.drawImage(inputCanvas, -numToDraw, 0);
         
-        // 2. Adaptive Normalization for visualization
-        let minV = Infinity, maxV = -Infinity;
+        // 2. Use log scale (dB) for visibility, matching Python's visualize_curriculum_phases.py
+        // Calculate adaptive range in dB space from the current history
+        let minDB = Infinity;
+        let maxDB = -Infinity;
         const historyToScan = inputSpecHistory.slice(-w);
-        for (let t = 0; t < historyToScan.length; t++) {
-            for (let i = 0; i < 14; i++) {
-                const v = historyToScan[t][i];
-                if (v < minV) minV = v;
-                if (v > maxV) maxV = v;
-            }
-        }
-        if (maxV <= minV) maxV = minV + 1.0;
+        const dbHistory = historyToScan.map(frame => {
+            return Array.from(frame).map(p => {
+                const db = 10 * Math.log10(p + 1e-9);
+                if (db < minDB) minDB = db;
+                if (db > maxDB) maxDB = db;
+                return db;
+            });
+        });
+        if (maxDB <= minDB) maxDB = minDB + 1.0;
 
         const binH = h / 14;
         for (let f = 0; f < numToDraw; f++) {
             const frame = inputSpecBuffer[f];
             const x = w - numToDraw + f;
             for (let i = 0; i < 14; i++) {
-                const normalizedVal = (frame[i] - minV) / (maxV - minV);
+                const power = frame[i];
+                const db = 10 * Math.log10(power + 1e-9);
+                const normalizedVal = (db - minDB) / (maxDB - minDB);
                 const [r, g, b] = getColor(normalizedVal);
                 inputCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
                 inputCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
@@ -569,9 +564,13 @@ function drawInputOverlay(w, h) {
 
 function drawOverlay(w, h, numBins, binH) {
     overlayCtx.clearRect(0, 0, w, h);
-    const W = 14 * 31.25;
-    const yCenter = h - (trackedFreq * nFft / sampleRate) * binH;
-    const yHalfWidth = (W / 2 * nFft / sampleRate) * binH;
+    // 14 bins * binBW Hz/bin
+    const binBW = TARGET_SAMPLE_RATE / nFft;
+    const BW = 14 * binBW;
+    
+    // 座標計算。MAX_FREQ に対する trackedFreq の比率で計算する。
+    const yCenter = h - (trackedFreq / MAX_FREQ) * h;
+    const yHalfWidth = (BW / 2 / MAX_FREQ) * h;
 
     overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.15)';
     overlayCtx.fillRect(0, yCenter - yHalfWidth, w, yHalfWidth * 2);
@@ -592,7 +591,7 @@ function drawOverlay(w, h, numBins, binH) {
     overlayCtx.font = '10px Arial';
     overlayCtx.textAlign = 'left';
     for (let f = 0; f <= MAX_FREQ; f += 500) {
-        const y = h - (f * nFft / sampleRate) * binH;
+        const y = h - (f / MAX_FREQ) * h;
         if (y < 0 || y > h) continue;
         overlayCtx.beginPath(); overlayCtx.moveTo(0, y); overlayCtx.lineTo(15, y);
         overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; overlayCtx.stroke();

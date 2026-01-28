@@ -141,4 +141,5 @@ def test_prosigns():
         total_units += units
     
     # Approx 13 units (ignoring floating point errors)
+    # <BT> is -...- which is 13 units long (3+1+1+1+1+1+1+1+3)
     assert abs(total_units - 13.0) < 0.1

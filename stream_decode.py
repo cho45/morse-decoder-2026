@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional
 from model import StreamingConformer
 from data_gen import MORSE_DICT
 import config
+from inference_utils import decode_multi_task, preprocess_waveform
 
 # Use centralized config
 CHARS = config.CHARS
@@ -27,35 +28,38 @@ class CTCDecoder:
         """
         Greedy decoding of CTC logits with physical space insertion and boundary gating.
         logits: (1, T, C)
-        sig_logits: (1, T, 6)
+        sig_logits: (1, T, 4)
         boundary_logits: (1, T, 1)
         """
-        probs = torch.softmax(logits, dim=-1)
-        ids = torch.argmax(probs, dim=-1)[0] # (T,)
+        # (1, T, C) -> (T, C)
+        l = logits[0]
+        s = sig_logits[0]
+        b = torch.sigmoid(boundary_logits[0]).squeeze(-1)
         
-        sig_probs = torch.softmax(sig_logits, dim=-1)
-        sig_ids = torch.argmax(sig_probs, dim=-1)[0] # (T,)
+        # We need to maintain state for streaming, but decode_multi_task is currently stateless.
+        # For stream_decode.py (which handles chunks), we'll use a slightly modified version
+        # of the logic to handle last_id and space_pending across chunks.
         
-        bound_probs = torch.sigmoid(boundary_logits)[0, :, 0] # (T,)
+        # Extract predictions for this chunk
+        preds = l.argmax(dim=-1)
+        sig_preds = s.argmax(dim=-1)
         
         decoded_str = ""
-        for t in range(len(ids)):
-            # Signal Head が語間空白 (3) を予測したらスペース待機フラグを立てる
-            if sig_ids[t] == 3:
+        for t in range(len(preds)):
+            if sig_preds[t] == 3:
                 self.space_pending = True
-
-            # 境界予測によるゲート制御: 境界と確信した瞬間以外は出力を無視
-            is_boundary = bound_probs[t] > 0.5
-            i = ids[t].item() if is_boundary else 0 # 境界以外は Blank(0) 扱い
+                
+            is_boundary = b[t] > 0.2
+            idx = preds[t].item() if is_boundary else 0
             
-            if i != self.last_id:
-                if i != 0: # 0 is blank
-                    char = self.id_to_char.get(i, "")
+            if idx != self.last_id:
+                if idx != 0:
+                    char = self.id_to_char.get(idx, "")
                     if self.space_pending:
                         decoded_str += " "
                         self.space_pending = False
                     decoded_str += char
-                self.last_id = i
+                self.last_id = idx
         return decoded_str
 
 class StreamDecoder:
@@ -93,7 +97,11 @@ class StreamDecoder:
         self.bin_end = self.bin_start + config.N_BINS
         
         self.decoder = CTCDecoder(ID_TO_CHAR)
-        self.states = None
+        self.states = (
+            torch.zeros(1, 1, config.N_BINS).to(self.device), # pcen_state
+            None, # sub_cache
+            None  # layer_states
+        )
         
         # Buffer for audio samples (including overlap for STFT)
         self.audio_buffer = np.array([], dtype=np.float32)
@@ -103,18 +111,21 @@ class StreamDecoder:
         Convert waveform to spectrogram.
         waveform: (T_raw,)
         """
-        x = torch.from_numpy(waveform).to(self.device).unsqueeze(0) # (1, T_raw)
-        spec = self.spec_transform(x)
+        x = torch.from_numpy(waveform).to(self.device)
+        # Note: preprocess_waveform handles padding, but for streaming chunks,
+        # we don't want the full lookahead padding on every small chunk.
+        # However, to ensure consistency in bin cropping and spectral shape,
+        # we use the unified preprocess_waveform without the extra padding here
+        # since streaming handles overlap via audio_buffer.
         
-        # Crop frequency bins
-        spec = spec[:, self.bin_start:self.bin_end, :] # (1, N_BINS, T)
-
-        # Log scaling and normalization (match train.py)
-        mels = torch.log1p(spec * 100.0)
-        mels = mels / 5.0
-
-        mels = mels.transpose(1, 2) # (1, T_mel, F)
-        return mels
+        # Standardized Preprocessing (Log scaling is now inside model's PCEN,
+        # but for PyTorch inference we need to match the expected input)
+        with torch.no_grad():
+            if x.dim() == 1: x = x.unsqueeze(0)
+            spec = self.spec_transform(x)
+            spec = spec[:, self.bin_start:self.bin_end, :]
+            # Current model expects raw spectrogram as PCEN is internal
+            return spec.transpose(1, 2)
 
     def process_chunk(self, audio_chunk: np.ndarray, debug: bool = False):
         """

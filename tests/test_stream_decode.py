@@ -84,7 +84,9 @@ def dummy_checkpoint():
 def test_stream_decoder_init(dummy_checkpoint):
     decoder = StreamDecoder(dummy_checkpoint, device="cpu")
     assert decoder.model is not None
-    assert decoder.states is None
+    # states is (pcen_state, sub_cache, layer_states)
+    assert decoder.states is not None
+    assert len(decoder.states) == 3
     os.remove(dummy_checkpoint)
 
 def test_stream_decoder_process_chunk(dummy_checkpoint):
@@ -99,9 +101,9 @@ def test_stream_decoder_process_chunk(dummy_checkpoint):
     
     # Check if states are updated
     assert decoder.states is not None
-    # states is (sub_cache, layer_states)
+    # states is (pcen_state, sub_cache, layer_states)
     # layer_states is a list of (attn_cache, conv_cache) for each layer
-    assert len(decoder.states) == 2
-    assert len(decoder.states[1]) == config.NUM_LAYERS
+    assert len(decoder.states) == 3
+    assert len(decoder.states[2]) == config.NUM_LAYERS
     
     os.remove(dummy_checkpoint)

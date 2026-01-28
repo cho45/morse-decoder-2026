@@ -29,7 +29,8 @@ def test_train_val_loss_consistency():
     num_mels = config.N_BINS
     num_classes = config.NUM_CLASSES
     
-    mels = torch.randn(batch_size, seq_len, num_mels).to(device)
+    # Use positive inputs for PCEN
+    mels = torch.rand(batch_size, seq_len, num_mels).to(device)
     input_lengths = torch.full((batch_size,), seq_len // 2, dtype=torch.long).to(device)
     
     targets = torch.tensor([1, 2, 1, 2], dtype=torch.long).to(device)

@@ -79,7 +79,8 @@ describe('MorseGenerator', () => {
     });
 
     it('should handle unknown characters', () => {
-        const timing = gen.generateTiming('!', 20);
+        // '#' is not in MORSE_DICT
+        const timing = gen.generateTiming('#', 20);
         expect(timing).toEqual([]);
     });
 

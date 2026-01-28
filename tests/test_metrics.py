@@ -1,5 +1,5 @@
 import pytest
-from train import levenshtein
+from inference_utils import levenshtein_prosign as levenshtein
 
 def test_levenshtein_basic():
     # 基本的な編集距離の確認

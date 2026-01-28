@@ -15,7 +15,8 @@ def check_streaming_consistency(module, input_shape, chunk_size, device='cpu'):
     module.to(device)
     
     # Batch inference
-    x = torch.randn(*input_shape).to(device)
+    # Use positive inputs for PCEN
+    x = torch.rand(*input_shape).to(device)
     
     # Handle specific inputs for Attention
     if isinstance(module, CausalMultiHeadAttention):
@@ -108,15 +109,20 @@ def test_cache_limit_and_pe_consistency():
     num_chunks = (max_cache // chunk_size) + 5
     
     states = None
+    device = torch.device('cpu')
     with torch.no_grad():
         for i in range(num_chunks):
-            x = torch.randn(1, chunk_size, config.N_BINS)
+            # Use positive inputs for PCEN
+            x = torch.rand(1, chunk_size, config.N_BINS).to(device)
             (logits, _, _), states = model(x, states)
             
             # Check attn cache size of the first layer
-            k_cache = states[1][0][0][0] # states -> (sub_cache, layer_states[0] -> (attn_cache -> (k, v, offset), conv_cache))
+            # states -> (pcen_state, sub_cache, layer_states)
+            # layer_states[0] -> (attn_cache, conv_cache)
+            # attn_cache -> (k, v, offset)
+            k_cache = states[2][0][0][0]
             assert k_cache.size(2) <= max_cache
             
             # Check offset is correctly managed
-            offset = states[1][0][0][2]
+            offset = states[2][0][0][2]
             assert offset <= max_cache

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchaudio
 from torch.utils.data import DataLoader
@@ -15,119 +16,14 @@ from data_gen import CWDataset, MORSE_DICT, generate_sample
 from model import StreamingConformer
 import config
 import visualize_logs
+from curriculum import CurriculumManager
+from inference_utils import decode_multi_task, calculate_cer
 
 # Use centralized config
 CHARS = config.CHARS
 CHAR_TO_ID = config.CHAR_TO_ID
 ID_TO_CHAR = config.ID_TO_CHAR
 NUM_CLASSES = config.NUM_CLASSES
-
-# Standard Koch order: K, M, R, S, T, L, O, P, I, A, N, W, G, D, U, X, Z, Q, V, F, Y, C, H, J, B, L, 7, 5, 1, 2, 9, 0, 8, 3, 4, 6
-# (Simplified and adjusted to match our vocabulary)
-KOCH_CHARS = "KMRSTLOPANWGDUXZQVFHYCJB7512908346/?"
-
-# 誤認識しやすい文字のペア。新しい文字（key）を導入する際、
-# 既に学習済みの文字（value）も同時に重点サンプリングに含めることで、
-# モデルにその差異を強制的に学習させる（対照学習）。
-# 診断ツール（evaluate_confusion.py）の結果に基づき、エビデンスベースで更新。
-# 長点過多（Oへの吸収）や末尾リズムの誤認（W vs P/J）を重点的に矯正する。
-CONFUSION_PAIRS = {
-    'L': 'R',    # .-.. vs .-.
-    'F': 'L',    # ..-. vs .-..
-    'W': 'PAGJ', # .-- (W) vs .--. (P), .- (A), --. (G), .--- (J)
-    'P': 'WJ',   # .--. vs .-- (W), .--- (J)
-    'B': 'D',    # -... vs -..
-    'X': 'P',    # -..- vs .--.
-    'Y': 'Q',    # -.-- vs --.-
-    'U': 'V',    # ..- vs ...-
-    '8': 'O',    # ---.. vs --- (O)
-    '0': 'O',    # ----- vs --- (O)
-    '7': 'Z',    # --... vs --.. (Z)
-    '4': 'X',    # ....- vs -..- (X)
-    'I': 'T',    # .. vs - (T)
-    'A': 'W',    # .- vs .--
-    'M': 'O',    # -- vs ---
-    '<AR>': 'C', # .-.-. vs -.-. (C)
-    '<BT>': 'X', # -...- vs -..- (X)
-}
-
-# Mapping Prosigns to ASCII control codes for single-token Levenshtein calculation
-# Using \x01, \x02, ... for prosigns to ensure they are treated as a single character.
-PROSIGN_MAPPING = {ps: chr(i + 1) for i, ps in enumerate(config.PROSIGNS)}
-INV_PROSIGN_MAPPING = {v: k for k, v in PROSIGN_MAPPING.items()}
-
-def map_prosigns(text: str) -> str:
-    """Replace prosign strings with their corresponding control codes."""
-    # Order by length descending to avoid partial matches (e.g., <BT> vs <BT)
-    # although our prosigns are quite distinct.
-    sorted_prosigns = sorted(config.PROSIGNS, key=len, reverse=True)
-    mapped_text = text
-    for ps in sorted_prosigns:
-        mapped_text = mapped_text.replace(ps, PROSIGN_MAPPING[ps])
-    return mapped_text
-
-def unmap_prosigns(text: str) -> str:
-    """Replace control codes back with their original prosign strings."""
-    unmapped_text = ""
-    for char in text:
-        if char in INV_PROSIGN_MAPPING:
-            unmapped_text += INV_PROSIGN_MAPPING[char]
-        else:
-            unmapped_text += char
-    return unmapped_text
-
-def levenshtein(a, b):
-    """
-    Calculates the Levenshtein distance and backtrace between a and b.
-    Returns:
-        distance: int
-        ops: List[Tuple[str, str, str]] - list of (op, ref_char, hyp_char)
-             op is one of 'match', 'sub', 'ins', 'del'
-    """
-    # Pre-process strings to map prosigns to single control codes
-    a = map_prosigns(a)
-    b = map_prosigns(b)
-
-    n, m = len(a), len(b)
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(n + 1): dp[i][0] = i
-    for j in range(m + 1): dp[0][j] = j
-
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            if a[i - 1] == b[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1]
-            else:
-                dp[i][j] = min(dp[i - 1][j] + 1,    # deletion
-                               dp[i][j - 1] + 1,    # insertion
-                               dp[i - 1][j - 1] + 1) # substitution
-
-    # Backtrace
-    ops = []
-    i, j = n, m
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and a[i - 1] == b[j - 1]:
-            ref_char = INV_PROSIGN_MAPPING.get(a[i - 1], a[i - 1])
-            hyp_char = INV_PROSIGN_MAPPING.get(b[j - 1], b[j - 1])
-            ops.append(('match', ref_char, hyp_char))
-            i -= 1
-            j -= 1
-        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
-            ref_char = INV_PROSIGN_MAPPING.get(a[i - 1], a[i - 1])
-            hyp_char = INV_PROSIGN_MAPPING.get(b[j - 1], b[j - 1])
-            ops.append(('sub', ref_char, hyp_char))
-            i -= 1
-            j -= 1
-        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
-            ref_char = INV_PROSIGN_MAPPING.get(a[i - 1], a[i - 1])
-            ops.append(('del', ref_char, None))
-            i -= 1
-        elif j > 0 and dp[i][j] == dp[i][j - 1] + 1:
-            hyp_char = INV_PROSIGN_MAPPING.get(b[j - 1], b[j - 1])
-            ops.append(('ins', None, hyp_char))
-            j -= 1
-    
-    return dp[n][m], ops[::-1]
 
 class Trainer:
     def __init__(self, args):
@@ -181,11 +77,14 @@ class Trainer:
         # CTC Loss: zero_infinity=True to handle edge cases in early training
         self.criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
         # Multi-class Cross Entropy for Signal Detection (Multi-task)
-        # 0: Background, 1: Dit, 2: Dah, 3: Intra-char space, 4: Inter-char space, 5: Inter-word space
-        self.signal_criterion = nn.CrossEntropyLoss(reduction='none')
+        # 0: Background/Space, 1: Dit, 2: Dah, 3: Inter-word space
+        # クラス不均衡を考慮しつつ、偽陽性を抑えるため Inter-word space (3) の重みを 2.0 に調整
+        sig_weights = torch.tensor([0.5, 1.0, 1.0, 2.0]).to(self.device)
+        self.signal_criterion = nn.CrossEntropyLoss(weight=sig_weights, reduction='none')
         # Binary Cross Entropy for Character Boundary Detection
         # Positive weight to handle class imbalance (boundaries are rare)
-        pos_weight = torch.tensor([20.0]).to(self.device)
+        # 偽陽性（過剰分割）を抑え、安定した境界検出を行うため pos_weight を 5.0 に調整
+        pos_weight = torch.tensor([5.0]).to(self.device)
         self.boundary_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pos_weight)
         
         # Dataset
@@ -195,9 +94,10 @@ class Trainer:
         self.history_path = os.path.join(args.save_dir, "history.csv")
         
         # Adaptive Curriculum State
+        self.curriculum = CurriculumManager()
         self.current_phase = 1
         self.phases_since_last_advance = 0
-        self.min_epochs_per_phase = 3
+        self.min_epochs_per_phase = 2
         self.cer_threshold_to_advance = 0.01
 
         # Initialize phase from args if provided
@@ -207,65 +107,40 @@ class Trainer:
     def update_curriculum(self, val_cer):
         """
         Update curriculum phase based on validation CER.
-        Only active if args.curriculum_phase is 0 (auto mode).
         """
         # Always increment counter
         self.phases_since_last_advance += 1
         
-        # Only update phase if auto mode is enabled
-        if self.args.curriculum_phase == 0:
-            # Logic: If CER is low enough AND we've spent enough time in this phase
-            if val_cer < self.cer_threshold_to_advance and self.phases_since_last_advance >= self.min_epochs_per_phase:
-                # Calculate max phase dynamically based on KOCH_CHARS length
-                # Phase 1: 2 chars
-                # Phase 2: 4 chars
-                # Phase N: len(KOCH_CHARS) chars -> N = len(KOCH_CHARS) - 2
-                # + 2 phases for Full Clean and Slight Variations
-                # + 1 phase for Realistic
-                # 7 phases were: FullClean, SlightVar, Practical, Boundary, NegEntry, DeepNeg, TrueExtreme
-                # Now we expand to more steps for smoother SNR transition and fading resistance
-                # Koch Phases: (len(KOCH_CHARS) - 4) + 2
-                # Additional SNR/Fading Phases: 11
-                max_phase = (len(KOCH_CHARS) - 4) + 2 + 14
+        # Logic: If CER is low enough AND we've spent enough time in this phase
+        if val_cer < self.cer_threshold_to_advance and self.phases_since_last_advance >= self.min_epochs_per_phase:
+            max_phase = self.curriculum.get_max_phase()
+            
+            if self.current_phase < max_phase:
+                print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
+                self.current_phase += 1
+                self.phases_since_last_advance = 0
                 
-                if self.current_phase < max_phase:
-                    print(f"*** PERFORMANCE GOOD (CER {val_cer:.4f} < {self.cer_threshold_to_advance}). ADVANCING TO PHASE {self.current_phase + 1} ***")
-                    self.current_phase += 1
-                    self.phases_since_last_advance = 0
-                    
-                    # Reset optimizer LR to boost learning for new phase
-                    # 難易度の高い文字（Lなど）が導入される場合は、少し低めのLRから開始して慎重に学習させる
-                    new_char = ""
-                    num_chars = 0
-                    if self.current_phase == 1: num_chars = 2
-                    elif self.current_phase == 2: num_chars = 4
-                    else: num_chars = 4 + (self.current_phase - 2)
-                    
-                    if num_chars <= len(KOCH_CHARS):
-                        new_char = KOCH_CHARS[num_chars-1]
-                    
-                    reset_lr = self.args.lr
-                    if new_char in CONFUSION_PAIRS:
-                        reset_lr = self.args.lr * 0.3 # 難易度が高い場合は LR を抑える
-                        print(f"[Curriculum] Difficult char '{new_char}' detected. Using cautious LR: {reset_lr}")
-                    
-                    print(f"[Curriculum] Resetting Learning Rate to {reset_lr}")
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = reset_lr
-                else:
-                    print(f"*** MAX PHASE REACHED. CONTINUING REFINEMENT ***")
+                # Reset optimizer LR to boost learning for new phase
+                reset_lr = self.args.lr
+                print(f"[Curriculum] Resetting Learning Rate to {reset_lr}")
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = reset_lr
             else:
-                print(f"[DEBUG] Phase {self.current_phase}: CER {val_cer:.4f} (Target < {self.cer_threshold_to_advance}), Epochs {self.phases_since_last_advance}/{self.min_epochs_per_phase} - WAITING")
-                
-                # 停滞打破のための LR 再加熱 (Re-heating)
-                # 10エポック停滞したら、LR を初期値の半分まで戻して局所解からの脱出を試みる
-                # 以降、5エポックごとに再加熱を繰り返す
-                if self.phases_since_last_advance >= 10 and (self.phases_since_last_advance - 10) % 5 == 0:
-                    # 強力な再加熱: 停滞時は初期 LR まで戻す
-                    reheat_lr = self.args.lr
-                    print(f"*** STAGNATION DETECTED ({self.phases_since_last_advance} epochs). RE-HEATING LR TO {reheat_lr} ***")
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = reheat_lr
+                print(f"*** MAX PHASE REACHED. CONTINUING REFINEMENT ***")
+        else:
+            print(f"[DEBUG] Phase {self.current_phase}: CER {val_cer:.4f} (Target < {self.cer_threshold_to_advance}), Epochs {self.phases_since_last_advance}/{self.min_epochs_per_phase} - WAITING")
+            
+            # 停滞打破のための LR 再加熱 (Re-heating)
+            # 15エポック以上停滞したら、LR を初期値まで戻して局所解からの脱出を試みる
+            # 以降、5エポックごとに再加熱を繰り返す。
+            # 極限環境 (-15dB) への挑戦では、より慎重な再加熱を行う。
+            if self.phases_since_last_advance >= 15 and (self.phases_since_last_advance - 15) % 5 == 0:
+                # 25エポック以上停滞した場合は初期値の 1.5倍まで LR を引き上げる。
+                multiplier = 1.5 if self.phases_since_last_advance >= 25 else 1.0
+                reheat_lr = self.args.lr * multiplier
+                print(f"*** STAGNATION DETECTED ({self.phases_since_last_advance} epochs). RE-HEATING LR TO {reheat_lr} ***")
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = reheat_lr
 
     def load_checkpoint_state(self, checkpoint):
         """Load curriculum state from checkpoint."""
@@ -351,15 +226,8 @@ class Trainer:
         # Crop frequency bins
         spec = spec[:, self.bin_start:self.bin_end, :] # (B, N_BINS, T)
 
-        # Log scaling and robust normalization
-        # Use a fixed scaling factor to avoid blowing up silence in InstanceNorm
-        mels = torch.log1p(spec * 100.0)
-        
-        # Simple global-style normalization: scale to roughly [0, 1] range
-        # Based on typical log1p(spec * 100) values where max is around 5-10
-        mels = mels / 5.0
-        
-        mels = mels.transpose(1, 2) # (B, T, F)
+        # PCEN will handle scaling and normalization inside the model
+        mels = spec.transpose(1, 2) # (B, T, F)
         
         # 物理法則に基づいた厳密なフレーム計算 (torchaudio center=False の仕様)
         # Mel frames: floor((L - N_FFT) / HOP_LENGTH) + 1
@@ -378,7 +246,7 @@ class Trainer:
 
         return mels, input_lengths
 
-    def compute_loss(self, logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets):
+    def compute_loss(self, logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=2.0):
         """損失関数の一括計算。GPUメモリ効率を最大化した実装。"""
         input_lengths = torch.clamp(input_lengths, max=logits.size(1))
         batch_size, max_time, _ = logits.size()
@@ -401,9 +269,26 @@ class Trainer:
         # これにより、CTCスパイクをバウンダリのピンポイントな位置へ強制的に誘導する。
         bound_t = boundary_targets[:, :logits.size(1)].to(self.device)
         
-        # ペナルティ対象： バウンダリでないすべての場所
-        penalty_mask = (1.0 - bound_t)
-        illegal_spike_loss = (char_probs_sum * penalty_mask * mask).sum() / (mask.sum() + 1e-6)
+        # [設計意図] A/W などのプレフィックス識別を維持しつつ、ハイフン等の長符号の学習を促すため、
+        # ペナルティ制約に「遊び（Smoothing）」を導入する。
+        # [設計意図] A/W などのプレフィックス識別を維持しつつ、ハイフン等の長符号の学習を促すため、
+        # ペナルティ制約に「遊び（Smoothing）」を導入する。
+        # バウンダリの周辺数フレームを許容範囲として広げる。
+        # 毎バッチ計算のオーバーヘッドを避けるため、シンプルな 1D Max Pool のみを使用。
+        with torch.no_grad():
+            # (B, T) -> (B, 1, T)
+            soft_bound = bound_t.unsqueeze(1)
+            # 左右 7フレーム程度を許容 (計 15フレーム)
+            # フェーズ進展に伴う境界の曖昧さを許容し、Deletion を抑制するために拡大
+            soft_bound = F.max_pool1d(soft_bound, kernel_size=15, stride=1, padding=7)
+            soft_bound = soft_bound.squeeze(1)
+            
+        # ペナルティ対象： バウンダリ（およびその周辺）でない場所
+        penalty_mask = (1.0 - soft_bound)
+        
+        # 数学的修正: 全フレーム数(mask.sum())で割ると、10秒のデータではペナルティが1/1000に希釈されてしまう。
+        # サンプルあたりのペナルティとして機能させるため、バッチサイズ(logits.size(0))で正規化する。
+        illegal_spike_loss = (char_probs_sum * penalty_mask * mask).sum() / (logits.size(0) + 1e-6)
 
         # 3. Signal Detection Loss
         sig_t = signal_targets[:, :signal_logits.size(1)].to(self.device)
@@ -416,234 +301,59 @@ class Trainer:
         bound_loss = (raw_bound_loss * mask).sum() / (mask.sum() + 1e-6)
 
         # 損失の重みバランスを調整:
-        # アライメント崩壊を矯正しつつ、Blankへの過度なバイアス（萎縮）を防ぐため重みを 2.0 に調整
-        total_loss = 5.0 * ctc_loss + 1.0 * sig_loss + 5.0 * bound_loss + 2.0 * illegal_spike_loss
+        # 信号認識 (Sig Loss) の重みを 10.0 に落ち着かせ、CTC の重みを 2.0 に強化。
+        # これにより、信号の物理構造を維持しつつ、文字識別能力の向上を図る。
+        # 低 SNR 環境下でのアライメント崩壊を防ぐため、Illegal Spike Penalty は 0.5倍で維持。
+        total_loss = 2.0 * ctc_loss + 10.0 * sig_loss + 1.0 * bound_loss + (penalty_weight * 0.5) * illegal_spike_loss
         
         return total_loss, {'ctc': ctc_loss, 'sig': sig_loss, 'bound': bound_loss, 'penalty': illegal_spike_loss}
 
     def train_epoch(self, epoch):
         self.model.train()
-        # Koch Method Curriculum
-        # 停滞を打破するため、文字を1つずつ導入し、かつ混乱しやすいペアを重点的に学習させる。
         
-        # Use the internal current_phase
-        phase = self.current_phase
-        if phase == 0: phase = 1 # Safety fallback
-
-        # Define phases explicitly for fine-grained control
-        # Phase 1: 2 chars (K, M)
-        # Phase 2: 4 chars (K, M, R, S) - Standard Koch start
-        # Phase 3+: Add 1 char at a time
-        if phase == 1:
-            num_chars = 2
-        elif phase == 2:
-            num_chars = 4
-        else:
-            # Phase 3 -> 5 chars, Phase 4 -> 6 chars...
-            # Formula: 4 + (phase - 2)
-            num_chars = 4 + (phase - 2)
-            
-        max_koch_phase = len(KOCH_CHARS) - 4 + 2 # When num_chars == len(KOCH_CHARS)
+        # Fetch current curriculum phase
+        p = self.curriculum.get_phase(self.current_phase)
         
+        # Apply curriculum to train dataset
+        self.train_dataset.chars = p.chars
+        self.train_dataset.min_snr = p.min_snr
+        self.train_dataset.max_snr = p.max_snr
+        self.train_dataset.min_wpm = p.min_wpm
+        self.train_dataset.max_wpm = p.max_wpm
+        self.train_dataset.jitter_max = p.jitter
+        self.train_dataset.weight_var = p.weight_var
+        self.train_dataset.phrase_prob = p.phrase_prob
+        self.train_dataset.focus_prob = p.focus_prob
+        self.train_dataset.fading_speed_min = p.fading_speed[0]
+        self.train_dataset.fading_speed_max = p.fading_speed[1]
+        self.train_dataset.min_fading = p.min_fading
+        self.train_dataset.drift_prob = p.drift_prob
+        self.train_dataset.qrn_prob = p.qrn_prob
+        self.train_dataset.qrm_prob = p.qrm_prob
+        self.train_dataset.impulse_prob = p.impulse_prob
+        self.train_dataset.agc_prob = p.agc_prob
+        self.train_dataset.multipath_prob = p.multipath_prob
+        self.train_dataset.clipping_prob = p.clipping_prob
+        self.train_dataset.min_gain_db = p.min_gain_db
+        
+        # VRAM Safe length limits (10s fixed buffer handles most cases, but we keep text length reasonable)
         self.train_dataset.min_len = 5
-        self.train_dataset.max_len = 6
-        self.train_dataset.min_wpm = 15
-        self.train_dataset.max_wpm = 40
-        self.train_dataset.min_freq = 650.0
-        self.train_dataset.max_freq = 750.0
-        self.train_dataset.min_gain_db = 0.0 # Default: 0dB (full scale)
-
-        if num_chars <= len(KOCH_CHARS):
-            # Koch Phases: Gradually increase character set
-            current_chars = KOCH_CHARS[:num_chars]
-            
-            # Determine new chars for focus sampling
-            if phase == 1:
-                new_chars = current_chars
-            elif phase == 2:
-                new_chars = current_chars[2:] # R, S
-            else:
-                # Add 1 char at a time
-                new_chars = current_chars[-1:]
-                
-                # 対照学習: 混乱しやすいペアがある場合、それも Focus Chars に含める
-                # 診断ツール（evaluate_confusion.py）の結果に基づき、エビデンスベースで更新。
-                for nc in list(new_chars):
-                    if nc in CONFUSION_PAIRS:
-                        pair_char = CONFUSION_PAIRS[nc]
-                        if pair_char in current_chars:
-                            print(f"  [Contrastive] Adding '{pair_char}' to focus to distinguish from '{nc}'")
-                            new_chars += pair_char
-            
-            # カリキュラム設定の厳格な復元 (VRAM 爆発の真因: min_len/max_len の指定漏れを修正)
-            # 長いシーケンスは Attention のメモリを O(T^2) で消費するため、初期学習では短く制限する。
-            self.train_dataset.min_wpm = 18
-            self.train_dataset.max_wpm = 22
-            self.train_dataset.min_snr = 100.0 # Clean
-            self.train_dataset.max_snr = 100.0
-            self.train_dataset.min_freq = 700.0 # Koch 初期は周波数を固定してリズム学習に集中
-            self.train_dataset.max_freq = 700.0
-            self.train_dataset.jitter_max = 0.0
-            self.train_dataset.weight_var = 0.0
-            self.train_dataset.chars = current_chars
-            self.train_dataset.min_len = 5
-            self.train_dataset.max_len = 6
-            
-            # 停滞打破のため、ドリルモード（高比率 Focus）を適用
-            self.train_dataset.focus_prob = 0.8 if self.phases_since_last_advance > 5 else 0.5
-            
-            # ドリルモード時は、新文字だけでなく既知の混同ペアも強制的に Focus に含める
-            if self.phases_since_last_advance > 5:
-                focus_list = list(new_chars)
-                for char in current_chars:
-                    if char in CONFUSION_PAIRS:
-                        for pair_char in CONFUSION_PAIRS[char]:
-                            if pair_char in current_chars and pair_char not in focus_list:
-                                focus_list.append(pair_char)
-                new_chars = "".join(focus_list)
-                print(f"  [Drill Mode] Intensifying focus on: {new_chars}")
-
-            # Apply weighted sampling for characters (must be after Drill Mode expansion)
-            self.train_dataset.focus_chars = new_chars
-            
-            # コッホ学習中は文字認識に集中するため定型文は導入しない
-            self.train_dataset.phrase_prob = 0.0
-                
-            print(f"Epoch {epoch} | Koch Phase {phase}: Chars={current_chars} (20 Wpm, Clean) | Focus: {new_chars}")
-
-        elif phase == max_koch_phase + 1: # 35
-            # Phase max+1: Full Clean (全文字導入、クリーン環境)
-            self.train_dataset.min_wpm = 20
-            self.train_dataset.max_wpm = 20
-            self.train_dataset.min_snr = 50.0
-            self.train_dataset.max_snr = 60.0
-            self.train_dataset.jitter_max = 0.0
-            self.train_dataset.weight_var = 0.0
-            self.train_dataset.chars = self.train_dataset.all_chars
-            self.train_dataset.min_len = 5
-            self.train_dataset.max_len = 8
-            self.train_dataset.focus_chars = None
-            self.train_dataset.phrase_prob = 0.3
-            print(f"Epoch {epoch} | Phase {phase}: Full Chars, Clean | Phrase Prob: {self.train_dataset.phrase_prob:.2f}")
-
-        elif phase == max_koch_phase + 2:
-            # Phase max+2: Slight Var (軽微なノイズと打鍵の揺らぎ)
-            self.train_dataset.min_wpm = 18
-            self.train_dataset.max_wpm = 25
-            self.train_dataset.min_snr = 25.0
-            self.train_dataset.max_snr = 40.0
-            self.train_dataset.jitter_max = 0.03
-            self.train_dataset.weight_var = 0.05
-            self.train_dataset.fading_speed_min = 0.0
-            self.train_dataset.fading_speed_max = 0.0
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Slight Variations (SNR 25-40dB, No Fading)")
-
-        elif phase == max_koch_phase + 3:
-            # Phase max+3: Practical 1 (フェージングの導入)
-            self.train_dataset.min_snr = 15.0
-            self.train_dataset.max_snr = 25.0
-            self.train_dataset.min_fading = 0.4
-            self.train_dataset.fading_speed_max = 0.1
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Practical 1 (SNR 15-25dB, Fading min=0.4)")
-
-        elif phase == max_koch_phase + 4:
-            # Phase max+4: Practical 2 (中程度のノイズ)
-            self.train_dataset.min_snr = 8.0
-            self.train_dataset.max_snr = 18.0
-            self.train_dataset.min_fading = 0.5
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Practical 2 (SNR 8-18dB, Fading min=0.5)")
-
-        elif phase == max_koch_phase + 5:
-            # Phase max+5: Boundary (SNR 0dB付近)
-            self.train_dataset.min_snr = 2.0
-            self.train_dataset.max_snr = 12.0
-            self.train_dataset.min_fading = 0.6
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Boundary SNR (2-12dB, Fading min=0.6)")
-
-        elif phase == max_koch_phase + 6:
-            # Phase max+6: Negative 1 (負のSNR突入)
-            self.train_dataset.min_snr = -4.0
-            self.train_dataset.max_snr = 6.0
-            self.train_dataset.min_fading = 0.7
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 1 (-4 to 6dB, Fading min=0.7)")
-
-        elif phase == max_koch_phase + 7:
-            # Phase max+7: Negative 2 (現在のモデル限界付近)
-            self.train_dataset.min_snr = -8.0
-            self.train_dataset.max_snr = 2.0
-            self.train_dataset.min_fading = 0.8
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 2 (-8 to 2dB, Fading min=0.8)")
-
-        elif phase == max_koch_phase + 8:
-            # Phase max+8: Negative SNR 2 (-8 to 2dB)
-            self.train_dataset.min_snr = -8.0
-            self.train_dataset.max_snr = 2.0
-            self.train_dataset.min_fading = 0.8
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Negative SNR 2 (-8 to 2dB, Fading min=0.8)")
-
-        elif phase == max_koch_phase + 9:
-            # Phase max+9: Volume Augmentation 1 (Mid gain)
-            # SNR is kept at Phase 42 level (-8 to 2dB) to stabilize learning
-            self.train_dataset.min_snr = -8.0
-            self.train_dataset.max_snr = 2.0
-            self.train_dataset.min_fading = 0.8
-            self.train_dataset.min_gain_db = -12.0 # approx 0.25 linear
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Volume Augmentation 1 (-8 to 2dB, Gain -12dB to 0dB)")
-
-        elif phase == max_koch_phase + 10:
-            # Phase max+10: Volume Augmentation 2 (Low gain)
-            self.train_dataset.min_snr = -8.0
-            self.train_dataset.max_snr = 2.0
-            self.train_dataset.min_fading = 0.8
-            self.train_dataset.min_gain_db = -26.0 # approx 0.05 linear
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Volume Augmentation 2 (-8 to 2dB, Gain -26dB to 0dB)")
-
-        elif phase == max_koch_phase + 11:
-            # Phase max+11: Human Limit (人間の限界領域)
-            self.train_dataset.min_snr = -12.0
-            self.train_dataset.max_snr = -2.0
-            self.train_dataset.min_fading = 0.9
-            self.train_dataset.min_gain_db = -40.0 # approx 0.01 linear
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Human Limit SNR (-12 to -2dB, Gain -40dB to 0dB)")
-
-        elif phase == max_koch_phase + 12:
-            # Phase max+12: True Extreme (最終到達目標)
-            self.train_dataset.min_snr = -15.0
-            self.train_dataset.max_snr = -5.0
-            self.train_dataset.min_fading = 0.9
-            self.train_dataset.min_gain_db = -40.0
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: True Extreme SNR (-15 to -5dB, Gain -40dB to 0dB)")
-
-        elif phase == max_koch_phase + 13:
-            # Phase max+13: Fading Specialization
-            self.train_dataset.min_snr = -5.0
-            self.train_dataset.max_snr = 5.0
-            self.train_dataset.min_fading = 0.3
-            self.train_dataset.min_gain_db = -40.0
-            self.train_dataset.fading_speed_max = 0.2
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Fading Specialization (-5 to 5dB, Deep Fading, Gain -40dB to 0dB)")
-
+        self.train_dataset.max_len = 15 if p.phrase_prob > 0 else 10
+        
+        # Determine focus chars (usually the newest ones in the set)
+        # We can derive this by comparing with previous phase's chars
+        if self.current_phase > 1:
+            prev_p = self.curriculum.get_phase(self.current_phase - 1)
+            new_chars = "".join([c for c in p.chars if c not in prev_p.chars])
+            self.train_dataset.focus_chars = new_chars if new_chars else p.chars
         else:
-            # Phase max+14: Final Refine
-            self.train_dataset.min_snr = -10.0
-            self.train_dataset.max_snr = 0.0
-            self.train_dataset.min_fading = 0.5
-            self.train_dataset.min_gain_db = -40.0
-            self.train_dataset.fading_speed_max = 0.3
-            self.train_dataset.phrase_prob = 0.5
-            print(f"Epoch {epoch} | Phase {phase}: Final Refine (-10 to 0dB, Gain -40dB to 0dB)")
+            self.train_dataset.focus_chars = p.chars
+
+        print(f"Epoch {epoch} | Phase {self.current_phase} ({p.name})")
+        print(f"  Chars: {p.chars} | Focus: {self.train_dataset.focus_chars}")
+        print(f"  Env: SNR={p.min_snr}-{p.max_snr}dB, WPM={p.min_wpm}-{p.max_wpm}, Jitter={p.jitter}, WeightVar={p.weight_var}, Gain={p.min_gain_db}dB")
+        print(f"  Aug: Fading={p.min_fading} (spd {p.fading_speed}), Drift={p.drift_prob}, QRN={p.qrn_prob}, AGC={p.agc_prob}, Multipath={p.multipath_prob}, Clipping={p.clipping_prob}")
+        print(f"  Prob: Phrase={p.phrase_prob}, Focus={p.focus_prob} | Penalty: {p.penalty_weight}")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm
@@ -656,6 +366,13 @@ class Trainer:
         self.val_dataset.fading_speed_max = self.train_dataset.fading_speed_max
         self.val_dataset.min_fading = self.train_dataset.min_fading
         self.val_dataset.min_gain_db = self.train_dataset.min_gain_db
+        self.val_dataset.drift_prob = getattr(self.train_dataset, 'drift_prob', 0.0)
+        self.val_dataset.qrn_prob = getattr(self.train_dataset, 'qrn_prob', 0.0)
+        self.val_dataset.qrm_prob = getattr(self.train_dataset, 'qrm_prob', 0.1)
+        self.val_dataset.impulse_prob = getattr(self.train_dataset, 'impulse_prob', 0.001)
+        self.val_dataset.agc_prob = getattr(self.train_dataset, 'agc_prob', 0.0)
+        self.val_dataset.multipath_prob = getattr(self.train_dataset, 'multipath_prob', 0.0)
+        self.val_dataset.clipping_prob = getattr(self.train_dataset, 'clipping_prob', 0.0)
         self.val_dataset.chars = self.train_dataset.chars
         self.val_dataset.min_len = self.train_dataset.min_len
         self.val_dataset.max_len = self.train_dataset.max_len
@@ -666,8 +383,15 @@ class Trainer:
         self.val_dataset.max_freq = self.train_dataset.max_freq
 
         total_loss_accum = 0
+        
+        # Statistics for the epoch
+        actual_wpms = []
+        actual_lens = []
+
         dataloader = DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=self.collate_fn)
-        for batch_idx, (waveforms, targets, lengths, target_lengths, _, _, signal_targets, boundary_targets, _) in enumerate(dataloader):
+        for batch_idx, (waveforms, targets, lengths, target_lengths, _, wpms, signal_targets, boundary_targets, _) in enumerate(dataloader):
+            actual_wpms.extend(wpms.tolist())
+            actual_lens.extend(target_lengths.tolist())
             # アライメント矯正のための「再加熱」ロジック
             # 停滞している場合（Epoch 60以降など）、一時的に LR を上げて局所解から脱出させる
             total_warmup_batches = len(dataloader)
@@ -695,7 +419,7 @@ class Trainer:
             # Ensure input_lengths does not exceed logits size
             input_lengths = torch.clamp(input_lengths, max=logits.size(1))
             
-            loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets)
+            loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
             
             if torch.isinf(loss) or torch.isnan(loss):
                 print(f"Warning: Loss is {loss}, skipping batch")
@@ -721,6 +445,10 @@ class Trainer:
                     print(f"  Logits Stats | Blank Mean: {blank_logits.mean():.4f}, Max: {blank_logits.max():.4f}")
                     print(f"  Logits Stats | Chars Mean: {char_logits.mean():.4f}, Max: {max_char_logits.max():.4f}")
 
+        # Print epoch statistics
+        if actual_wpms and actual_lens:
+            print(f"  Actual Stats | WPM: {min(actual_wpms):.1f}-{max(actual_wpms):.1f} | Len: {min(actual_lens)}-{max(actual_lens)}")
+
         return total_loss_accum / len(dataloader)
 
     def validate(self, epoch):
@@ -729,6 +457,12 @@ class Trainer:
         total_edit_distance = 0
         total_ref_length = 0
         
+        # Levenshtein ops stats
+        total_matches = 0
+        total_subs = 0
+        total_ins = 0
+        total_dels = 0
+
         # シグナル分類精度計測用
         total_sig_correct = 0
         total_sig_elements = 0
@@ -755,16 +489,6 @@ class Trainer:
                 loss, _ = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets)
                 total_loss += loss.item()
                 
-                # デコード時はモデル自身の境界予測 (boundary_logits) でゲート制御を行う
-                # ※調査中: 現在、モデルがバウンダリに過度に依存して判別をサボる傾向があるため、
-                # ゲートを一時的に無効化して CTC 本来の性能を確認する。
-                # bound_p = torch.sigmoid(boundary_logits)
-                # gate_threshold = 0.05 if epoch < 10 else 0.2
-                # is_boundary_pred = (bound_p > gate_threshold).squeeze(-1)
-                
-                preds = logits.argmax(dim=2)
-                # preds[~is_boundary_pred] = 0
-                
                 sig_preds = signal_logits.argmax(dim=2)
                 
                 # シグナル分類精度の計算 (Mask を考慮)
@@ -776,51 +500,36 @@ class Trainer:
                     total_sig_correct += (sig_p == sig_t).sum().item()
                     total_sig_elements += length
 
-                for i in range(preds.size(0)):
+                for i in range(logits.size(0)):
                     length = input_lengths[i].item()
-                    p_indices = preds[i, :length]
-                    p_sigs = sig_preds[i, :length]
+                    b_probs = torch.sigmoid(boundary_logits[i, :length]).squeeze(-1)
                     
-                    decoded_indices = []
-                    decoded_positions = []
-                    prev = -1
-                    for t in range(len(p_indices)):
-                        idx = p_indices[t].item()
-                        if idx != 0 and idx != prev:
-                            decoded_indices.append(idx)
-                            decoded_positions.append(t)
-                        prev = idx
+                    # Unified Decoding
+                    hypothesis, timed_output = decode_multi_task(
+                        logits[i, :length],
+                        signal_logits[i, :length],
+                        b_probs
+                    )
                     
-                    h_list = []
-                    last_p = 0
-                    for idx, pos in zip(decoded_indices, decoded_positions):
-                        # 前の文字との間に単語間空白(3)があるかチェック
-                        if any(p_sigs[last_p:pos] == 3):
-                            h_list.append(" ")
-                        h_list.append(ID_TO_CHAR.get(idx, ""))
-                        last_p = pos
-                        
-                    hypothesis = "".join(h_list).strip()
                     reference = texts[i].strip()
+                    ref_len = len(reference.replace(" ", ""))
                     
-                    # CER計算からスペースを除外
-                    reference_no_space = reference.replace(" ", "")
-                    hypothesis_no_space = hypothesis.replace(" ", "")
-                    
-                    dist, _ = levenshtein(reference_no_space, hypothesis_no_space)
+                    # Unified CER calculation
+                    dist_rate = calculate_cer(reference, hypothesis)
+                    dist = dist_rate * ref_len
                     total_edit_distance += dist
-                    total_ref_length += len(reference_no_space)
-                    
+                    total_ref_length += ref_len
+
                     if is_phrases[i]:
                         total_dist_phrase += dist
-                        total_len_phrase += len(reference_no_space)
+                        total_len_phrase += ref_len
                     else:
                         total_dist_random += dist
-                        total_len_random += len(reference_no_space)
+                        total_len_random += ref_len
 
                     last_ref = reference
                     last_hyp = hypothesis
-                    timed_hyp = " ".join([f"{ID_TO_CHAR.get(idx, '')}({pos})" for idx, pos in zip(decoded_indices, decoded_positions)])
+                    timed_hyp = " ".join([f"{char}({pos})" for char, pos in timed_output])
                     
         avg_loss = total_loss / len(dataloader)
         avg_cer = total_edit_distance / total_ref_length if total_ref_length > 0 else 0.0
@@ -829,7 +538,6 @@ class Trainer:
         
         avg_sig_acc = total_sig_correct / total_sig_elements if total_sig_elements > 0 else 0.0
         print(f"Validation Epoch {epoch} | Avg Loss: {avg_loss:.4f} | CER: {avg_cer:.4f} (Phrase: {cer_phrase:.4f}, Random: {cer_random:.4f}) | Sig Acc: {avg_sig_acc:.4f}")
-        
         # 0:bg/space(_), 1:dit(#), 2:dah(=), 3:word( )
         class_map = {0: '_', 1: '#', 2: '=', 3: ' '}
         sig_t_str = "".join([class_map.get(int(x), '?') for x in signal_targets[-1, :]])
@@ -851,12 +559,22 @@ class Trainer:
         print(f"  Sample Hyp: {last_hyp}")
         print(f"  Timed Hyp:  {timed_hyp}")
         
-        # アライメント崩壊の診断: 最後の文字が末尾付近に張り付いていないか
-        if len(decoded_positions) > 0:
-            last_pos = decoded_positions[-1]
+        # アライメント崩壊の診断: 信号の終了位置に対して、出力が不自然に遅延（末尾へ溜め込み）していないか
+        if len(timed_output) > 0:
+            last_pos = timed_output[-1][1]
             total_len = input_lengths[-1].item()
-            if last_pos > total_len * 0.9:
-                print(f"  WARNING: Alignment collapse detected! Last char at {last_pos}/{total_len}")
+            
+            # 実際の信号の最終位置を特定 (1:Dit, 2:Dah)
+            sig_t = signal_targets[-1, :total_len]
+            sig_indices = torch.where((sig_t == 1) | (sig_t == 2))[0]
+            if len(sig_indices) > 0:
+                actual_sig_end = sig_indices[-1].item()
+                # 信号終了から 1.5秒 (150フレーム) 以上遅れている場合は崩壊とみなす
+                if last_pos > actual_sig_end + 150:
+                    print(f"  WARNING: Alignment collapse detected! Sig end: {actual_sig_end}, Last char: {last_pos}, Total: {total_len}")
+            elif last_pos > total_len * 0.9:
+                # 信号がない（異常系）場合のフォールバック
+                print(f"  WARNING: Alignment collapse detected (No signal)! Last char: {last_pos}")
 
         return avg_loss, avg_cer, cer_phrase, cer_random, avg_sig_acc
 
@@ -899,7 +617,7 @@ def main():
     parser.add_argument("--samples-per-epoch", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4) # Decreased LR for stability
+    parser.add_argument("--lr", type=float, default=1e-4) # Fine-tuning LR
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=5.0)
     parser.add_argument("--d-model", type=int, default=config.D_MODEL)

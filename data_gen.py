@@ -16,15 +16,68 @@ import config
 
 # Morse Code Definition
 MORSE_DICT = {
-    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
-    'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
-    'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
-    'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
-    'Y': '-.--', 'Z': '--..', '1': '.----', '2': '..---', '3': '...--',
-    '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..',
-    '9': '----.', '0': '-----', '.': '.-.-.-', ',': '--..--', '?': '..--..',
-    '/': '-..-.', '-': '-....-', '(': '-.--.', ')': '-.--.-', ' ': ' ',
-    '<BT>': '-...-', '<AR>': '.-.-.', '<SK>': '...-.-', '<KA>': '-.-.-',
+	"A":".-",
+	"B":"-...",
+	"C":"-.-.",
+	"D":"-..",
+	"E":".",
+	"F":"..-.",
+	"G":"--.",
+	"H":"....",
+	"I":"..",
+	"J":".---",
+	"K":"-.-",
+	"L":".-..",
+	"M":"--",
+	"N":"-.",
+	"O":"---",
+	"P":".--.",
+	"Q":"--.-",
+	"R":".-.",
+	"S":"...",
+	"T":"-",
+	"U":"..-",
+	"V":"...-",
+	"W":".--",
+	"X":"-..-",
+	"Y":"-.--",
+	"Z":"--..",
+	"0":"-----",
+	"1":".----",
+	"2":"..---",
+	"3":"...--",
+	"4":"....-",
+	"5":".....",
+	"6":"-....",
+	"7":"--...",
+	"8":"---..",
+	"9":"----.",
+	".":".-.-.-",
+	",":"--..--",
+	"?":"..--..",
+	"'":".----.",
+	"!":"-.-.--",
+	"/":"-..-.",
+	"(":"-.--.",
+	")":"-.--.-",
+	"&":".-...", # AS
+	":":"---...",
+	";":"-.-.-.",
+	"=":"-...-", # BT (new paragraph)
+	"+":".-.-.",  # AR (end of message)
+	"-":"-....-",
+	"_":"..--.-",
+	"\"":".-..-.",
+	"$":"...-..-",
+	"@":".--.-.",
+	"<BT>":"-...-",
+	"<AR>":".-.-.",
+	"<AS>":".-...",
+	"<AA>" : ".-.-", # AA (new line)
+	"<KA>" : "-.-.-", # CT/KA (attention)
+	   "<SK>" : "...-.-", # VA/SK (end of transmission)
+	   '<VE>': '...-.',
+	   '<HH>': '........',
 }
 
 class MorseGenerator:
@@ -85,6 +138,7 @@ class MorseGenerator:
             
             for j, char in enumerate(tokens):
                 code = MORSE_DICT.get(char, "")
+                # print(f"DEBUG: token='{char}', code='{code}'")
                 for k, symbol in enumerate(code):
                     if symbol == '.':
                         duration = dot_len * weight
@@ -111,7 +165,7 @@ class MorseGenerator:
         return timing
 
     def estimate_wpm_for_target_frames(self, text: str, target_frames: int = config.TARGET_FRAMES,
-                                      min_wpm: int = 15, max_wpm: int = 45) -> int:
+                                      min_wpm: int = 10, max_wpm: int = 45) -> int:
         """
         Estimate the WPM needed to fit the text into target_frames.
         """
@@ -138,16 +192,48 @@ class MorseGenerator:
         
         return int(np.clip(needed_wpm, min_wpm, max_wpm))
 
+    def estimate_max_chars_for_wpm(self, wpm: int, target_frames: int = config.TARGET_FRAMES) -> int:
+        """
+        Estimate the maximum number of characters that can fit in target_frames at given WPM.
+        Using PARIS standard (50 units per word, 5 chars + 1 space).
+        """
+        # Subtract silence (approx 1.0s total for pre/post silence)
+        target_sec = max(0.5, (target_frames * config.HOP_LENGTH / self.sample_rate) - 1.0)
+        
+        # total_units = target_sec * (WPM * 50 / 60) = target_sec * WPM / 1.2
+        total_units = (target_sec * wpm) / 1.2
+        
+        # Average units per character:
+        # PARIS is 50 units for 5 chars + 1 space = 50/6 = 8.33 units/char.
+        # Some characters are long (e.g., '0' is 19 units).
+        # We use a very conservative 15 units/char to ensure it fits even with numbers.
+        max_chars = int(total_units / 15)
+        return max(1, max_chars)
+
     def generate_waveform(self, timing: List[Tuple[int, float]], frequency: float = 700.0,
-                          waveform_type: str = 'sine', rise_time: float = 0.005, wpm: int = 20) -> np.ndarray:
+                          waveform_type: str = 'sine', rise_time: float = 0.005, wpm: int = 20,
+                          drift_hz: float = 0.0, max_duration: float = 10.0) -> np.ndarray:
         """
         Convert timing sequence to audio waveform.
+        Always returns a waveform of exactly max_duration seconds.
         """
-        pre_silence = random.uniform(0.1, 0.5)
-        post_silence = 0.55
-        total_duration = sum(t[1] for t in timing) + pre_silence + post_silence
-        total_samples = int(total_duration * self.sample_rate)
+        total_timing_duration = sum(t[1] for t in timing)
+        
+        # Ensure we fit in max_duration
+        if total_timing_duration > max_duration - 0.2:
+            # This should have been handled by caller, but we truncate just in case
+            pass
+
+        # Randomly place the signal within the 10s window
+        # Allow at least 0.1s at the start and end
+        max_start = max(0.1, max_duration - total_timing_duration - 0.1)
+        pre_silence = random.uniform(0.1, max_start)
+        
+        total_samples = int(max_duration * self.sample_rate)
         waveform = np.zeros(total_samples)
+        
+        # Frequency drift phase accumulation
+        phase = 0.0
         
         current_sample = int(pre_silence * self.sample_rate)
         for class_id, duration in timing:
@@ -155,8 +241,20 @@ class MorseGenerator:
             is_on = class_id in [1, 2]
             if is_on:
                 t = np.arange(num_samples) / self.sample_rate
+                # Apply drift by modulating the instantaneous frequency
+                if drift_hz > 0:
+                    # Slow sinusoidal drift
+                    inst_freq = frequency + drift_hz * np.sin(2 * np.pi * 0.2 * (current_sample + np.arange(num_samples)) / self.sample_rate)
+                else:
+                    inst_freq = np.full(num_samples, frequency)
+                
+                # Update phase based on instantaneous frequency
+                d_phase = 2 * np.pi * inst_freq / self.sample_rate
+                sig_phase = phase + np.cumsum(d_phase)
+                phase = sig_phase[-1] % (2 * np.pi)
+                
                 if waveform_type == 'sine':
-                    sig = np.sin(2 * np.pi * frequency * t)
+                    sig = np.sin(sig_phase)
                 elif waveform_type == 'square':
                     sig = scipy.signal.square(2 * np.pi * frequency * t)
                 elif waveform_type == 'sawtooth':
@@ -177,7 +275,8 @@ class MorseGenerator:
                 
                 sig *= envelope
                 end_sample = min(current_sample + num_samples, total_samples)
-                waveform[current_sample:end_sample] = sig[:end_sample-current_sample]
+                if current_sample < total_samples:
+                    waveform[current_sample:end_sample] = sig[:end_sample-current_sample]
             
             current_sample += num_samples
             
@@ -205,8 +304,9 @@ class MorseGenerator:
                 # よって、trigger_sample // HOP_LENGTH が、そのサンプルを含むかそれ以降の最初のフレーム。
                 trigger_frame = trigger_sample // config.HOP_LENGTH
                 
-                # サブサンプリング(2x)で消えないよう、2フレーム分立てる
-                for offset in range(2):
+                # 物理的な境界（空白の終了＝次の開始直前）から、
+                # モデルの出力遅延とCTCスパイクの幅を考慮して未来方向に5フレーム分立てる。
+                for offset in range(5):
                     if 0 <= trigger_frame + offset < num_frames:
                         boundary_frames[trigger_frame + offset] = 1.0
             
@@ -217,7 +317,7 @@ class MorseGenerator:
         char_space_samples = int(3 * dot_len_sec * self.sample_rate)
         trigger_sample_final = time_ptr + char_space_samples
         trigger_frame_final = trigger_sample_final // config.HOP_LENGTH
-        for offset in range(2):
+        for offset in range(5):
             if 0 <= trigger_frame_final + offset < num_frames:
                 boundary_frames[trigger_frame_final + offset] = 1.0
 
@@ -272,7 +372,7 @@ class HFChannelSimulator:
         
         return waveform * fading
 
-    def apply_noise(self, waveform: np.ndarray, snr_db: float = 10.0, impulse_prob: float = 0.001) -> np.ndarray:
+    def apply_noise(self, waveform: np.ndarray, snr_db: float = 10.0, impulse_prob: float = 0.0) -> np.ndarray:
         """Apply AWGN and impulse noise."""
         # AWGN
         # SNR is defined based on the average power of the signal during the MARK (ON) state.
@@ -310,6 +410,98 @@ class HFChannelSimulator:
         
         return waveform + qrm
 
+    def apply_qrn(self, waveform: np.ndarray, strength: float = 1.0) -> np.ndarray:
+        """Apply bursty static crashes (QRN)."""
+        n_samples = len(waveform)
+        qrn = np.zeros(n_samples)
+        # Randomly place 1-5 crashes
+        for _ in range(random.randint(1, 5)):
+            duration = int(self.sample_rate * random.uniform(0.01, 0.05))
+            start = random.randint(0, max(0, n_samples - duration))
+            # Bursty noise: white noise multiplied by a window
+            burst = np.random.normal(0, strength, duration)
+            window = scipy.signal.windows.hann(duration)
+            qrn[start:start+duration] += burst * window
+        return waveform + qrn
+
+    def apply_out_of_band_qrm(self, waveform: np.ndarray, target_freq: float, strength: float = 2.0) -> np.ndarray:
+        """Apply strong signal outside the target filter band to trigger AGC."""
+        t = np.arange(len(waveform)) / self.sample_rate
+        # Offset significantly from target (e.g., 1-2 kHz away)
+        offset = random.choice([-1500, 1500]) + random.uniform(-200, 200)
+        qrm_freq = target_freq + offset
+        qrm = np.sin(2 * np.pi * qrm_freq * t) * strength
+        # Simple on-off pattern
+        qrm *= (np.sin(2 * np.pi * 0.3 * t) > 0).astype(float)
+        return waveform + qrm
+
+    def apply_agc(self, waveform: np.ndarray, attack_ms: float = 5.0, release_ms: float = 500.0,
+                  target_lvl: float = 0.5) -> np.ndarray:
+        """
+        Simulate Automatic Gain Control (AGC).
+        Strong signals/noise reduce gain, which recovers slowly.
+        """
+        n_samples = len(waveform)
+        gain = np.ones(n_samples)
+        current_gain = 1.0
+        
+        # Time constants in samples
+        alpha_attack = np.exp(-1.0 / (attack_ms * self.sample_rate / 1000.0))
+        alpha_release = np.exp(-1.0 / (release_ms * self.sample_rate / 1000.0))
+        
+        # Simple envelope follower
+        envelope = 0.0
+        for i in range(n_samples):
+            abs_val = abs(waveform[i])
+            if abs_val > envelope:
+                envelope = alpha_attack * envelope + (1 - alpha_attack) * abs_val
+            else:
+                envelope = alpha_release * envelope + (1 - alpha_release) * abs_val
+            
+            # Gain is inversely proportional to envelope if above target
+            if envelope > target_lvl:
+                desired_gain = target_lvl / (envelope + 1e-6)
+            else:
+                desired_gain = 1.0
+            
+            # Smooth gain changes
+            if desired_gain < current_gain: # Attack
+                current_gain = alpha_attack * current_gain + (1 - alpha_attack) * desired_gain
+            else: # Release
+                current_gain = alpha_release * current_gain + (1 - alpha_release) * desired_gain
+            
+            gain[i] = current_gain
+            
+        return waveform * gain
+
+    def apply_frequency_drift(self, waveform: np.ndarray, drift_hz: float = 10.0) -> np.ndarray:
+        """Apply slow frequency drift using phase modulation."""
+        t = np.arange(len(waveform)) / self.sample_rate
+        # Slow drift (0.2 Hz modulation)
+        drift = drift_hz * np.sin(2 * np.pi * 0.2 * t)
+        # Phase is integral of frequency
+        phase_drift = 2 * np.pi * np.cumsum(drift) / self.sample_rate
+        
+        # This is tricky because we only have the mixed waveform.
+        # For a pure sine wave, we could just add phase.
+        # For a complex signal, we approximate using a Hilbert transform for SSB-like shift,
+        # but for simplicity and speed, we'll only apply this if we had the raw signal.
+        # Since we mix later, we should move drift to MorseGenerator.generate_waveform.
+        return waveform
+
+    def apply_multipath(self, waveform: np.ndarray, delay_ms: float = 20.0, attenuation: float = 0.5) -> np.ndarray:
+        """Apply simple multipath (echo)."""
+        delay_samples = int(delay_ms * self.sample_rate / 1000.0)
+        if delay_samples >= len(waveform):
+            return waveform
+        echo = np.zeros_like(waveform)
+        echo[delay_samples:] = waveform[:-delay_samples] * attenuation
+        return waveform + echo
+
+    def apply_clipping(self, waveform: np.ndarray, threshold: float = 0.8) -> np.ndarray:
+        """Apply non-linear distortion (clipping)."""
+        return np.clip(waveform, -threshold, threshold)
+
     def apply_filter(self, waveform: np.ndarray, center_freq: float = 700.0, bandwidth: float = 500.0) -> np.ndarray:
         """Apply Bandpass filter (Receiver characteristic)."""
         nyquist = 0.5 * self.sample_rate
@@ -333,14 +525,24 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
                     frequency: float = 700.0,
                     tx_lowpass: float = None,
                     rise_time: float = 0.005,
-                    min_gain_db: float = 0.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    min_gain_db: float = 0.0,
+                    drift_hz: float = 0.0,
+                    qrn_strength: float = 0.0,
+                    qrm_prob: float = 0.1,
+                    impulse_prob: float = 0.001,
+                    agc_enabled: bool = False,
+                    multipath_delay: float = 0.0,
+                    clipping_threshold: float = 1.0,
+                    max_duration: float = 10.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
     # Human artifacts are now controlled by arguments
     
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
-    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=frequency, wpm=wpm, rise_time=rise_time)
+    waveform, signal_labels, boundary_labels = gen.generate_waveform(
+        timing, frequency=frequency, wpm=wpm, rise_time=rise_time, drift_hz=drift_hz, max_duration=max_duration
+    )
     
     # Apply TX filter (soften edges) before channel effects
     if tx_lowpass is not None:
@@ -348,12 +550,30 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
 
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
     if snr_db < 45:
+        # 1. Channel propagation effects
         waveform = sim.apply_fading(waveform, speed_hz=fading_speed, min_fading=min_fading)
-        if random.random() > 0.5:
+        if multipath_delay > 0:
+            waveform = sim.apply_multipath(waveform, delay_ms=multipath_delay)
+
+        # 2. Add noise and interference (Antenna input)
+        waveform = sim.apply_noise(waveform, snr_db=snr_db, impulse_prob=impulse_prob)
+        if random.random() < qrm_prob:
             waveform = sim.apply_qrm(waveform, snr_db=snr_db + random.uniform(0, 10))
-        waveform = sim.apply_noise(waveform, snr_db=snr_db)
-        # Apply filter centered at the signal frequency
+        if qrn_strength > 0:
+            waveform = sim.apply_qrn(waveform, strength=qrn_strength)
+        if agc_enabled and random.random() < qrm_prob:
+            waveform = sim.apply_out_of_band_qrm(waveform, target_freq=frequency, strength=random.uniform(2.0, 5.0))
+
+        # 3. Receiver stage 1: Filtering (Bandpass)
         waveform = sim.apply_filter(waveform, center_freq=frequency)
+        
+        # 4. Receiver stage 2: AGC (Reacts to filtered signal + remaining noise)
+        if agc_enabled:
+            waveform = sim.apply_agc(waveform)
+            
+        # 5. Receiver stage 3: Clipping (Final saturation)
+        if clipping_threshold < 1.0:
+            waveform = sim.apply_clipping(waveform, threshold=clipping_threshold)
     else:
         # Truly clean: no noise, no filter, no fading
         pass
@@ -383,7 +603,14 @@ class CWDataset(Dataset):
                  max_freq: float = 750.0,
                  tx_lowpass_prob: float = 0.8,
                  rise_time_max: float = 0.025,
-                 min_gain_db: float = 0.0):
+                 min_gain_db: float = 0.0,
+                 drift_prob: float = 0.0,
+                 qrn_prob: float = 0.0,
+                 qrm_prob: float = 0.1,
+                 impulse_prob: float = 0.001,
+                 agc_prob: float = 0.0,
+                 multipath_prob: float = 0.0,
+                 clipping_prob: float = 0.0):
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
@@ -407,6 +634,13 @@ class CWDataset(Dataset):
         self.tx_lowpass_prob = tx_lowpass_prob
         self.rise_time_max = rise_time_max
         self.min_gain_db = min_gain_db
+        self.drift_prob = drift_prob
+        self.qrn_prob = qrn_prob
+        self.qrm_prob = qrm_prob
+        self.impulse_prob = impulse_prob
+        self.agc_prob = agc_prob
+        self.multipath_prob = multipath_prob
+        self.clipping_prob = clipping_prob
         self.gen = MorseGenerator()
 
     def generate_random_callsign(self) -> str:
@@ -450,54 +684,78 @@ class CWDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
+        max_duration = 10.0
         is_phrase = random.random() < self.phrase_prob
-        if is_phrase:
-            text = self.generate_phrase()
-            # Adaptive WPM for phrases to fit in TARGET_FRAMES
-            wpm = self.gen.estimate_wpm_for_target_frames(text, target_frames=config.TARGET_FRAMES)
-        else:
-            # Generate random text
-            length = random.randint(self.min_len, self.max_len)
-            
-            # Randomly choose from available tokens (chars + prosigns)
-            # Filter out spaces for random choice, we will add them manually
-            valid_tokens = [c for c in self.chars if c != ' ']
-            
-            # Create a list of tokens
-            if self.focus_chars and random.random() < self.focus_prob:
-                # Weighted sampling: Include at least one focus char, and higher prob for others
-                # Mix focus chars and valid tokens
-                focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
-                if focus_valid:
-                    # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
-                    k_focus = max(1, length // 2)
-                    k_other = length - k_focus
-                    
-                    # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
-                    if len(focus_valid) > 1 and k_focus >= len(focus_valid):
-                        tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
-                        tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
+        
+        for attempt in range(5): # Retry if text is too long for WPM limits
+            if is_phrase:
+                text = self.generate_phrase()
+                # Adaptive WPM for phrases to fit in 10s
+                # Use a slightly smaller target to leave room for silence
+                wpm = self.gen.estimate_wpm_for_target_frames(text, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH), min_wpm=self.min_wpm, max_wpm=self.max_wpm)
+                
+                # Verify if it fits
+                timing = self.gen.generate_timing(text, wpm=wpm)
+                if sum(t[1] for t in timing) < max_duration - 0.2:
+                    break
+                else:
+                    # If it doesn't fit even at max_wpm, we'll retry with another phrase
+                    if wpm >= self.max_wpm and attempt < 4:
+                        continue
+                    break
+            else:
+                # Decide WPM first to constrain length
+                wpm = random.randint(self.min_wpm, self.max_wpm)
+
+                # Generate random text
+                max_allowed_len = self.gen.estimate_max_chars_for_wpm(wpm, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH))
+                # Ensure length doesn't exceed VRAM-safe limit for this WPM
+                length = random.randint(self.min_len, max(self.min_len, min(self.max_len, max_allowed_len)))
+                
+                # Randomly choose from available tokens (chars + prosigns)
+                # Filter out spaces for random choice, we will add them manually
+                valid_tokens = [c for c in self.chars if c != ' ']
+                
+                # Create a list of tokens
+                if self.focus_chars and random.random() < self.focus_prob:
+                    # Weighted sampling: Include at least one focus char, and higher prob for others
+                    # Mix focus chars and valid tokens
+                    focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
+                    if focus_valid:
+                        # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
+                        k_focus = max(1, length // 2)
+                        k_other = length - k_focus
+                        
+                        # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
+                        if len(focus_valid) > 1 and k_focus >= len(focus_valid):
+                            tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
+                            tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
+                        else:
+                            tokens = random.choices(focus_valid, k=k_focus)
+                        
+                        tokens += random.choices(valid_tokens, k=k_other)
+                        random.shuffle(tokens)
                     else:
-                        tokens = random.choices(focus_valid, k=k_focus)
-                    
-                    tokens += random.choices(valid_tokens, k=k_other)
-                    random.shuffle(tokens)
+                        tokens = random.choices(valid_tokens, k=length)
                 else:
                     tokens = random.choices(valid_tokens, k=length)
-            else:
-                tokens = random.choices(valid_tokens, k=length)
-            
-            # Join them, occasionally adding spaces
-            text = ""
-            for t in tokens:
-                text += t
-                if random.random() < 0.2:
-                    text += " "
-            text = text.strip()
-            
-            if not text: text = "CQ"
-            
-            wpm = random.randint(self.min_wpm, self.max_wpm)
+                
+                # Join them, occasionally adding spaces
+                text = ""
+                for t in tokens:
+                    text += t
+                    # 単語間空白の学習機会を増やすため、挿入確率を 0.4 に引き上げ
+                    if random.random() < 0.4:
+                        text += " "
+                text = text.strip()
+                
+                if not text: text = "CQ"
+                
+                # Verify if it fits
+                timing = self.gen.generate_timing(text, wpm=wpm)
+                if sum(t[1] for t in timing) < max_duration - 0.2:
+                    break
+                # else retry
         snr = random.uniform(self.min_snr, self.max_snr)
         
         # Determine jitter and weight based on curriculum settings
@@ -519,13 +777,40 @@ class CWDataset(Dataset):
             # Also soften the rise time itself
             rise_time = random.uniform(0.005, self.rise_time_max)
         
+        # New Augmentations based on dataset probabilities (set by curriculum)
+        drift_hz = 0.0
+        if random.random() < self.drift_prob:
+            drift_hz = random.uniform(1.0, 15.0)
+            
+        qrn_strength = 0.0
+        if random.random() < self.qrn_prob:
+            # Strength relative to signal (mark_power=0.5)
+            qrn_strength = random.uniform(0.5, 3.0)
+            
+        agc_enabled = random.random() < self.agc_prob
+        
+        multipath_delay = 0.0
+        if random.random() < self.multipath_prob:
+            multipath_delay = random.uniform(10.0, 50.0)
+            
+        clipping_threshold = 1.0
+        if random.random() < self.clipping_prob:
+            clipping_threshold = random.uniform(0.3, 0.8)
+
         waveform, label, signal_labels, boundary_labels = generate_sample(
             text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight,
             fading_speed=fading_speed, min_fading=self.min_fading,
             frequency=frequency,
             tx_lowpass=tx_lowpass,
             rise_time=rise_time,
-            min_gain_db=self.min_gain_db
+            min_gain_db=self.min_gain_db,
+            drift_hz=drift_hz,
+            qrn_strength=qrn_strength,
+            qrm_prob=self.qrm_prob,
+            impulse_prob=self.impulse_prob,
+            agc_enabled=agc_enabled,
+            multipath_delay=multipath_delay,
+            clipping_threshold=clipping_threshold
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels, is_phrase

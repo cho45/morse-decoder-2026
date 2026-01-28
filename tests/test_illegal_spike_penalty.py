@@ -26,7 +26,8 @@ def test_illegal_spike_penalty():
     trainer.model.train()
     
     seq_len = 50
-    mels = torch.randn(1, seq_len, config.N_BINS).to(device)
+    # Use positive inputs for PCEN
+    mels = torch.rand(1, seq_len, config.N_BINS).to(device)
     
     # 全て Blank のターゲット
     targets = torch.tensor([1], dtype=torch.long).to(device)

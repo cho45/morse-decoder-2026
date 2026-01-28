@@ -97,3 +97,55 @@ export class DSP {
         return noise;
     }
 }
+
+/**
+ * Resampler with Anti-Aliasing (Box Filter / Integrator)
+ * Efficiently downsamples audio while suppressing aliasing and jitter.
+ */
+export class Resampler {
+    /**
+     * @param {number} sourceRate - Input sample rate (e.g., 44100)
+     * @param {number} targetRate - Output sample rate (e.g., 16000)
+     */
+    constructor(sourceRate, targetRate) {
+        this.ratio = sourceRate / targetRate;
+        this.accum = 0;
+        this.timeLeft = this.ratio;
+    }
+
+    /**
+     * Process a chunk of samples and write resampled samples to output array.
+     * @param {Float32Array} input - Input samples
+     * @param {Float32Array} output - Output buffer
+     * @returns {number} Number of samples written to output
+     */
+    process(input, output) {
+        let outPtr = 0;
+        const EPS = 1e-9;
+
+        for (let i = 0; i < input.length; i++) {
+            let sample = input[i];
+            let sampleTime = 1.0;
+
+            while (sampleTime > EPS) {
+                if (sampleTime >= this.timeLeft - EPS) {
+                    // This input sample fills the remaining part of the current target window
+                    this.accum += sample * this.timeLeft;
+                    if (outPtr < output.length) {
+                        output[outPtr++] = this.accum / this.ratio;
+                    }
+                    
+                    sampleTime -= this.timeLeft;
+                    this.accum = 0;
+                    this.timeLeft = this.ratio;
+                } else {
+                    // This input sample is entirely within the current target window
+                    this.accum += sample * sampleTime;
+                    this.timeLeft -= sampleTime;
+                    sampleTime = 0;
+                }
+            }
+        }
+        return outPtr;
+    }
+}

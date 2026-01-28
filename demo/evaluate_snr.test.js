@@ -2,24 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import ort from 'onnxruntime-node';
 import path from 'path';
 import { MorseGenerator, HFChannelSimulator } from './data_gen.js';
-import { runFullInference, decodeFull, calculateCER, computeSpecFrame, N_BINS, N_FFT, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES, SUBSAMPLING_RATE } from './inference.js';
-
-function computeSpecFrames(waveform) {
-    const nFrames = Math.floor((waveform.length - N_FFT) / HOP_LENGTH) + 1;
-    const specFrames = new Float32Array(nFrames * N_BINS);
-    for (let i = 0; i < nFrames; i++) {
-        const start = i * HOP_LENGTH;
-        let frame = waveform.slice(start, start + N_FFT);
-        if (frame.length < N_FFT) {
-            const padded = new Float32Array(N_FFT);
-            padded.set(frame);
-            frame = padded;
-        }
-        const spec = computeSpecFrame(frame);
-        specFrames.set(spec, i * N_BINS);
-    }
-    return specFrames;
-}
+import { runFullInference, decodeFull, calculateCER, computeSpecFrames, N_BINS, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES } from './inference.js';
 
 describe('CER Calculation Logic', () => {
     it('should ignore spaces in CER calculation', () => {

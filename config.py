@@ -18,6 +18,13 @@ N_BINS = 14         # スペクトログラムから抽出するビン数
 MIN_FREQ = 600.0    # 学習データの最小周波数 (Hz)
 MAX_FREQ = 800.0    # 学習データの最大周波数 (Hz)
 
+# Augmentation Parameters
+QRN_PROB = 0.3          # 雷ノイズ (Static Crashes) の発生確率
+AGC_PROB = 0.5          # AGC シミュレーションの適用確率
+DRIFT_PROB = 0.3        # 周波数ドリフトの発生確率
+MULTIPATH_PROB = 0.2    # マルチパス/エコーの発生確率
+CLIPPING_PROB = 0.2     # クリッピングの発生確率
+
 # Model Architecture Parameters
 SUBSAMPLING_RATE = 2 # ConvSubsampling による時間方向の圧縮率
 D_MODEL = 256        # Transformer 内の隠れ層の次元数。表現力向上のため再増強。
@@ -78,9 +85,12 @@ NUM_SIGNAL_CLASSES = 4
 # ID 0 は CTC の 'blank' トークンとして予約されているため、文字 ID は 1 から開始する
 import string
 # 標準的な使用文字。スペースは物理的な「空白」として Signal Head で扱うため、CTC 語彙からは除外する。
-STD_CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,"))
+# [修正] MORSE_DICT に存在するすべての記号を網羅するように修正。
+# 不足していたもの: ' ! & : ; = + _ " $ @
+STD_CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,-()'!&:;=+_\"$@"))
 # 略符号 (Prosigns) やよく使われる略語を独立したトークンとして扱う
-PROSIGNS = ["<BT>", "<AR>", "<SK>", "<KA>"]
+# [修正] <AA> を追加し、<HHHH> を <HH> に修正。
+PROSIGNS = ["<BT>", "<AR>", "<SK>", "<KA>", "<AS>", "<VE>", "<HH>", "<AA>"]
 CHARS = STD_CHARS + PROSIGNS # 全ボキャブラリ
 NUM_CLASSES = len(CHARS) + 1 # blank を含めた総クラス数
 CHAR_TO_ID = {char: i + 1 for i, char in enumerate(CHARS)} # 文字から ID へのマップ

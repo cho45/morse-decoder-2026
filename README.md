@@ -2,10 +2,10 @@
 
 ディープラーニング（Streaming Conformer）を用いた、リアルタイム・モールス信号（CW）復号システムです。
 
-![SNR Performance](diagnostics/snr_performance_latest.png)
+![SNR Performance](diagnostics/visualize_snr_performance.png)
 *図1: 最新チェックポイントの SNR vs CER 性能曲線。*
 
-![ONNX Comparison](diagnostics/snr_performance_onnx_comparison.png)
+![ONNX Comparison](diagnostics/visualize_snr_performance_onnx.png)
 *図2: ONNX エクスポートおよび INT8 量子化後の性能比較。*
 WSL (Ubuntu) 上での学習および推論、最終的には Web ブラウザ上での動作を目指しています。
 
@@ -60,7 +60,8 @@ docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --sam
 - `data_gen.py`: 高度な人間的揺らぎとノイズをシミュレートするデータジェネレータ。
 - `train.py`: 学習スクリプト。
 - `export_onnx.py` / `quantize_onnx.py`: ONNX エクスポートおよび量子化スクリプト。
-- `visualize_snr_performance.py`: モデルのノイズ耐性評価スクリプト。
+- `diagnostics/visualize_snr_performance.py`: モデルのノイズ耐性評価スクリプト。
+- `diagnostics/visualize_snr_performance_pt_streaming.py`: ストリーミング推論（PyTorch）のノイズ耐性評価スクリプト。
 
 ### 推論・デモ (JavaScript/ONNX Runtime)
 - `demo/inference.js`: Node.js/ブラウザ共用の推論コアロジック。
@@ -101,10 +102,18 @@ docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --sam
 Boundary Head の出力を CTC Head の入力に直接混ぜる構成は採用していません。これは、モデルが音声特徴の学習をサボり、境界信号をトリガーに「その場で最もらしい文字を出す」というショートカット（カンニング）を学習してしまうのを防ぐためです。代わりに、学習時のみ境界外の出力を罰する **Illegal Spike Penalty** を導入し、推論時の因果性を保ちつつスパイク位置をピンポイントに矯正しています。
 
 ### 4. 徹底したカリキュラムトレーニング
-リズムの微細な差（L と R など）を正確に捉えるため、段階的な学習プロセスを構築しています。
-- **Koch メソッド**: 2 文字から開始し、精度に応じて 1 文字ずつ追加。
-- **対照学習**: 新文字導入時、誤認しやすい既存文字（例：L に対する R）を重点サンプリングし、差異を集中学習。
-- **段階的環境悪化**: クリーンな環境でリズムを習得した後、打鍵の揺らぎ、ノイズ、フェージング（QSB）を順次導入。
+リズムの微細な差や包含関係にある符号（E と T、S と H など）を正確に捉えるため、段階的な学習プロセスを構築しています。
+- **包含構造優先の段階的導入（数字からの開始）**: 単純なアルファベット順や出現頻度順ではなく、まず数字（長い符号）から開始し、その構成要素となるプレフィックス文字（例：`1` に対する `A, J, W, E`）をセットで導入します。これにより、長い符号の途中で短い符号として誤判定（Partial Decoding）してしまう問題を初期段階から抑制します。
+- **新文字への集中学習（Focus学習）**: 新しい文字セットが導入された際、その新文字が高い確率で出現するようにサンプリングを調整し、既存の習得済み文字との境界（リズムの差）を集中して学習させます。
+- **段階的環境悪化**: クリーンな環境でリズムを習得した後、打鍵の揺らぎ、ノイズ、フェージング（QSB）、周波数ドリフトなどを順次導入し、実用的な堅牢性を獲得させます。
+
+### 5. ストリーミング推論における物理的制約（先読みと WPM）
+本モデルはリアルタイム性を確保するため、`LOOKAHEAD_FRAMES = 30`（300ms）という限定的な未来参照を行っています。この固定的な先読み時間は、デコード可能な信号の最小速度（WPM）に対して物理的な制約を与えます。
+
+- **40 WPM (高速)**: 1 ユニット（短点）は約 30ms。300ms の先読みは 10 ユニット分に相当し、1 文字のほぼ全体を「未来」として参照できるため、判定は非常に安定します。
+- **10 WPM (低速)**: 1 ユニットは約 120ms。300ms の先読みはわずか 2.5 ユニット分です。モールス符号のダッシュ（3 ユニット = 360ms）の終了すら先読み範囲に収まらないため、モデルは信号の長さを確定できず、誤認や過剰な分割が発生しやすくなります。
+
+この物理的整合性を保つため、現在の 300ms 設定では **15 WPM**（1 ダッシュ = 240ms）を実用的な下限速度としてカリキュラムを設計しています。
 
 ## 開発ワークフロー
 
@@ -114,14 +123,14 @@ Boundary Head の出力を CTC Head の入力に直接混ぜる構成は採用�
 `train.py` を用いてモデルを学習させ、ロスや CER の推移を確認します。
 ```bash
 make train ARGS="--epochs 10"
-docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 -u train.py --epochs 5000 --batch-size 20 --samples-per-epoch 5000 --resume latest
+docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 -u train.py --epochs 1000 --batch-size 32 --samples-per-epoch 2000 --resume latest
 ```
 
 ### 2. モデルの性能限界の評価
 学習したチェックポイントに対して、SNR ごとの CER 曲線を描画し、モデルのノイズ耐性を確認します。
 ```bash
 make performance
-# 成果物: diagnostics/snr_performance_latest.png
+# 成果物: diagnostics/visualize_snr_performance.png
 ```
 
 ### 3. ONNX エクスポートと量子化
@@ -135,7 +144,7 @@ make onnx
 量子化による精度劣化がないかを Python 環境で確認します。
 ```bash
 make performance_onnx
-# 成果物: diagnostics/snr_performance_onnx_comparison.png
+# 成果物: diagnostics/visualize_snr_performance_onnx.png
 ```
 
 ### 5. JavaScript 推論エンジンの検証 (Node.js)
