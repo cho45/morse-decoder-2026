@@ -70,7 +70,11 @@ class CausalMultiHeadAttention(nn.Module):
         # PyTorch negative slicing returns full tensor if size < MAX_CACHE_LEN
         k = k[:, :, -config.MAX_CACHE_LEN:, :]
         v = v[:, :, -config.MAX_CACHE_LEN:, :]
-            
+
+        # Clamp offset to match trimmed cache size (ONNX compatible)
+        # This prevents causal_mask index from going out of bounds
+        new_offset = torch.clamp(new_offset, max=config.MAX_CACHE_LEN)
+
         new_cache = (k, v, new_offset)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
 

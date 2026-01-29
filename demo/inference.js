@@ -130,7 +130,10 @@ export function initStates(ort) {
  * @param {object} ort - ONNX Runtime instance
  * @returns {Promise<object>} { logits, signal_logits, boundary_logits, nextStates }
  */
+let inferenceCount = 0;
+
 export async function runChunkInference(session, chunkFrames, states, ort) {
+    inferenceCount++;
     const currentLen = chunkFrames.length / N_BINS;
 
     if (currentLen % 4 !== 0) {
@@ -148,10 +151,16 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
 
     const inputs = { x, ...states };
     const sessionStart = performance.now();
-    const results = await session.run(inputs);
+    let results;
+    try {
+        results = await session.run(inputs);
+    } catch (e) {
+        console.error(`session.run failed at inference #${inferenceCount}`);
+        throw e;
+    }
     const sessionTime = performance.now() - sessionStart;
 
-    console.log(`ONNX Runtime session.run: ${sessionTime.toFixed(2)}ms`);
+    console.log(`ONNX Runtime session.run #${inferenceCount}: ${sessionTime.toFixed(2)}ms`);
 
     const numClasses = results.logits.dims[2];
     const actualOutFrames = results.logits.dims[1];
@@ -159,9 +168,10 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
     // Expected output frames after subsampling (ceil division)
     const expectedOutFrames = Math.floor((currentLen + SUBSAMPLING_RATE - 1) / SUBSAMPLING_RATE);
 
-    let logits = results.logits.data;
-    let signalLogits = results.signal_logits.data;
-    let boundaryLogits = results.boundary_logits.data;
+    // Copy data before dispose (tensor.data is a view into WASM memory)
+    let logits = new Float32Array(results.logits.data);
+    let signalLogits = new Float32Array(results.signal_logits.data);
+    let boundaryLogits = new Float32Array(results.boundary_logits.data);
 
     // Sanity check: output should match expected length
     if (actualOutFrames > expectedOutFrames) {
@@ -182,8 +192,12 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
 
     // Clean up temporary tensors (keep nextStates)
     x.dispose();
-    // Note: results.logits etc will be cleaned up by the caller or GC as they are typed arrays
-    
+
+    // Dispose output tensors after extracting data (logits/signalLogits/boundaryLogits are Float32Array copies)
+    results.logits.dispose();
+    results.signal_logits.dispose();
+    results.boundary_logits.dispose();
+
     return {
         logits,
         signalLogits,

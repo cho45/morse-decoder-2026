@@ -185,11 +185,11 @@ async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
 
         const oldStateValues = Object.values(currentStates);
         currentStates = result.nextStates;
-        
+
         const nextStateValues = Object.values(currentStates);
         oldStateValues.forEach(t => {
-            if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
-                if (!nextStateValues.includes(t)) t.dispose();
+            if (t && t.dispose && !nextStateValues.includes(t)) {
+                t.dispose();
             }
         });
 

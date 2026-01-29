@@ -104,9 +104,12 @@ def test_cache_limit_and_pe_consistency():
     model = StreamingConformer(d_model=d_model, n_head=n_head, num_layers=1)
     model.eval()
     
-    # Process enough chunks to exceed MAX_CACHE_LEN
+    # Process enough chunks to exceed MAX_CACHE_LEN + causal_mask margin (100)
+    # With subsampling (factor 2), we need offset > 1100 (MAX_CACHE_LEN + 100)
+    # offset = num_chunks * chunk_size / 2 > 1100
+    # num_chunks > 1100 * 2 / chunk_size = 22
     chunk_size = 100
-    num_chunks = (max_cache // chunk_size) + 5
+    num_chunks = 25  # Enough to exceed causal_mask bounds
     
     states = None
     device = torch.device('cpu')
@@ -125,4 +128,5 @@ def test_cache_limit_and_pe_consistency():
             
             # Check offset is correctly managed
             offset = states[2][0][0][2]
-            assert offset <= max_cache
+            print(f"Chunk {i}: offset={offset.item()}, max_cache={max_cache}")
+            assert offset.item() <= max_cache, f"offset {offset.item()} exceeds max_cache {max_cache}"
