@@ -191,6 +191,10 @@ class CurriculumManager:
 if __name__ == "__main__":
     cm = CurriculumManager()
     print(f"Total phases: {cm.get_max_phase()}")
+    print(f"{'No':>3} | {'Name':<20} | {'SNR':<12} | {'WPM':<10} | {'Chars'}")
+    print("-" * 80)
     for i in range(1, cm.get_max_phase() + 1):
         p = cm.get_phase(i)
-        print(f"Phase {i}: {p.name} | Chars: {p.chars}")
+        snr_range = f"{p.min_snr:.1f}~{p.max_snr:.1f}"
+        wpm_range = f"{p.min_wpm}~{p.max_wpm}"
+        print(f"{i:>3} | {p.name:<20} | {snr_range:<12} | {wpm_range:<10} | {p.chars}")

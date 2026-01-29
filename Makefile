@@ -1,4 +1,4 @@
-.PHONY: test build train onnx test-js evaluate-js
+.PHONY: test build train onnx test-js evaluate-js show-curriculum
 
 IMAGE_NAME = cw-decoder
 DOCKER_RUN = docker run --rm --gpus all -v $(shell pwd):/workspace $(IMAGE_NAME)
@@ -53,3 +53,6 @@ test-js:
 
 evaluate-js:
 	node demo/evaluate_snr.js --model demo/cw_decoder_quantized.onnx
+
+show-curriculum:
+	$(DOCKER_RUN) python3 curriculum.py

@@ -17,19 +17,60 @@ def test_levenshtein_basic():
 
 def test_levenshtein_prosigns():
     # 略符号（Prosigns）を含む場合の挙動確認
-    # プロサイン正規化により、"<BT>" は 1文字として扱われる
-    ref = "<BT>"
-    hyp = "<BT>"
+    # プロサイン正規化により、"<SN>" は 1文字として扱われる
+    ref = "<SN>"
+    hyp = "<SN>"
     dist, _ = levenshtein(ref, hyp)
     assert dist == 0
     
-    # もし hyp が "BT" だった場合、どれくらいの距離になるか
-    # "<BT>" (1トークン) が "B", "T" (2トークン) に置換・挿入されたとみなされる
-    # 正規化後: "\x01" vs "BT"
-    # 置換 (\x01->B) + 挿入 (T) = 距離 2
-    hyp2 = "BT"
+    # もし hyp が "SN" だった場合、どれくらいの距離になるか
+    # "<SN>" (1トークン) が "S", "N" (2トークン) に置換・挿入されたとみなされる
+    # 正規化後: "\x01" vs "SN"
+    # 置換 (\x01->S) + 挿入 (N) = 距離 2
+    hyp2 = "SN"
     dist, _ = levenshtein(ref, hyp2)
     assert dist == 2
+
+def test_levenshtein_ops():
+    # バックトレース (ops) の正確性を検証
+    # match, sub, del, ins の各オペレーションが正しく記録されているか確認
+
+    # 1. 単純な置換
+    dist, ops = levenshtein("A", "B")
+    assert dist == 1
+    assert ops == [('sub', 'A', 'B')]
+
+    # 2. 挿入と削除
+    dist, ops = levenshtein("A", "AB")
+    assert dist == 1
+    assert ops == [('match', 'A', 'A'), ('ins', None, 'B')]
+
+    dist, ops = levenshtein("AB", "A")
+    assert dist == 1
+    assert ops == [('match', 'A', 'A'), ('del', 'B', None)]
+
+    # 3. Prosign を含む複雑なケース
+    # "<SN>" (正規化済み) -> "S"
+    # 正規化後: "\x01" -> "S"
+    # 結果: sub("\x01", "S") ではなく、元の文字に戻されているか
+    dist, ops = levenshtein("<SN>", "S")
+    assert dist == 1
+    assert ops == [('sub', '<SN>', 'S')]
+
+    # 4. 複数の操作
+    # "CQ <SN>" -> "C <VE>"
+    # map_prosigns によりスペースは維持されるが、levenshtein_prosign に渡される前に
+    # calculate_cer などではスペースが除去される。ここでは直接呼び出すのでスペースあり。
+    dist, ops = levenshtein("CQ <SN>", "C <VE>")
+    # C(match), Q(del), space(match), <SN>(sub <VE>)
+    # 距離: 1(Q del) + 1(<SN> sub <VE>) = 2
+    assert dist == 2
+    assert ops == [
+        ('match', 'C', 'C'),
+        ('del', 'Q', None),
+        ('match', ' ', ' '),
+        ('sub', '<SN>', '<VE>')
+    ]
 
 def test_cer_calculation_logic():
     # train.py 内で行われている CER 計算のシミュレーション
@@ -52,9 +93,29 @@ def test_cer_calculation_logic():
     # (2 + 1 + 1) / (5 + 1 + 1) = 4 / 7 = 0.5714...
     assert avg_cer == pytest.approx(4/7)
 
+def test_cer_with_prosigns():
+    from inference_utils import calculate_cer
+    # Prosign を含む場合の CER 計算の正確性を検証
+    # "<SN> K" vs "<SN> R"
+    # スペースは calculate_cer 内部で除去されるため、実質 "<SN>K" vs "<SN>R"
+    # 距離 1, 長さ 2 (SN=1, K=1) -> CER 0.5
+    assert calculate_cer("<SN> K", "<SN> R") == 0.5
+
+    # "<SK>" vs "SK"
+    # 距離 2 (正規化により <SK> は 1文字, "SK" は 2文字), 長さ 1 -> CER 2.0
+    assert calculate_cer("<SK>", "SK") == 2.0
+
+    # 複雑なケース
+    # "CQ DE <SN> K" vs "CQ DE <SN> R"
+    # 除去後: "CQDE<SN>K" vs "CQDE<SN>R"
+    # 距離 1, 長さ 6 -> CER 1/6
+    assert calculate_cer("CQ DE <SN> K", "CQ DE <SN> R") == pytest.approx(1/6)
+
 if __name__ == "__main__":
     # 手動実行用
     test_levenshtein_basic()
     test_levenshtein_prosigns()
+    test_levenshtein_ops()
     test_cer_calculation_logic()
+    test_cer_with_prosigns()
     print("Metrics tests passed!")
