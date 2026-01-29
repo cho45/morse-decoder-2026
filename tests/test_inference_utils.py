@@ -5,10 +5,10 @@ from inference_utils import calculate_cer, map_prosigns, unmap_prosigns, decode_
 import config
 
 def test_prosign_mapping():
-    text = "CQ DE K <SN> TEST <VE>"
+    text = "CQ DE K <SOS> TEST <VE>"
     mapped = map_prosigns(text)
     # Prosigns should be single characters
-    assert "<SN>" not in mapped
+    assert "<SOS>" not in mapped
     assert "<VE>" not in mapped
     
     unmapped = unmap_prosigns(mapped)

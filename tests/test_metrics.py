@@ -17,15 +17,15 @@ def test_levenshtein_basic():
 
 def test_levenshtein_prosigns():
     # 略符号（Prosigns）を含む場合の挙動確認
-    # プロサイン正規化により、"<SN>" は 1文字として扱われる
-    ref = "<SN>"
-    hyp = "<SN>"
+    # プロサイン正規化により、"<SOS>" は 1文字として扱われる
+    ref = "<SOS>"
+    hyp = "<SOS>"
     dist, _ = levenshtein(ref, hyp)
     assert dist == 0
     
     # もし hyp が "SN" だった場合、どれくらいの距離になるか
-    # "<SN>" (1トークン) が "S", "N" (2トークン) に置換・挿入されたとみなされる
-    # 正規化後: "\x01" vs "SN"
+    # "<SOS>" (1トークン) が "S", "O", "S" に置換・挿入されたとみなされる
+    # 正規化後: "\x01" vs "SOS"
     # 置換 (\x01->S) + 挿入 (N) = 距離 2
     hyp2 = "SN"
     dist, _ = levenshtein(ref, hyp2)
@@ -50,26 +50,26 @@ def test_levenshtein_ops():
     assert ops == [('match', 'A', 'A'), ('del', 'B', None)]
 
     # 3. Prosign を含む複雑なケース
-    # "<SN>" (正規化済み) -> "S"
+    # "<SOS>" (正規化済み) -> "S"
     # 正規化後: "\x01" -> "S"
     # 結果: sub("\x01", "S") ではなく、元の文字に戻されているか
-    dist, ops = levenshtein("<SN>", "S")
+    dist, ops = levenshtein("<SOS>", "S")
     assert dist == 1
-    assert ops == [('sub', '<SN>', 'S')]
+    assert ops == [('sub', '<SOS>', 'S')]
 
     # 4. 複数の操作
-    # "CQ <SN>" -> "C <VE>"
+    # "CQ <SOS>" -> "C <VE>"
     # map_prosigns によりスペースは維持されるが、levenshtein_prosign に渡される前に
     # calculate_cer などではスペースが除去される。ここでは直接呼び出すのでスペースあり。
-    dist, ops = levenshtein("CQ <SN>", "C <VE>")
-    # C(match), Q(del), space(match), <SN>(sub <VE>)
-    # 距離: 1(Q del) + 1(<SN> sub <VE>) = 2
+    dist, ops = levenshtein("CQ <SOS>", "C <VE>")
+    # C(match), Q(del), space(match), <SOS>(sub <VE>)
+    # 距離: 1(Q del) + 1(<SOS> sub <VE>) = 2
     assert dist == 2
     assert ops == [
         ('match', 'C', 'C'),
         ('del', 'Q', None),
         ('match', ' ', ' '),
-        ('sub', '<SN>', '<VE>')
+        ('sub', '<SOS>', '<VE>')
     ]
 
 def test_cer_calculation_logic():
@@ -96,20 +96,20 @@ def test_cer_calculation_logic():
 def test_cer_with_prosigns():
     from inference_utils import calculate_cer
     # Prosign を含む場合の CER 計算の正確性を検証
-    # "<SN> K" vs "<SN> R"
-    # スペースは calculate_cer 内部で除去されるため、実質 "<SN>K" vs "<SN>R"
-    # 距離 1, 長さ 2 (SN=1, K=1) -> CER 0.5
-    assert calculate_cer("<SN> K", "<SN> R") == 0.5
+    # "<SOS> K" vs "<SOS> R"
+    # スペースは calculate_cer 内部で除去されるため、実質 "<SOS>K" vs "<SOS>R"
+    # 距離 1, 長さ 2 (SOS=1, K=1) -> CER 0.5
+    assert calculate_cer("<SOS> K", "<SOS> R") == 0.5
 
     # "<SK>" vs "SK"
     # 距離 2 (正規化により <SK> は 1文字, "SK" は 2文字), 長さ 1 -> CER 2.0
     assert calculate_cer("<SK>", "SK") == 2.0
 
     # 複雑なケース
-    # "CQ DE <SN> K" vs "CQ DE <SN> R"
-    # 除去後: "CQDE<SN>K" vs "CQDE<SN>R"
+    # "CQ DE <SOS> K" vs "CQ DE <SOS> R"
+    # 除去後: "CQDE<SOS>K" vs "CQDE<SOS>R"
     # 距離 1, 長さ 6 -> CER 1/6
-    assert calculate_cer("CQ DE <SN> K", "CQ DE <SN> R") == pytest.approx(1/6)
+    assert calculate_cer("CQ DE <SOS> K", "CQ DE <SOS> R") == pytest.approx(1/6)
 
 if __name__ == "__main__":
     # 手動実行用

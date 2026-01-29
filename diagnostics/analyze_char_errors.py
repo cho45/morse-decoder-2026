@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 import seaborn as sns
 import pandas as pd
 from sklearn.metrics import confusion_matrix, classification_report
@@ -149,23 +150,40 @@ def analyze_char_errors(checkpoint_path, num_samples=500, batch_size=16, output_
     worst_chars = worst_chars.sort_values('f1-score').head(10)
     print(worst_chars[['precision', 'recall', 'f1-score', 'support']])
 
-    print("\n--- Common Confusions (Ref -> Hyp) ---")
+    print("\n--- Top 10 Common Confusions (Ref -> Hyp) ---")
     conf_counts = defaultdict(int)
     for p in confusion_pairs: conf_counts[p] += 1
-    sorted_conf = sorted(conf_counts.items(), key=lambda x: x[1], reverse=True)
-    for (r, h), count in sorted_conf[:10]:
-        print(f"  {r} -> {h}: {count} times")
+    
+    # Calculate confusion rates relative to the total occurrences of the reference character
+    confusion_stats = []
+    for (r, h), count in conf_counts.items():
+        total_r = char_stats[r]['total']
+        rate = (count / total_r * 100) if total_r > 0 else 0
+        confusion_stats.append((r, h, count, rate))
+    
+    # Sort by count descending
+    sorted_conf = sorted(confusion_stats, key=lambda x: x[2], reverse=True)
+    for r, h, count, rate in sorted_conf[:10]:
+        print(f"  {r:5s} -> {h:5s}: {count:3d} times ({rate:5.1f}% of {r})")
 
     # 2. Confusion Matrix Plot
-    plt.figure(figsize=(15, 12))
-    cm = confusion_matrix(all_refs, all_hyps, labels=vocab + ['<DEL>'])
-    # Normalize by row (reference)
+    plt.figure(figsize=(16, 13))
+    all_labels = vocab + ['<DEL>']
+    cm = confusion_matrix(all_refs, all_hyps, labels=all_labels)
+    
+    # Normalize by row (reference) to get probabilities
     cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     cm_norm = np.nan_to_num(cm_norm)
     
+    # Use LogNorm to highlight small errors while keeping the diagonal visible
+    # We use a small epsilon for zero values to avoid log(0)
+    eps = 1e-4
+    
     sns.heatmap(cm_norm, annot=False, fmt='.2f', cmap='Blues',
-                xticklabels=vocab + ['<DEL>'], yticklabels=vocab + ['<DEL>'])
-    plt.title(f"Confusion Matrix (Normalized) - {os.path.basename(checkpoint_path)}")
+                xticklabels=all_labels, yticklabels=all_labels,
+                norm=colors.LogNorm(vmin=eps, vmax=1.0))
+    
+    plt.title(f"Confusion Matrix (Log Scale Normalized) - {os.path.basename(checkpoint_path)}")
     plt.xlabel("Predicted")
     plt.ylabel("Reference")
     plt.tight_layout()

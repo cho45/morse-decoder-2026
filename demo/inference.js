@@ -20,7 +20,7 @@ export const LOOKAHEAD_FRAMES = 30;
 export const SUBSAMPLING_RATE = 2;
 
 // Vocabulary MUST match config.py and model dimensions (63 classes = 62 chars + 1 blank)
-export const CHARS = ["!", "\"", "$", "&", "'", "(", ")", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "=", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_", "<NJ>", "<SN>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
+export const CHARS = ["!", "\"", "$", "&", "'", "(", ")", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "=", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_", "<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
 export const ID_TO_CHAR = {};
 CHARS.forEach((char, i) => { ID_TO_CHAR[i + 1] = char; });
 console.log("Vocabulary initialized:", CHARS.length, "chars");

@@ -90,7 +90,7 @@ import string
 STD_CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,-()'!&:;=+_\"$@"))
 # 略符号 (Prosigns) やよく使われる略語を独立したトークンとして扱う
 # [修正] <AA> を追加し、<HHHH> を <HH> に修正。
-PROSIGNS = ["<NJ>", "<SN>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"]
+PROSIGNS = ["<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"]
 CHARS = STD_CHARS + PROSIGNS # 全ボキャブラリ
 NUM_CLASSES = len(CHARS) + 1 # blank を含めた総クラス数
 CHAR_TO_ID = {char: i + 1 for i, char in enumerate(CHARS)} # 文字から ID へのマップ
