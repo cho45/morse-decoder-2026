@@ -3,31 +3,26 @@
  */
 import { DSP } from './dsp.js';
 import { NoiseNode } from './noise-node.js';
-import {
-    N_BINS, NUM_LAYERS, CHARS, ID_TO_CHAR,
-    softmax, sigmoid, initStates, runChunkInference
-} from './inference.js';
+import { StreamInference } from './stream-inference.js';
 import { MORSE_DICT } from './data_gen.js';
+import { getViridisColor, powerToDBNormalized, normalizeDB } from './visualization.js';
 
 // --- Constants & Config ---
 const WINDOW_MS = 32;
 const HOP_MS = 10;
 const MAX_FREQ = 4000;
 const PEAK_LOCK_MS = 3000;
+const HISTORY_LEN = 800; // History length for StreamInference
 
 // --- State Variables ---
 let audioContext = null;
 let session = null;
+let streamInference = null; // StreamInference instance
 let isRunning = false;
-let isInferenceRunning = false;
 let stream = null;
 let demoNodes = [];
 let masterGainNode = null;
 let userFilterNode = null;
-
-let currentStates = null;
-let decodedText = "";
-let lastCharId = 0;
 
 // FFT & Processing Parameters
 const TARGET_SAMPLE_RATE = 16000;
@@ -36,29 +31,18 @@ let windowSize = 0;
 let hopLength = 0;
 let nFft = 0;
 
-// Inference Buffering
-let inferenceBuffer = [];
-const INFERENCE_CHUNK_SIZE = 12; // 120ms。推論を実行するチャンクのフレーム数。
-// 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数である必要があります。
-// 4 の倍数でないチャンクを入力すると、runChunkInference 内部での末尾パディング(0)によって
-// モデルの内部キャッシュが汚染され、次のチャンクの推論結果が破壊されるためです。
-
 // Peak Tracking State
 let targetFreq = 800;
 let trackedFreq = 800;
 let lastTrackedFreq = 800;
 let peakLockTimer = 0;
-const peakSmoothing = 0.7;
 
 // Buffers
 const historyLen = 400;
 let waterfallBuffer = [];
 let audioBuf = null;
 let inputSpecBuffer = [];
-let inputSpecHistory = []; // Buffer for 14 bins history
-let sigHistory = [];       // Buffer for signal probs
-let eventHistory = [];     // Buffer for decoded char events {char, pos}
-let totalFrames = 0;
+let inputSpecHistory = []; // Buffer for 14 bins history (for visualization only)
 let capturedSpecData = []; // Buffer for exporting inference data
 
 // UI Elements
@@ -80,26 +64,7 @@ const volumeValue = document.getElementById('volumeValue');
 const autoTrackCheck = document.getElementById('autoTrack');
 const exportBtn = document.getElementById('exportBtn');
 
-// Viridis colormap
-const viridis = [
-    [68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142],
-    [38, 130, 142], [31, 158, 137], [53, 183, 121], [109, 205, 89], [253, 231, 37]
-];
-
-function getColor(v) {
-    v = Math.max(0, Math.min(1, v));
-    const pos = v * (viridis.length - 1);
-    const idx = Math.floor(pos);
-    const frac = pos - idx;
-    if (idx >= viridis.length - 1) return viridis[viridis.length - 1];
-    const c1 = viridis[idx];
-    const c2 = viridis[idx + 1];
-    return [
-        Math.floor(c1[0] + (c2[0] - c1[0]) * frac),
-        Math.floor(c1[1] + (c2[1] - c1[1]) * frac),
-        Math.floor(c1[2] + (c2[2] - c1[2]) * frac)
-    ];
-}
+// Viridis colormap is imported from visualization.js
 
 // --- Station Class for Demo Mode ---
 
@@ -159,9 +124,29 @@ async function initONNX() {
     try {
         const modelPath = document.getElementById('modelSelect').value;
         status.textContent = `モデル読み込み中...`;
+
+        // Dispose existing StreamInference
+        if (streamInference) {
+            streamInference.dispose();
+            streamInference = null;
+        }
+
         session = await ort.InferenceSession.create(modelPath, {
             executionProviders: ['wasm']
         });
+
+        // Create StreamInference instance
+        streamInference = new StreamInference(session, ort, {
+            chunkSize: 12,
+            useWebGPU: false,
+            historyLength: HISTORY_LEN
+        });
+
+        // Set up event listeners
+        streamInference.addEventListener('result', (e) => {
+            document.getElementById('output').textContent = e.detail.text;
+        });
+
         status.textContent = `準備完了`;
     } catch (e) {
         status.textContent = "モデル読み込み失敗: " + e;
@@ -169,75 +154,8 @@ async function initONNX() {
     }
 }
 
-async function runInference(combinedSpecFrames, tLen, capturedTotalFrames) {
-    if (!session || isInferenceRunning) return;
-    isInferenceRunning = true;
-
-    if (!currentStates) currentStates = initStates(ort);
-
-    try {
-        // Use centralized inference logic
-        const result = await runChunkInference(session, combinedSpecFrames, currentStates, ort);
-
-        // Map output frames back to global timeline.
-        const MODEL_DELAY = 0;
-        const startFramePos = (capturedTotalFrames - INFERENCE_CHUNK_SIZE + 1) - MODEL_DELAY;
-
-        const oldStateValues = Object.values(currentStates);
-        currentStates = result.nextStates;
-
-        const nextStateValues = Object.values(currentStates);
-        oldStateValues.forEach(t => {
-            if (t && t.dispose && !nextStateValues.includes(t)) {
-                t.dispose();
-            }
-        });
-
-        const numOutFrames = result.logits.length / result.numClasses;
-
-        for (let t = 0; t < numOutFrames; t++) {
-            const pos = startFramePos + (t * 2);
-            const sigProbs = softmax(Array.from(result.signalLogits.slice(t * 4, (t + 1) * 4)));
-            sigHistory.push({ probs: sigProbs, pos: pos });
-            if (sigHistory.length > 800) sigHistory.shift();
-
-            let maxId = 0, maxVal = -Infinity;
-            for (let i = 0; i < result.numClasses; i++) {
-                const val = result.logits[t * result.numClasses + i];
-                if (val > maxVal) { maxVal = val; maxId = i; }
-            }
-
-            if (maxId !== 0 && maxId !== lastCharId) {
-                let maxSigId = 0, maxSigVal = -Infinity;
-                for (let s = 0; s < 4; s++) {
-                    if (sigProbs[s] > maxSigVal) { maxSigVal = sigProbs[s]; maxSigId = s; }
-                }
-                
-                if (maxSigId === 3 && decodedText.length > 0 && !decodedText.endsWith(" ")) {
-                    decodedText += " ";
-                    eventHistory.push({ char: " ", pos: pos });
-                    lastCharId = -1;
-                }
-
-                const char = ID_TO_CHAR[maxId];
-                if (char) {
-                    decodedText += char;
-                    eventHistory.push({ char: char, pos: pos });
-                    document.getElementById('output').textContent = decodedText;
-                }
-            }
-            lastCharId = maxId;
-        }
-        // Keep events until they are well off-screen (400px width + margin)
-        while (eventHistory.length > 0 && eventHistory[0].pos < totalFrames - 800) {
-            eventHistory.shift();
-        }
-    } catch (e) {
-        console.error("Inference error:", e);
-    } finally {
-        isInferenceRunning = false;
-    }
-}
+// StreamInference handles all inference state management, decoding, and history internally.
+// We only need to push frames via streamInference.pushFrame() and listen for events.
 
 // --- Core Logic ---
 
@@ -300,7 +218,7 @@ function processAudioChunk(chunk) {
     // 1. Peak Detection
     peakDetect(magnitudes);
 
-    // 2. Inference Sampling & Buffering
+    // 2. Inference Sampling - Extract 14 bins centered on tracked frequency
     const binBW = TARGET_SAMPLE_RATE / nFft;
     const W = 14 * binBW;
     const fStart = trackedFreq - W/2 + binBW/2;
@@ -314,23 +232,22 @@ function processAudioChunk(chunk) {
             const p1 = real[kIdx]*real[kIdx] + imag[kIdx]*imag[kIdx];
             const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
             const p = p1 * (1 - kFrac) + p2 * kFrac;
-            
+
             specFrame[i] = p;
         }
     }
-    
-    totalFrames++;
+
+    // Export data capture
     capturedSpecData.push({
         frame: Array.from(specFrame),
         freq: trackedFreq
     });
     if (capturedSpecData.length === 1) exportBtn.disabled = false;
-    inferenceBuffer.push(specFrame);
-    if (inferenceBuffer.length >= INFERENCE_CHUNK_SIZE) {
-        const combined = new Float32Array(14 * INFERENCE_CHUNK_SIZE);
-        for (let i = 0; i < INFERENCE_CHUNK_SIZE; i++) combined.set(inferenceBuffer[i], i * 14);
-        if (session) runInference(combined, INFERENCE_CHUNK_SIZE, totalFrames);
-        inferenceBuffer = [];
+
+    // StreamInference handles buffering and inference internally
+    // Chunk size validation (must be multiple of 4) is enforced by StreamInference
+    if (streamInference) {
+        streamInference.pushFrame(specFrame);
     }
 
     // Capture history for input visualization
@@ -367,15 +284,17 @@ async function initAudio() {
 
 function stopAll() {
     isRunning = false;
-    currentStates = null;
-    inferenceBuffer = [];
-    lastCharId = 0;
-    totalFrames = 0;
+
+    // Reset StreamInference (handles state, decoder, history internally)
+    if (streamInference) {
+        streamInference.reset();
+    }
+
+    // Clear local visualization buffers
     waterfallBuffer = [];
     inputSpecBuffer = [];
     inputSpecHistory = [];
-    sigHistory = [];
-    eventHistory = [];
+
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
     demoNodes = [];
@@ -499,13 +418,12 @@ function drawWaterfall() {
                 const binH = h / numBins;
                 const x = w - numFramesToDraw + f;
                 for (let i = 0; i < numBins; i++) {
-                    const [r, g, b] = getColor(frameData[i]);
+                    const [r, g, b] = getViridisColor(frameData[i]);
                     waterfallCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
                     waterfallCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
                 }
             }
-            const latestNumBins = waterfallBuffer[waterfallBuffer.length - 1].length;
-            drawOverlay(w, h, latestNumBins, h / latestNumBins);
+            drawOverlay(w, h);
             waterfallBuffer = [];
         }
     }
@@ -522,31 +440,19 @@ function drawInputSpec() {
         const numToDraw = inputSpecBuffer.length;
         // 1. Shift Background by exactly the number of new frames
         inputCtx.drawImage(inputCanvas, -numToDraw, 0);
-        
+
         // 2. Use log scale (dB) for visibility, matching Python's visualize_curriculum_phases.py
-        // Calculate adaptive range in dB space from the current history
-        let minDB = Infinity;
-        let maxDB = -Infinity;
         const historyToScan = inputSpecHistory.slice(-w);
-        const dbHistory = historyToScan.map(frame => {
-            return Array.from(frame).map(p => {
-                const db = 10 * Math.log10(p + 1e-9);
-                if (db < minDB) minDB = db;
-                if (db > maxDB) maxDB = db;
-                return db;
-            });
-        });
-        if (maxDB <= minDB) maxDB = minDB + 1.0;
+        const { minDB, maxDB } = powerToDBNormalized(historyToScan);
 
         const binH = h / 14;
         for (let f = 0; f < numToDraw; f++) {
             const frame = inputSpecBuffer[f];
             const x = w - numToDraw + f;
             for (let i = 0; i < 14; i++) {
-                const power = frame[i];
-                const db = 10 * Math.log10(power + 1e-9);
-                const normalizedVal = (db - minDB) / (maxDB - minDB);
-                const [r, g, b] = getColor(normalizedVal);
+                const db = 10 * Math.log10(frame[i] + 1e-9);
+                const normalizedVal = normalizeDB(db, minDB, maxDB);
+                const [r, g, b] = getViridisColor(normalizedVal);
                 inputCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
                 inputCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
             }
@@ -560,7 +466,14 @@ function drawInputSpec() {
 
 function drawInputOverlay(w, h) {
     inputOverlayCtx.clearRect(0, 0, w, h);
-    
+
+    if (!streamInference) return;
+
+    // Get history from StreamInference
+    const sigHistory = streamInference.getSignalHistory();
+    const eventHistory = streamInference.getEvents();
+    const totalFrames = streamInference.frameCount;
+
     if (sigHistory.length === 0) return;
 
     const barH = 12;
@@ -574,7 +487,7 @@ function drawInputOverlay(w, h) {
         for (let s = 0; s < 4; s++) {
             if (item.probs[s] > maxP) { maxP = item.probs[s]; maxIdx = s; }
         }
-        
+
         if (maxIdx > 0) {
             inputOverlayCtx.fillStyle = sigColors[maxIdx];
             // Each sig output represents 2 input frames
@@ -586,7 +499,7 @@ function drawInputOverlay(w, h) {
     inputOverlayCtx.fillStyle = '#fff';
     inputOverlayCtx.font = 'bold 16px Courier New';
     inputOverlayCtx.textAlign = 'center';
-    
+
     eventHistory.forEach(ev => {
         const x = w - (totalFrames - ev.pos);
         if (x > 0 && x < w) {
@@ -600,7 +513,7 @@ function drawInputOverlay(w, h) {
     });
 }
 
-function drawOverlay(w, h, numBins, binH) {
+function drawOverlay(w, h) {
     overlayCtx.clearRect(0, 0, w, h);
     // 14 bins * binBW Hz/bin
     const binBW = TARGET_SAMPLE_RATE / nFft;
@@ -652,12 +565,10 @@ overlayCanvas.onclick = (e) => {
     }
 
     // Reset decoder state and text when changing frequency
-    decodedText = "";
     document.getElementById('output').textContent = "";
-    lastCharId = 0;
-    currentStates = null; // Re-init states on next inference
-    sigHistory = [];
-    eventHistory = [];
+    if (streamInference) {
+        streamInference.reset();
+    }
 
     status.textContent = `周波数固定: ${Math.round(targetFreq)} Hz`;
 };

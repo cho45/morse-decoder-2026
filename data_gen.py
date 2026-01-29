@@ -70,14 +70,14 @@ MORSE_DICT = {
 	"\"":".-..-.",
 	"$":"...-..-",
 	"@":".--.-.",
-	"<BT>":"-...-",
-	"<AR>":".-.-.",
-	"<AS>":".-...",
 	"<AA>" : ".-.-", # AA (new line)
-	"<KA>" : "-.-.-", # CT/KA (attention)
-	   "<SK>" : "...-.-", # VA/SK (end of transmission)
-	   '<VE>': '...-.',
-	   '<HH>': '........',
+    "<KA>" : "-.-.-", # CT/KA (attention)
+    "<SK>" : "...-.-", # VA/SK (end of transmission)
+    '<VE>': '...-.',
+    '<HH>': '........',
+    '<NJ>': '-..---',
+    '<SN>': '...-. ',
+    '<SOS>': '...---...',
 }
 
 class MorseGenerator:

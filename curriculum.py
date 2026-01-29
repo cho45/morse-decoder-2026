@@ -40,6 +40,12 @@ for char in REMAINING:
         CURRICULUM_SETS.append(char)
         seen_chars.add(char)
 
+# Add prosigns to curriculum
+for ps in config.PROSIGNS:
+    if ps not in seen_chars:
+        CURRICULUM_SETS.append(ps)
+        seen_chars.add(ps)
+
 class CurriculumPhase:
     def __init__(self, name, chars, min_snr=100.0, max_snr=100.0, min_wpm=20, max_wpm=20,
                  jitter=0.0, weight_var=0.0, phrase_prob=0.0, focus_prob=0.5,

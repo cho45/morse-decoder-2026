@@ -2,23 +2,18 @@
  * CW Decoder - Main Demo Script
  */
 import {
-    N_FFT, HOP_LENGTH, N_BINS, NUM_LAYERS, D_MODEL, N_HEAD, D_K, KERNEL_SIZE,
-    CHARS, ID_TO_CHAR,
-    computeSpecFrame, softmax, sigmoid, initStates, runChunkInference, ChunkedDecoder
+    N_FFT, HOP_LENGTH, N_BINS,
+    CHARS,
+    computeSpecFrame
 } from './inference.js';
+import { StreamInference } from './stream-inference.js';
 import { MORSE_DICT } from './data_gen.js';
+import { getViridisColor, powerToDBNormalized, normalizeDB } from './visualization.js';
 
 // ort.env.webgpu.profiling = { mode: 'default' };
 
 // --- Constants & Config ---
 const SAMPLE_RATE = 16000; // Model expected sample rate
-const INPUT_LEN = 400; // Original window size (25ms @ 16kHz)
-const INFERENCE_CHUNK_SIZE = 12; // 120ms。推論を実行するチャンクのフレーム数。
-// 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数（SUBSAMPLING_RATE=2 の二乗）である必要があります。
-// 4 の倍数でないチャンク（10等）を入力すると、runChunkInference がエラーを投げます。
-// これは ONNX Runtime の制限によるものです：state updates が output より前に実行されるため、
-// パディングを行うとモデルの内部キャッシュ（ConvSubsampling, ConformerConvModule, Attention）が
-// 破損してしまいます。
 
 // --- State Variables ---
 let audioContext = null;
@@ -30,28 +25,21 @@ let noiseNode = null;
 let filterNode = null;
 let session = null;
 let isRunning = false;
-let isInferenceRunning = false; // 推論の重なりを防止
-let currentStates = null;
-let decoder = null; // ChunkedDecoder instance for streaming CTC decoding
+let streamInference = null; // StreamInference instance
 let audioBuffer = new Float32Array(N_FFT); // Sliding window for FFT
-let melBuffer = []; // Buffer for frames
-let decodedEvents = []; // {char: string, pos: number} for visualization
 let morseAbortController = null;
-let totalFrames = 0;
 let skipCount = 0;
 let useWebGPU = false;
 
-// Visualization Buffers (History)
+// Visualization Buffers (History) - melHistory is local, others come from StreamInference
 const HISTORY_LEN = 200; // Number of frames to show
 let melHistory = [];
-let ctcHistory = [];
-let sigHistory = [];
-let boundHistory = [];
 
 // Canvas Contexts
 const melCanvas = document.getElementById('melCanvas');
 const ctcCanvas = document.getElementById('ctcCanvas');
 const sigCanvas = document.getElementById('sigCanvas');
+const gapCanvas = document.getElementById('gapCanvas');
 const boundCanvas = document.getElementById('boundCanvas');
 
 // --- UI Elements ---
@@ -89,33 +77,19 @@ const updateSliders = () => {
 updateSliders();
 
 // --- ONNX Inference ---
-async function warmupWebGPU(session, ort) {
-    const warmupStart = performance.now();
-    console.log('Starting WebGPU warmup...');
-
-    const chunkSize = 4;
-    const dummyMel = new Float32Array(N_BINS * chunkSize);
-    const dummyStates = initStates(ort);
-
-    // 初回の推論のみ実行（パイプラインコンパイルのため）
-    const result = await runChunkInference(session, dummyMel, dummyStates, ort);
-
-    // GPU 操作を完了させるために待機
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    const warmupTime = performance.now() - warmupStart;
-    console.log(`WebGPU warmup completed in ${warmupTime.toFixed(1)}ms`);
-}
-
 async function initONNX() {
     try {
         const modelPath = modelSelect.value;
         status.textContent = `モデル読み込み中: ${modelPath.split('/').pop()}...`;
 
-        // 既存のセッションがあれば（もし可能なら）破棄
+        // Dispose existing StreamInference
+        if (streamInference) {
+            streamInference.dispose();
+            streamInference = null;
+        }
+
+        // 既存のセッションがあれば破棄
         if (session) {
-            // ort-web では明示的なセッション破棄メソッドはないが、
-            // 変数を上書きすることでGC対象にする
             session = null;
         }
 
@@ -130,9 +104,25 @@ async function initONNX() {
 
         session = await ort.InferenceSession.create(modelPath, {
             executionProviders: providers,
-            // enableGraphCapture: true,
             graphOptimizationLevel: 'all',
             executionMode: 'sequential'
+        });
+
+        // Create StreamInference instance
+        streamInference = new StreamInference(session, ort, {
+            chunkSize: 12,
+            useWebGPU: useWebGPU,
+            historyLength: HISTORY_LEN
+        });
+
+        // Set up event listeners
+        streamInference.addEventListener('result', (e) => {
+            output.textContent = e.detail.text;
+        });
+
+        streamInference.addEventListener('frame', () => {
+            drawVisualizations();
+            updateDebugInfo();
         });
 
         status.textContent = `準備完了 (${useWebGPU ? 'webgpu' : 'wasm'})`;
@@ -143,145 +133,38 @@ async function initONNX() {
     }
 }
 
-function initStatesWrapper() {
-    return initStates(ort);
-}
+// StreamInference handles all inference state management internally.
+// We only need to push frames and listen for events.
 
-async function runInference(melFrame, tLen = 1) {
-    if (!session || !currentStates) return;
-    if (isInferenceRunning) {
-        // 推論が追いついていない場合はスキップ
-        skipCount++;
-        console.warn(`Inference skipped (busy) - Total skips: ${skipCount}`);
-        updateDebugInfo();
-        return;
-    }
-    isInferenceRunning = true;
+function updateDebugInfo() {
+    if (!session) return;
 
-    const start = performance.now();
-    let inferenceTime = null;
-    try {
-        // Use the centralized runChunkInference to handle PCEN and states
-        const result = await runChunkInference(session, melFrame, currentStates, ort);
-        inferenceTime = performance.now() - start;
-
-        const oldStateValues = Object.values(currentStates);
-        currentStates = result.nextStates;
-
-        // WebGPU: 古いテンソルを dispose すると、次回推論時に GPU で再確保されるためオーバーヘッドになる
-        // したがって、WebGPU モードでは dispose をスキップする
-        // WASM モードでのみメモリを解放
-        if (!useWebGPU) {
-            const nextStateValues = Object.values(currentStates);
-            oldStateValues.forEach(t => {
-                if (t && t.dispose && t.dims.length > 0 && t.dims.every(d => d > 0)) {
-                    if (!nextStateValues.includes(t)) {
-                        t.dispose();
-                    }
-                }
-            });
-        }
-
-    // Data for visualization and decoding
-    const numOutFrames = result.logits.length / result.numClasses;
-
-    for (let t = 0; t < numOutFrames; t++) {
-        const ctcLogits = result.logits.slice(t * result.numClasses, (t + 1) * result.numClasses);
-        const sigLogits = result.signalLogits.slice(t * 4, (t + 1) * 4);
-        const boundLogit = result.boundaryLogits[t];
-
-        const ctcProbs = softmax(Array.from(ctcLogits));
-        const sigProbs = softmax(Array.from(sigLogits));
-        const boundProb = sigmoid(boundLogit);
-
-        // Visualization History
-        ctcHistory.push(ctcProbs);
-        sigHistory.push(sigProbs);
-        boundHistory.push(boundProb);
-        totalFrames++;
-
-        if (ctcHistory.length > HISTORY_LEN) ctcHistory.shift();
-        if (sigHistory.length > HISTORY_LEN) sigHistory.shift();
-        if (boundHistory.length > HISTORY_LEN) boundHistory.shift();
-
-        // CTC Decoding with ChunkedDecoder
-        const decodeResult = decoder.decodeFrame(ctcLogits, sigLogits, boundProb);
-
-        // Update UI and events when new character is emitted
-        if (decodeResult.newChar) {
-            // If space was inserted before this character, add space event
-            if (decodeResult.spaceInserted) {
-                decodedEvents.push({char: " ", pos: totalFrames - 1});
-            }
-            // Add character event
-            decodedEvents.push({char: decodeResult.newChar, pos: totalFrames - 1});
-            output.textContent = decodeResult.text;
-        }
-    }
-
-    // Mel History (always 2 frames for the chunk)
-    for (let t = 0; t < tLen; t++) {
-        melHistory.push(melFrame.slice(t * N_BINS, (t + 1) * N_BINS));
-        if (melHistory.length > HISTORY_LEN * 2) melHistory.shift();
-    }
-    
-    // Cleanup decoded events that are out of history
-    while (decodedEvents.length > 0 && decodedEvents[0].pos < totalFrames - HISTORY_LEN) {
-        decodedEvents.shift();
-    }
-
-    drawVisualizations();
-    updateDebugInfo(start, inferenceTime);
-
-    } catch (e) {
-        console.error("Inference error:", e);
-    } finally {
-        isInferenceRunning = false;
-    }
-}
-
-// Performance stats tracking
-let perfStats = {
-    avgInferenceTime: 0,
-    maxInferenceTime: 0,
-    minInferenceTime: Infinity,
-    count: 0,
-    lastInferenceTime: 0
-};
-
-function updateDebugInfo(startTime = null, inferenceTime = null) {
-    if (!session || !currentStates) return;
-
-    const offset = currentStates.offset_0.data[0];
-    const offsetNum = typeof offset === 'bigint' ? Number(offset) : offset;
-    
-    let latencyInfo = "";
-    if (startTime) {
-        const end = performance.now();
-        latencyInfo = `<br>総レイテンシ: ${(end - startTime).toFixed(1)}ms`;
-    }
-    
-    if (inferenceTime !== null) {
-        perfStats.count++;
-        perfStats.lastInferenceTime = inferenceTime;
-        perfStats.avgInferenceTime = (perfStats.avgInferenceTime * (perfStats.count - 1) + inferenceTime) / perfStats.count;
-        perfStats.maxInferenceTime = Math.max(perfStats.maxInferenceTime, inferenceTime);
-        perfStats.minInferenceTime = Math.min(perfStats.minInferenceTime, inferenceTime);
-    }
+    const frameCount = streamInference ? streamInference.frameCount : 0;
 
     debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${useWebGPU ? 'webgpu' : 'wasm'})<br>` +
-                         `処理フレーム数: ${Math.floor(offsetNum)}<br>` +
-                         `スキップ数: ${skipCount}${latencyInfo}` +
-                         (inferenceTime !== null ? `<br>推論時間: ${inferenceTime.toFixed(1)}ms<br>` +
-                         `平均: ${perfStats.avgInferenceTime.toFixed(1)}ms / 最大: ${perfStats.maxInferenceTime.toFixed(1)}ms / 最小: ${perfStats.minInferenceTime.toFixed(1)}ms` : '');
+                         `処理フレーム数: ${frameCount}<br>` +
+                         `スキップ数: ${skipCount}`;
 }
 
 
 function drawVisualizations() {
     drawMel();
-    drawProbs(ctcCanvas, ctcHistory, ["blank", ...CHARS], true);
-    drawProbs(sigCanvas, sigHistory, ["Space", "Dit", "Dah", "Inter-Word"]);
-    drawBoundary();
+    // Get history from StreamInference
+    const ctcHistory = streamInference ? streamInference.getCTCHistory() : [];
+    const sigHistory = streamInference ? streamInference.getSignalHistory().map(h => h.probs) : [];
+    const boundHistory = streamInference ? streamInference.getBoundaryHistory() : [];
+    const decodedEvents = streamInference ? streamInference.getEvents() : [];
+    const totalFrames = streamInference ? streamInference.frameCount : 0;
+
+    drawProbs(ctcCanvas, ctcHistory, ["blank", ...CHARS], true, decodedEvents, totalFrames);
+
+    // Split signal history: Dit/Dah (indices 1,2) and Space/Inter-Word (indices 0,3)
+    const ditDahHistory = sigHistory.map(probs => [probs[1], probs[2]]);
+    const gapHistory = sigHistory.map(probs => [probs[0], probs[3]]);
+    drawProbs(sigCanvas, ditDahHistory, ["Dit", "Dah"], false, [], 0);
+    drawProbs(gapCanvas, gapHistory, ["Space", "Inter-Word"], false, [], 0);
+
+    drawBoundary(boundHistory);
 }
 
 function drawMel() {
@@ -295,60 +178,15 @@ function drawMel() {
     const cellW = w / (HISTORY_LEN * 2);
     const cellH = h / N_BINS;
 
-    // Accurate Viridis colormap points
-    const viridis = [
-        [68, 1, 84],   // 0.0
-        [72, 40, 120], // 0.125
-        [62, 74, 137], // 0.25
-        [49, 104, 142], // 0.375
-        [38, 130, 142], // 0.5
-        [31, 158, 137], // 0.625
-        [53, 183, 121], // 0.75
-        [109, 205, 89], // 0.875
-        [253, 231, 37]  // 1.0
-    ];
-
-    const getColor = (v) => {
-        v = Math.max(0, Math.min(1, v));
-        const pos = v * (viridis.length - 1);
-        const idx = Math.floor(pos);
-        const frac = pos - idx;
-        if (idx >= viridis.length - 1) return viridis[viridis.length - 1];
-        
-        const c1 = viridis[idx];
-        const c2 = viridis[idx + 1];
-        return [
-            Math.floor(c1[0] + (c2[0] - c1[0]) * frac),
-            Math.floor(c1[1] + (c2[1] - c1[1]) * frac),
-            Math.floor(c1[2] + (c2[2] - c1[2]) * frac)
-        ];
-    };
-
     // Use log scale (dB) for visibility, matching Python's visualize_curriculum_phases.py
-    // Calculate adaptive range in dB space
-    let minDB = Infinity;
-    let maxDB = -Infinity;
-    const dbHistory = melHistory.map(frame => {
-        return Array.from(frame).map(p => 10 * Math.log10(p + 1e-9));
-    });
+    const { dbFrames, minDB, maxDB } = powerToDBNormalized(melHistory);
 
-    for (let t = 0; t < dbHistory.length; t++) {
+    for (let t = 0; t < dbFrames.length; t++) {
         for (let f = 0; f < N_BINS; f++) {
-            const db = dbHistory[t][f];
-            if (db < minDB) minDB = db;
-            if (db > maxDB) maxDB = db;
-        }
-    }
-    // Ensure a minimum range to avoid division by zero
-    if (maxDB <= minDB) maxDB = minDB + 1;
-
-    for (let t = 0; t < dbHistory.length; t++) {
-        for (let f = 0; f < N_BINS; f++) {
-            const db = dbHistory[t][f];
-            const val = (db - minDB) / (maxDB - minDB);
-            const [r, g, b] = getColor(val);
+            const val = normalizeDB(dbFrames[t][f], minDB, maxDB);
+            const [r, g, b] = getViridisColor(val);
             ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-            
+
             const x = Math.floor(t * cellW);
             const y = Math.floor(h - (f + 1) * cellH);
             const nextX = Math.floor((t + 1) * cellW);
@@ -358,7 +196,7 @@ function drawMel() {
     }
 }
 
-function drawProbs(canvas, history, labels, onlyTop = false) {
+function drawProbs(canvas, history, labels, onlyTop = false, decodedEvents = [], totalFrames = 0) {
     const ctx = canvas.getContext('2d');
     const w = canvas.width;
     const h = canvas.height;
@@ -375,7 +213,7 @@ function drawProbs(canvas, history, labels, onlyTop = false) {
 
     for (let c = 0; c < numClasses; c++) {
         if (onlyTop && c === 0) continue; // Skip blank for CTC if requested
-        
+
         ctx.beginPath();
         ctx.strokeStyle = colors[c % colors.length];
         ctx.lineWidth = 1;
@@ -400,12 +238,15 @@ function drawProbs(canvas, history, labels, onlyTop = false) {
     }
 
     // Draw Decoded Characters on CTC Canvas
-    if (onlyTop) {
+    // Convert input frame units to output frame units (subsampling rate = 2)
+    if (onlyTop && decodedEvents.length > 0) {
         ctx.font = 'bold 16px monospace';
         ctx.fillStyle = '#000';
-        const currentBasePos = Math.max(0, totalFrames - HISTORY_LEN);
+        const outputFrames = Math.floor(totalFrames / 2);
+        const currentBasePos = Math.max(0, outputFrames - HISTORY_LEN);
         decodedEvents.forEach(ev => {
-            const x = (ev.pos - currentBasePos) * step;
+            const evPosOutput = Math.floor(ev.pos / 2);
+            const x = (evPosOutput - currentBasePos) * step;
             if (x > 0 && x < w) {
                 ctx.fillText(ev.char, x, 20);
                 ctx.beginPath();
@@ -418,7 +259,7 @@ function drawProbs(canvas, history, labels, onlyTop = false) {
     }
 }
 
-function drawBoundary() {
+function drawBoundary(boundHistory = []) {
     const ctx = boundCanvas.getContext('2d');
     const w = boundCanvas.width;
     const h = boundCanvas.height;
@@ -580,27 +421,20 @@ startBtn.onclick = async () => {
     morseNode.connect(audioContext.destination);
     
     morseNode.port.onmessage = (e) => {
-        if (!isRunning) return;
+        if (!isRunning || !streamInference) return;
         if (e.data.type === 'audio_chunk') {
             audioBuffer.set(audioBuffer.subarray(HOP_LENGTH));
             audioBuffer.set(e.data.chunk, N_FFT - HOP_LENGTH);
             // Use computeSpecFrame from inference.js with fixed 16kHz (input is resampled)
             const mel = computeSpecFrame(audioBuffer, 16000);
-            melBuffer.push(mel);
-            // チャンクサイズごとに推論を実行。
-            // 【重要】INFERENCE_CHUNK_SIZE は必ず 4 の倍数（SUBSAMPLING_RATE=2 の二乗）である必要があります。
-            // 4 の倍数でないチャンク（10等）を入力すると、runChunkInference がエラーを投げます。
-            // これは ONNX Runtime の制限によるものです：state updates が output より前に実行されるため、
-            // パディングを行うとモデルの内部キャッシュ（ConvSubsamplingやConformerConvModuleの状態）が
-            // 破損してしまいます。
-            if (melBuffer.length >= INFERENCE_CHUNK_SIZE) {
-                const combinedMel = new Float32Array(N_BINS * INFERENCE_CHUNK_SIZE);
-                for (let i = 0; i < INFERENCE_CHUNK_SIZE; i++) {
-                    combinedMel.set(melBuffer[i], i * N_BINS);
-                }
-                runInference(combinedMel, INFERENCE_CHUNK_SIZE);
-                melBuffer = [];
-            }
+
+            // Store for mel visualization
+            melHistory.push(mel);
+            if (melHistory.length > HISTORY_LEN * 2) melHistory.shift();
+
+            // StreamInference handles buffering and inference internally
+            // Chunk size validation (must be multiple of 4) is enforced by StreamInference
+            streamInference.pushFrame(mel);
         }
     };
 
@@ -692,24 +526,14 @@ stopBtn.onclick = () => {
 
 resetBtn.onclick = () => {
     output.textContent = "";
-    currentStates = initStatesWrapper();
-    // Initialize decoder with the correct number of classes
-    decoder = new ChunkedDecoder(CHARS.length + 1); // +1 for blank
-    melBuffer = [];
     melHistory = [];
-    ctcHistory = [];
-    sigHistory = [];
-    boundHistory = [];
-    decodedEvents = [];
-    totalFrames = 0;
     skipCount = 0;
-    perfStats = {
-        avgInferenceTime: 0,
-        maxInferenceTime: 0,
-        minInferenceTime: Infinity,
-        count: 0,
-        lastInferenceTime: 0
-    };
+
+    // Reset StreamInference (handles state, decoder, history internally)
+    if (streamInference) {
+        streamInference.reset();
+    }
+
     drawVisualizations();
     updateDebugInfo();
 };

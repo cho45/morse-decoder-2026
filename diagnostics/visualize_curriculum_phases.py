@@ -39,10 +39,14 @@ def plot_spectrogram(ax, waveform, title):
     bin_end = bin_start + config.N_BINS
     spec_crop = spec_db[bin_start:bin_end, :]
     
-    im = ax.imshow(spec_crop.numpy(), aspect='auto', origin='lower', extent=[0, 10, config.F_MIN, config.F_MAX])
+    # 正確な時間軸の計算
+    num_frames = spec_crop.shape[1]
+    duration = num_frames * config.HOP_LENGTH / config.SAMPLE_RATE
+    
+    im = ax.imshow(spec_crop.numpy(), aspect='auto', origin='lower', extent=[0, duration, config.F_MIN, config.F_MAX])
     ax.set_title(title)
     ax.set_ylabel("Freq (Hz)")
-    return im
+    return im, duration
 
 def visualize_phases():
     cm = CurriculumManager()
@@ -91,11 +95,12 @@ def visualize_phases():
         waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[0]
         
         title = f"Phase {idx}: {p.name} | SNR={p.min_snr:.1f}-{p.max_snr:.1f}\nDrift={p.drift_prob} | AGC={p.agc_prob} | QRM={p.qrm_prob} | Impulse={p.impulse_prob}"
-        plot_spectrogram(ax, waveform, title)
+        _, duration = plot_spectrogram(ax, waveform, title)
         
         # Overlay signal labels (dots/dashes) using colors
         # 0: Background (none), 1: Dit (Yellow), 2: Dah (Cyan), 3: WordSpace (Red)
-        times = np.linspace(0, 10, len(signal_labels))
+        # 正確な時間軸を使用
+        times = np.linspace(0, duration, len(signal_labels))
         colors = {1: 'yellow', 2: 'cyan', 3: 'red'}
         for cid, color in colors.items():
             # Use numpy conversion for where parameter

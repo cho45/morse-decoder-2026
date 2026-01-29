@@ -78,8 +78,10 @@ class Trainer:
         self.criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
         # Multi-class Cross Entropy for Signal Detection (Multi-task)
         # 0: Background/Space, 1: Dit, 2: Dah, 3: Inter-word space
-        # クラス不均衡を考慮しつつ、偽陽性を抑えるため Inter-word space (3) の重みを 2.0 に調整
-        sig_weights = torch.tensor([0.5, 1.0, 1.0, 2.0]).to(self.device)
+        # クラス不均衡を考慮しつつ、偽陽性を抑えるため Inter-word space (3) の重みを調整
+        # Dit(1)は短く見落としやすいため 1.5 に強化。
+        # Word Space(3)は過剰分割を防ぐため 1.5 に緩和。
+        sig_weights = torch.tensor([0.9, 1.9, 1.0, 1.5]).to(self.device)
         self.signal_criterion = nn.CrossEntropyLoss(weight=sig_weights, reduction='none')
         # Binary Cross Entropy for Character Boundary Detection
         # Positive weight to handle class imbalance (boundaries are rare)
@@ -154,35 +156,53 @@ class Trainer:
         # batch is a list of (waveform, text, wpm, signal_labels, boundary_labels, is_phrase)
         waveforms, texts, wpms, signal_labels, boundary_labels, is_phrases = zip(*batch)
         
-        # Physical Lookahead Alignment:
-        # Add LOOKAHEAD_FRAMES at the end of each waveform to allow the causal model
-        # to "look ahead" into the future signal for the current label.
+        # 物理的な先読み（Lookahead）アライメント:
+        # Causal Model（過去しか見ない）で先読みを実現するために、
+        # 入力波形の後ろにパディングを追加し、同時に正解ラベル（Signal/Boundary）を
+        # 「遅延」させる（右にシフトする）。
+        # これにより、時刻 T の入力に対して、時刻 T - delay の正解を予測することになり、
+        # 実質的に T - delay の予測のために T までの未来情報を使うことになる。
+        
         lookahead_samples = config.LOOKAHEAD_FRAMES * config.HOP_LENGTH
         
-        # Pad waveforms
+        # Pad waveforms (入力はそのまま、後ろにパディング)
         lengths = torch.tensor([w.shape[0] for w in waveforms])
         padded_waveforms = torch.zeros(len(waveforms), lengths.max() + lookahead_samples)
         for i, w in enumerate(waveforms):
-            # Place signal at the beginning
             padded_waveforms[i, :w.shape[0]] = w
             
-        # Pad labels
-        # signal_labels are already in mel frames units.
-        # We need to calculate the target number of frames after subsampling.
+        # Pad & Shift labels
+        # signal_labels は Melフレーム単位。
+        # モデル出力は Subsampling されているため、シフト量も Subsampling 後のフレーム数で計算する。
+        
+        # 1. 全体の Mel フレーム数
         l_total = padded_waveforms.size(1)
         l_mel = (l_total - config.N_FFT) // config.HOP_LENGTH + 1
+        
+        # 2. Subsampling 後のフレーム数 (モデル出力サイズ)
         padding_t = 2 # From compute_mels_and_lengths
         input_lengths_val = (l_mel + padding_t - 3) // 2 + 1
         
+        # 3. シフト量 (Lookahead frames converted to output domain)
+        # config.LOOKAHEAD_FRAMES は Mel フレーム単位
+        shift_frames = config.LOOKAHEAD_FRAMES // config.SUBSAMPLING_RATE
+        
         padded_signals = torch.zeros(len(signal_labels), input_lengths_val, dtype=torch.long)
         padded_boundaries = torch.zeros(len(boundary_labels), input_lengths_val, dtype=torch.float32)
+        
         for i, (s, b) in enumerate(zip(signal_labels, boundary_labels)):
-            # Downsample labels to match model output frames (Current subsampling is 2x)
+            # Downsample labels
             s_downsampled = s[::config.SUBSAMPLING_RATE]
             b_downsampled = b[::config.SUBSAMPLING_RATE]
-            length = min(len(s_downsampled), input_lengths_val)
-            padded_signals[i, :length] = s_downsampled[:length].long()
-            padded_boundaries[i, :length] = b_downsampled[:length].float()
+            
+            # Shift labels to the right
+            # [Pad(shift)] + [Label]
+            # 有効なラベルの長さ
+            valid_len = min(len(s_downsampled), input_lengths_val - shift_frames)
+            
+            if valid_len > 0:
+                padded_signals[i, shift_frames : shift_frames + valid_len] = s_downsampled[:valid_len].long()
+                padded_boundaries[i, shift_frames : shift_frames + valid_len] = b_downsampled[:valid_len].float()
 
         # Encode labels
         label_list = []

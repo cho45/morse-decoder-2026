@@ -5,11 +5,11 @@ from inference_utils import calculate_cer, map_prosigns, unmap_prosigns, decode_
 import config
 
 def test_prosign_mapping():
-    text = "CQ DE K <BT> TEST <AR>"
+    text = "CQ DE K <SN> TEST <VE>"
     mapped = map_prosigns(text)
     # Prosigns should be single characters
-    assert "<BT>" not in mapped
-    assert "<AR>" not in mapped
+    assert "<SN>" not in mapped
+    assert "<VE>" not in mapped
     
     unmapped = unmap_prosigns(mapped)
     assert unmapped == text
@@ -24,9 +24,9 @@ def test_calculate_cer():
     # Insertion
     assert calculate_cer("ABC", "ABCD") == 1/3
     # Prosign match (should count as 1 char)
-    assert calculate_cer("<BT> K", "<BT> K") == 0.0
+    assert calculate_cer("= K", "= K") == 0.0
     # Prosign mismatch
-    assert calculate_cer("<BT> K", "<AR> K") == 0.5 # <BT> replaced by <AR> (1 char)
+    assert calculate_cer("= K", "+ K") == 0.5 # = replaced by + (1 char)
     # Space should be ignored in CER
     assert calculate_cer("A B C", "ABC") == 0.0
 
