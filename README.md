@@ -74,11 +74,27 @@ docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --sam
 本プロジェクトにおける SNR (Signal-to-Noise Ratio) は、以下の基準で定義されています。
 
 - **信号電力 ($P_{\text{signal}}$):** モールス信号が **ON（マーク）の状態** における正弦波の平均電力。
-  - 振幅 $A$ の正弦波の場合、$P_{\text{signal}} = A^2 / 2$ です。
+  - 振幅 $A$ の正弦波の場合、$` P_{\text{signal}} = A^2 / 2 `$ です。
 - **雑音電力 ($P_{\text{noise}}$):** 全帯域（ナイキスト周波数まで）における加法性ホワイトガウスノイズ (AWGN) の平均電力。
-- **SNR 計算式:** $\text{SNR}_{\text{dB}} = 10 \log_{10} (P_{\text{signal}} / P_{\text{noise}})$
+- **SNR 計算式:** $` \text{SNR}_{\text{dB}} = 10 \log_{10} (P_{\text{signal}} / P_{\text{noise}}) `$
 
 この定義により、送信する文章のデューティ比（ON/OFF比率）に依存せず、信号が存在する瞬間の強度に基づいてノイズ耐性を評価しています。
+
+### SNR定義の補足 (Equivalent SNR)
+
+本プロジェクトの学習データ生成はサンプリングレート $F_s = 16\text{kHz}$ で行われています。上記の定義に従い、雑音はナイキスト周波数 ($8\text{kHz}$) までの全帯域に分布しています。一般的な無線通信の評価指標（SSB帯域幅相当のノイズ環境）と比較する場合、以下の換算式を用いて帯域幅補正を行うことができます。
+
+3kHz 帯域換算 (標準的な音声帯域): 
+```math
+\text{SNR}_{3k} \approx \text{SNR}_{\text{code}} + 10 \log_{10}\left(\frac{8000}{3000}\right) \approx \text{SNR}_{\text{code}} + 4.26 \text{dB}
+```
+
+2.5kHz 帯域換算 (HF帯のSSBフィルタ相当):
+```math
+\text{SNR}_{2.5k} \approx \text{SNR}_{\text{code}} + 10 \log_{10}\left(\frac{8000}{2500}\right) \approx \text{SNR}_{\text{code}} + 5.05 \text{dB}
+```
+
+例：本データセットにおける SNR = -10 dB は、2.5kHz 帯域幅の受信機における SNR = -4.95 dB に相当します。
 
 ## 開発フェーズ
 1. **フェーズ 1:** データジェネレータの実装
