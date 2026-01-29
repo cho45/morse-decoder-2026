@@ -88,7 +88,9 @@ export class MorseGenerator {
                     }
                 }
             }
-            tokens.push(text[i].toUpperCase());
+            if (text[i] !== ' ') {
+                tokens.push(text[i].toUpperCase());
+            }
             i++;
         }
         return tokens;

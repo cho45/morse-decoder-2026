@@ -360,14 +360,8 @@ class Trainer:
         self.train_dataset.min_len = 5
         self.train_dataset.max_len = 15 if p.phrase_prob > 0 else 10
         
-        # Determine focus chars (usually the newest ones in the set)
-        # We can derive this by comparing with previous phase's chars
-        if self.current_phase > 1:
-            prev_p = self.curriculum.get_phase(self.current_phase - 1)
-            new_chars = "".join([c for c in p.chars if c not in prev_p.chars])
-            self.train_dataset.focus_chars = new_chars if new_chars else p.chars
-        else:
-            self.train_dataset.focus_chars = p.chars
+        # focus_chars は curriculum phase から取得する
+        self.train_dataset.focus_chars = p.focus_chars
 
         print(f"Epoch {epoch} | Phase {self.current_phase} ({p.name})")
         print(f"  Chars: {p.chars} | Focus: {self.train_dataset.focus_chars}")

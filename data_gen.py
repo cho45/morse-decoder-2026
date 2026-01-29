@@ -714,19 +714,23 @@ class CWDataset(Dataset):
                 
                 # Randomly choose from available tokens (chars + prosigns)
                 # Filter out spaces for random choice, we will add them manually
-                valid_tokens = [c for c in self.chars if c != ' ']
+                valid_tokens = self.gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else self.chars
+                valid_tokens = [t for t in valid_tokens if t != ' ']
                 
                 # Create a list of tokens
                 if self.focus_chars and random.random() < self.focus_prob:
                     # Weighted sampling: Include at least one focus char, and higher prob for others
                     # Mix focus chars and valid tokens
-                    focus_valid = [c for c in self.focus_chars if c != ' ' and c in valid_tokens]
+                    # focus_chars をトークンに分解する
+                    focus_tokens = self.gen.text_to_morse_tokens(self.focus_chars)
+                    focus_valid = [t for t in focus_tokens if t != ' ' and t in valid_tokens]
+                    
                     if focus_valid:
                         # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
                         k_focus = max(1, length // 2)
                         k_other = length - k_focus
                         
-                        # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため)
+                        # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため、および Prosigns のため)
                         if len(focus_valid) > 1 and k_focus >= len(focus_valid):
                             tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
                             tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))

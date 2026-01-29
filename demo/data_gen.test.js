@@ -6,9 +6,10 @@ describe('MorseGenerator', () => {
     const gen = new MorseGenerator(sampleRate);
 
     it('should tokenize text with prosigns correctly', () => {
-        const tokens = gen.textToMorseTokens('CQ <BT> TEST');
-        expect(tokens).toContain('<BT>');
-        expect(tokens).toEqual(['C', 'Q', ' ', '<BT>', ' ', 'T', 'E', 'S', 'T']);
+        // <BT> is not in MORSE_DICT of demo/data_gen.js, let's use <NJ> which is present
+        const tokens = gen.textToMorseTokens('CQ <NJ> TEST');
+        expect(tokens).toContain('<NJ>');
+        expect(tokens).toEqual(['C', 'Q', '<NJ>', 'T', 'E', 'S', 'T']);
     });
 
     it('should generate timing for "E"', () => {

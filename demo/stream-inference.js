@@ -86,6 +86,7 @@ export class StreamInference extends EventTarget {
         this._events = [];
         this._isProcessing = false;
         this._pendingChunk = null;
+        this._isDisposed = false;
 
         // Visualization history
         this._sigHistory = [];
@@ -218,6 +219,20 @@ export class StreamInference extends EventTarget {
      * Call this when done with the instance.
      */
     dispose() {
+        this._isDisposed = true;
+        if (this._isProcessing) {
+            // Defer state disposal until inference completes
+            // We still clear other resources to stop further usage
+            this._decoder = null;
+            this._buffer = [];
+            this._events = [];
+            this._sigHistory = [];
+            this._ctcHistory = [];
+            this._boundHistory = [];
+            this._session = null;
+            this._ort = null;
+            return;
+        }
         this._disposeStates();
         this._decoder = null;
         this._buffer = [];
@@ -299,6 +314,12 @@ export class StreamInference extends EventTarget {
                 this._states,
                 this._ort
             );
+
+            if (this._isDisposed) {
+                // If disposed during inference, update states so they can be cleaned up in finally block
+                this._states = result.nextStates;
+                return;
+            }
 
             // Update states
             const oldStateValues = Object.values(this._states);
@@ -398,6 +419,9 @@ export class StreamInference extends EventTarget {
             throw e;
         } finally {
             this._isProcessing = false;
+            if (this._isDisposed) {
+                this._disposeStates();
+            }
         }
     }
 

@@ -47,7 +47,7 @@ for ps in config.PROSIGNS:
         seen_chars.add(ps)
 
 class CurriculumPhase:
-    def __init__(self, name, chars, min_snr=100.0, max_snr=100.0, min_wpm=20, max_wpm=20,
+    def __init__(self, name, chars, focus_chars=None, min_snr=100.0, max_snr=100.0, min_wpm=20, max_wpm=20,
                  jitter=0.0, weight_var=0.0, phrase_prob=0.0, focus_prob=0.5,
                  fading_speed=(0.0, 0.0), min_fading=1.0,
                  drift_prob=0.0, qrn_prob=0.0, qrm_prob=0.1, impulse_prob=0.001,
@@ -55,6 +55,7 @@ class CurriculumPhase:
                  penalty_weight=2.0):
         self.name = name
         self.chars = chars
+        self.focus_chars = focus_chars
         self.min_snr = min_snr
         self.max_snr = max_snr
         self.min_wpm = min_wpm
@@ -88,6 +89,7 @@ class CurriculumManager:
             self.phases.append(CurriculumPhase(
                 name=f"Char_{i+1}_{s}",
                 chars=current_chars,
+                focus_chars=s,
                 min_snr=100.0, max_snr=100.0,
                 min_wpm=15, max_wpm=25,
                 min_gain_db=-20,
