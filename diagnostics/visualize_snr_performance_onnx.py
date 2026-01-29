@@ -15,7 +15,7 @@ from typing import List, Tuple, Dict
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-from data_gen import generate_sample, CWDataset
+from data_gen import generate_sample, CWDataset, MorseGenerator
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
 
 def generate_random_text(length: int = 6) -> str:
@@ -43,6 +43,7 @@ class ONNXPerformanceEvaluator:
         )
         self.f_bin_start = int(round(config.F_MIN * config.N_FFT / config.SAMPLE_RATE))
         self.f_bin_end = self.f_bin_start + config.N_BINS
+        self.gen = MorseGenerator()
 
     def preprocess(self, waveform: torch.Tensor) -> torch.Tensor:
         """Standardized preprocessing matching inference_utils.py."""
@@ -142,8 +143,18 @@ class ONNXPerformanceEvaluator:
         cers = []
         for text in texts:
             freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
+            
+            # Adaptive WPM for phrases to fit in 10s
+            sample_wpm = wpm
+            if wpm == 20:
+                sample_wpm = self.gen.estimate_wpm_for_target_frames(
+                    text,
+                    target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
+                    min_wpm=15, max_wpm=45
+                )
+
             waveform, _, _, _ = generate_sample(
-                text=text, wpm=wpm, snr_db=snr_db, frequency=freq,
+                text=text, wpm=sample_wpm, snr_db=snr_db, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
                 qrm_prob=qrm_prob, impulse_prob=impulse_prob
             )

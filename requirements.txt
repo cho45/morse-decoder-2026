@@ -5,3 +5,6 @@ onnxruntime
 pyaudio
 pytest
 matplotlib
+seaborn
+pandas
+scikit-learn

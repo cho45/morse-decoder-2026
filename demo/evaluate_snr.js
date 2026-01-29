@@ -3,7 +3,7 @@
  */
 import ort from 'onnxruntime-node';
 import { MorseGenerator, HFChannelSimulator } from './data_gen.js';
-import { runFullInference, decodeFull, calculateCER, computeSpecFrame, N_BINS, N_FFT, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES, SUBSAMPLING_RATE } from './inference.js';
+import { runFullInference, decodeFull, calculateCER, computeSpecFrame, computeSpecFrames, N_BINS, N_FFT, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES, SUBSAMPLING_RATE } from './inference.js';
 
 // --- Configuration ---
 const SNR_RANGE = [-18, -16, -14, -12, -10, -8, -6, -4, -2];
@@ -21,23 +21,6 @@ const TEST_PHRASES = [
     "SOS SOS SOS"
 ];
 
-
-/**
- * Waveform -> Spectrogram frames
- */
-/**
- * Waveform -> Spectrogram frames
- */
-function computeSpecFrames(waveform) {
-    const nFrames = Math.floor((waveform.length - N_FFT) / HOP_LENGTH) + 1;
-    const specFrames = new Float32Array(nFrames * N_BINS);
-    for (let i = 0; i < nFrames; i++) {
-        const frame = waveform.slice(i * HOP_LENGTH, i * HOP_LENGTH + N_FFT);
-        const spec = computeSpecFrame(frame);
-        specFrames.set(spec, i * N_BINS);
-    }
-    return specFrames;
-}
 
 async function evaluate() {
     const args = process.argv.slice(2);
@@ -60,7 +43,9 @@ async function evaluate() {
 
         for (let i = 0; i < SAMPLES_PER_SNR; i++) {
             const targetText = TEST_PHRASES[i % TEST_PHRASES.length];
-            const timing = gen.generateTiming(targetText, 20);
+            // Adaptive WPM for phrases to fit in 10s (1000 frames)
+            const wpm = gen.estimateWpmForTargetFrames(targetText, 1000 * 0.9, 15, 45);
+            const timing = gen.generateTiming(targetText, wpm);
             const cleanWaveform = gen.generateWaveform(timing);
             const noisyWaveform = sim.applyNoise(cleanWaveform, snr);
             const filteredWaveform = sim.applyFilter(noisyWaveform);

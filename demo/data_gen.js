@@ -158,6 +158,32 @@ export class MorseGenerator {
         return timing;
     }
 
+    /**
+     * Estimate the WPM needed to fit the text into targetFrames.
+     * Ported from data_gen.py
+     */
+    estimateWpmForTargetFrames(text, targetFrames = 1000, minWpm = 10, maxWpm = 45) {
+        const tokens = this.textToMorseTokens(text);
+        let totalUnits = 0;
+        for (const token of tokens) {
+            const code = MORSE_DICT[token] || "";
+            for (const symbol of code) {
+                if (symbol === '.') totalUnits += 1;
+                else if (symbol === '-') totalUnits += 3;
+                totalUnits += 1; // Intra-char space
+            }
+            totalUnits += 3; // Inter-char space
+        }
+
+        const hopLength = 160; // config.HOP_LENGTH
+        const targetSec = targetFrames * hopLength / this.sampleRate;
+
+        if (targetSec <= 0) return maxWpm;
+        const neededWpm = (1.2 * totalUnits) / targetSec;
+
+        return Math.max(minWpm, Math.min(maxWpm, Math.round(neededWpm)));
+    }
+
     generateWaveform(timing, frequency = 700.0, riseTime = 0.005) {
         const preSilence = 0.2; // Fixed for demo generation
         const postSilence = 0.55; // Sync with Python data_gen.py

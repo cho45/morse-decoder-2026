@@ -15,7 +15,7 @@ export const KERNEL_SIZE = 31;
 export const N_FFT = 512;
 export const HOP_LENGTH = 160;
 export const F_MIN = 500.0;
-export const DEFAULT_SAMPLE_RATE = 16000;
+export const SAMPLE_RATE = 16000;
 export const LOOKAHEAD_FRAMES = 30;
 export const SUBSAMPLING_RATE = 2;
 
@@ -33,7 +33,7 @@ console.log("Vocabulary initialized:", CHARS.length, "chars");
  * @param {number} sampleRate - Current audio sample rate (default: 16000)
  * @returns {Float32Array} Spectrogram bin [N_BINS]
  */
-export function computeSpecFrame(samples, sampleRate = DEFAULT_SAMPLE_RATE) {
+export function computeSpecFrame(samples, sampleRate = SAMPLE_RATE) {
     const real = new Float32Array(N_FFT);
     const imag = new Float32Array(N_FFT);
 
@@ -63,7 +63,7 @@ export function computeSpecFrame(samples, sampleRate = DEFAULT_SAMPLE_RATE) {
  * @param {number} sampleRate - Current audio sample rate
  * @returns {Float32Array} Flat array of spectrogram frames [T, N_BINS]
  */
-export function computeSpecFrames(waveform, sampleRate = DEFAULT_SAMPLE_RATE) {
+export function computeSpecFrames(waveform, sampleRate = SAMPLE_RATE) {
     const nFrames = Math.floor((waveform.length - N_FFT) / HOP_LENGTH) + 1;
     const specFrames = new Float32Array(nFrames * N_BINS);
     for (let i = 0; i < nFrames; i++) {
@@ -215,8 +215,18 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
  * @returns {Promise<object>} { logits, signal_logits }
  */
 export async function runFullInference(session, specFrames, ort) {
-    const seqLen = specFrames.length / N_BINS;
+    let seqLen = specFrames.length / N_BINS;
     const chunkSize = 40; // Standard chunk size (Sync with Python)
+
+    // Ensure total length is a multiple of 4 for ONNX Runtime streaming compatibility
+    if (seqLen % 4 !== 0) {
+        const paddedLen = Math.ceil(seqLen / 4) * 4;
+        const paddedSpec = new Float32Array(paddedLen * N_BINS);
+        paddedSpec.set(specFrames);
+        specFrames = paddedSpec;
+        seqLen = paddedLen;
+    }
+
     let states = initStates(ort);
 
     const allLogits = [];

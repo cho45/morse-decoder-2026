@@ -13,7 +13,7 @@ from typing import List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model import StreamingConformer
-from data_gen import generate_sample, CWDataset
+from data_gen import generate_sample, CWDataset, MorseGenerator
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
 import config
 
@@ -33,6 +33,7 @@ class PerformanceEvaluator:
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.eval()
+        self.gen = MorseGenerator()
 
     def evaluate_batch(self, texts: List[str], snr_db: float, wpm: int = 20, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
@@ -42,9 +43,20 @@ class PerformanceEvaluator:
             # Generate sample
             freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
             
+            # Adaptive WPM for phrases to fit in 10s
+            # If wpm is explicitly provided (not default 20), use it.
+            # Otherwise estimate the best WPM to fit the text.
+            sample_wpm = wpm
+            if wpm == 20: # Default value
+                sample_wpm = self.gen.estimate_wpm_for_target_frames(
+                    text,
+                    target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
+                    min_wpm=15, max_wpm=45
+                )
+
             # Use data_gen.generate_sample
             waveform, _, _, _ = generate_sample(
-                text=text, wpm=wpm, snr_db=snr_db, frequency=freq,
+                text=text, wpm=sample_wpm, snr_db=snr_db, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
                 qrm_prob=qrm_prob, impulse_prob=impulse_prob
             )
@@ -65,7 +77,7 @@ class PerformanceEvaluator:
                 
                 # Debug display for first few samples
                 if len(cers) <= 2:
-                    print(f"  [Debug] SNR:{snr_db:5.1f}dB | Freq:{freq:5.1f}Hz | Ref:{text:15s} | Hyp:{decoded:15s} | CER:{cer:.4f}")
+                    print(f"  [Debug] SNR:{snr_db:5.1f}dB | WPM:{sample_wpm} | Freq:{freq:5.1f}Hz | Ref:{text:15s} | Hyp:{decoded:15s} | CER:{cer:.4f}")
         return cers
 
 def generate_random_text(length: int = 6) -> str:

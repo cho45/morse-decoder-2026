@@ -591,7 +591,7 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
     return torch.from_numpy(waveform).float(), text, torch.from_numpy(signal_labels).float(), torch.from_numpy(boundary_labels).float()
 
 class CWDataset(Dataset):
-    def __init__(self, num_samples: int = 1000, min_wpm: int = 10, max_wpm: int = 40,
+    def __init__(self, num_samples: int = 1000, min_wpm: int = 15, max_wpm: int = 40,
                  min_snr: float = 5.0, max_snr: float = 25.0,
                  jitter_max: float = 0.1, weight_var: float = 0.2,
                  allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
