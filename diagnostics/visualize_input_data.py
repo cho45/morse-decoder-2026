@@ -62,7 +62,7 @@ def main():
     waveform, _, signal_labels, boundary_labels = generate_sample(
         text=args.text,
         wpm=args.wpm,
-        snr_db=args.snr,
+        snr_2500=args.snr,
         sample_rate=config.SAMPLE_RATE,
         max_duration=10.0 # Allow longer duration for visualization
     )

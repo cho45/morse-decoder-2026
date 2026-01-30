@@ -35,49 +35,55 @@ class PerformanceEvaluator:
         self.model.eval()
         self.gen = MorseGenerator()
 
-    def evaluate_batch(self, texts: List[str], snr_db: float, wpm: int = 20, random_freq: bool = False,
+    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
                        qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
-        cers = []
+        waveforms = []
+        sample_wpms = []
+        freqs = []
+        
+        # 1. Generate all waveforms in CPU loop
         for text in texts:
-            # Generate sample
             freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
-            
-            # Adaptive WPM for phrases to fit in 10s
-            # If wpm is explicitly provided (not default 20), use it.
-            # Otherwise estimate the best WPM to fit the text.
             sample_wpm = wpm
-            if wpm == 20: # Default value
+            if wpm == 20:
                 sample_wpm = self.gen.estimate_wpm_for_target_frames(
                     text,
                     target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
                     min_wpm=15, max_wpm=45
                 )
-
-            # Use data_gen.generate_sample
+            
             waveform, _, _, _ = generate_sample(
-                text=text, wpm=sample_wpm, snr_db=snr_db, frequency=freq,
+                text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
                 qrm_prob=qrm_prob, impulse_prob=impulse_prob
             )
+            waveforms.append(waveform)
+            sample_wpms.append(sample_wpm)
+            freqs.append(freq)
             
-            # Unified Preprocessing
-            mels = preprocess_waveform(waveform, self.device)
+        # 2. Batch Preprocessing and Inference on GPU
+        waveforms_batch = torch.stack(waveforms).to(self.device)
+        mels = preprocess_waveform(waveforms_batch, self.device)
+        
+        with torch.no_grad():
+            (ctc_batch, sig_batch, bound_batch), _ = self.model(mels)
+            # Move results back to CPU for decoding
+            ctc_batch = ctc_batch.cpu()
+            sig_batch = sig_batch.cpu()
+            bound_probs_batch = torch.sigmoid(bound_batch).squeeze(-1).cpu()
             
-            # Inference
-            with torch.no_grad():
-                (ctc, sig, bound), _ = self.model(mels)
-                # Unified Decoding
-                bound_probs = torch.sigmoid(bound[0]).squeeze(-1)
-                decoded, _ = decode_multi_task(ctc[0], sig[0], bound_probs)
+        # 3. Decoding and CER Calculation in CPU loop
+        cers = []
+        for i, text in enumerate(texts):
+            decoded, _ = decode_multi_task(ctc_batch[i], sig_batch[i], bound_probs_batch[i])
+            cer = calculate_cer(text, decoded)
+            cers.append(cer)
+            
+            # Debug display for first few samples
+            if i < 2:
+                print(f"  [Debug] SNR_2500:{snr_2500:5.1f}dB | WPM:{sample_wpms[i]} | Freq:{freqs[i]:5.1f}Hz | Ref:{text:15s} | Hyp:{decoded:15s} | CER:{cer:.4f}")
                 
-                # Unified CER Calculation
-                cer = calculate_cer(text, decoded)
-                cers.append(cer)
-                
-                # Debug display for first few samples
-                if len(cers) <= 2:
-                    print(f"  [Debug] SNR:{snr_db:5.1f}dB | WPM:{sample_wpm} | Freq:{freq:5.1f}Hz | Ref:{text:15s} | Hyp:{decoded:15s} | CER:{cer:.4f}")
         return cers
 
 def generate_random_text(length: int = 6) -> str:
@@ -98,7 +104,7 @@ def main():
 
     evaluator = PerformanceEvaluator(args.checkpoint)
     dataset = CWDataset() # For phrase generation
-    snrs = np.arange(-18, 2, 1) # Extended range to positive SNR
+    snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
     
     random_avg_cers = []
     phrase_avg_cers = []
@@ -130,12 +136,13 @@ def main():
     plt.plot(snrs, random_avg_cers, marker='o', label='Random 6-char (Avg CER)')
     plt.plot(snrs, phrase_avg_cers, marker='s', label='Standard Phrases (Avg CER)')
     
+    plt.axhline(y=0.5, color='yellow', linestyle='-.', alpha=0.5, label='CER 50% (Physical Limit)')
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.5, label='CER 10% (Usable)')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.5, label='CER 5% (Near Perfect)')
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
-    plt.xlabel("SNR (dB)")
+    plt.xlabel("SNR (in 2500Hz BW) [dB]")
     plt.ylabel("Character Error Rate (CER)")
-    plt.title(f"Model Robustness: SNR vs CER\nCheckpoint: {os.path.basename(args.checkpoint)}")
+    plt.title(f"Model Robustness: SNR_2500 vs CER\nCheckpoint: {os.path.basename(args.checkpoint)}")
     plt.legend()
     plt.ylim(-0.05, 1.05)
     plt.gca().invert_yaxis() # Better is up

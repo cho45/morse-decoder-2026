@@ -16,7 +16,7 @@ export const N_FFT = 512;
 export const HOP_LENGTH = 160;
 export const F_MIN = 500.0;
 export const SAMPLE_RATE = 16000;
-export const LOOKAHEAD_FRAMES = 30;
+export const LOOKAHEAD_FRAMES = 10;
 export const SUBSAMPLING_RATE = 2;
 
 // Vocabulary MUST match config.py and model dimensions (63 classes = 62 chars + 1 blank)
@@ -160,7 +160,7 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
     }
     const sessionTime = performance.now() - sessionStart;
 
-    console.log(`ONNX Runtime session.run #${inferenceCount}: ${sessionTime.toFixed(2)}ms`);
+    // console.log(`ONNX Runtime session.run #${inferenceCount}: ${sessionTime.toFixed(2)}ms`);
 
     const numClasses = results.logits.dims[2];
     const actualOutFrames = results.logits.dims[1];
@@ -228,6 +228,12 @@ export async function runFullInference(session, specFrames, ort) {
     }
 
     let states = initStates(ort);
+
+    // [FIX] Initialize PCEN state with the first frame to avoid warmup issues.
+    // Sync with model.py: curr_state = x[:, 0:1, :] if state is None.
+    // In ONNX, we must provide the state, so we manually initialize it here.
+    const firstFrame = specFrames.subarray(0, N_BINS);
+    states.pcen_state = new ort.Tensor('float32', new Float32Array(firstFrame), [1, 1, N_BINS]);
 
     const allLogits = [];
     const allSignalLogits = [];
@@ -352,7 +358,7 @@ export function decodeFull(allLogits, allSignalLogits, numClasses) {
  * @returns {number} CER
  */
 export function calculateCER(ref, hyp) {
-    const PROSIGNS = ["<BT>", "<AR>", "<SK>", "<KA>"];
+    const PROSIGNS = ["<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
     // Prosign mapping to single characters for fair evaluation
     const prosignMapping = {};
     PROSIGNS.forEach((ps, i) => {

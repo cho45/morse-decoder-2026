@@ -228,11 +228,28 @@ export class HFChannelSimulator {
         this.sampleRate = sampleRate;
     }
 
-    applyNoise(waveform, snrDb = 10.0) {
+    applyNoise(waveform, options = 10.0) {
+        let snr_2500;
+        if (typeof options === 'number') {
+            snr_2500 = options;
+        } else {
+            snr_2500 = options.snr_2500 !== undefined ? options.snr_2500 : 10.0;
+        }
+
         // SNR is defined based on the average power of the signal during the MARK (ON) state.
         // For a sine wave with amplitude 1.0, the power is 0.5.
         const markPower = 0.5;
-        const noisePower = markPower / Math.pow(10, snrDb / 10);
+        const SNR_REF_BW = 2500.0;
+
+        // C/N0 (dB-Hz) calculation
+        const cn0_db_hz = snr_2500 + 10 * Math.log10(SNR_REF_BW);
+        
+        // Noise power density N0 (Watts/Hz)
+        const n0 = markPower / Math.pow(10, cn0_db_hz / 10);
+        
+        // Total noise power in the full bandwidth (Fs/2)
+        const noisePower = n0 * (this.sampleRate / 2);
+        
         const sigma = Math.sqrt(noisePower);
         const noise = DSP.generateGaussianNoise(waveform.length, sigma);
 

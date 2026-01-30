@@ -6,7 +6,7 @@ from data_gen import CWDataset, generate_sample
 def test_multiclass_labels():
     text = "K" # -.-
     wpm = 20
-    waveform, label_text, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_db=100)
+    waveform, label_text, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_2500=100)
     
     # 0: Background/Space, 1: Dit, 2: Dah, 3: Inter-word space
     unique_labels = torch.unique(signal_labels).tolist()
@@ -20,7 +20,7 @@ def test_multiclass_labels():
 def test_multiclass_word_space():
     text = "K M"
     wpm = 20
-    waveform, label_text, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_db=100)
+    waveform, label_text, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_2500=100)
     
     unique_labels = torch.unique(signal_labels).tolist()
     print(f"Unique labels in 'K M': {unique_labels}")

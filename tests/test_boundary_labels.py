@@ -12,7 +12,7 @@ class TestBoundaryLabels(unittest.TestCase):
         # 文字終了(信号のONが終了)から 18フレーム後付近にラベルが立つはず
         wpm = 20
         text = "K" # -.-
-        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_db=100)
+        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=wpm, snr_2500=100)
         
         # signal_labels: 0:BG, 1:Dit, 2:Dah, 3:Intra, 4:Inter, 5:Word
         sig = signal_labels.numpy()
@@ -46,7 +46,7 @@ class TestBoundaryLabels(unittest.TestCase):
     def test_no_boundary_in_intra_space(self):
         # 文字内の空白(Intra-char space, クラス3)には Boundary が立たないことを確認
         text = "M" # --
-        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=20, snr_db=100)
+        waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=20, snr_2500=100)
         
         sig = signal_labels.numpy()
         bound = boundary_labels.numpy()

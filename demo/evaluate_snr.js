@@ -6,21 +6,24 @@ import { MorseGenerator, HFChannelSimulator } from './data_gen.js';
 import { runFullInference, decodeFull, calculateCER, computeSpecFrame, computeSpecFrames, N_BINS, N_FFT, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES, SUBSAMPLING_RATE } from './inference.js';
 
 // --- Configuration ---
-const SNR_RANGE = [-18, -16, -14, -12, -10, -8, -6, -4, -2];
-const SAMPLES_PER_SNR = 10;
-const TEST_PHRASES = [
-    "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
-    "CQ CQ CQ DE K7ABC K",
-    "UR RST IS 599 599 BT OP IS JOHN BT QTH IS SEATTLE WA",
-    "PARIS PARIS PARIS",
-    "12345 67890",
-    "KILO CODE EVALUATION",
-    "WEATHER IS FINE",
-    "73 ES GL",
-    "MORSE CODE DECODER TEST",
-    "SOS SOS SOS"
-];
+const SNR_MIN = -20;
+const SNR_MAX = 3;
+const SNR_STEP = 1;
+const SNR_RANGE = [];
+for (let s = SNR_MIN; s <= SNR_MAX; s += SNR_STEP) {
+    SNR_RANGE.push(s);
+}
+const SAMPLES_PER_SNR = 20;
 
+
+function generateRandomText(length = 6) {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let result = "";
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
 
 async function evaluate() {
     const args = process.argv.slice(2);
@@ -33,8 +36,10 @@ async function evaluate() {
     const sim = new HFChannelSimulator(SAMPLE_RATE);
 
     console.log(`Starting SNR evaluation (${SAMPLES_PER_SNR} samples per SNR)...`);
-    console.log(`SNR(dB) | Avg CER | Raw Results`);
+    console.log(`SNR_2500(dB) | Avg CER | Raw Results`);
     console.log(`--------|---------|------------`);
+
+    const mismatches = [];
 
     for (const snr of SNR_RANGE) {
         let totalDistance = 0;
@@ -42,12 +47,24 @@ async function evaluate() {
         const results = [];
 
         for (let i = 0; i < SAMPLES_PER_SNR; i++) {
-            const targetText = TEST_PHRASES[i % TEST_PHRASES.length];
-            // Adaptive WPM for phrases to fit in 10s (1000 frames)
-            const wpm = gen.estimateWpmForTargetFrames(targetText, 1000 * 0.9, 15, 45);
-            const timing = gen.generateTiming(targetText, wpm);
+            const targetText = generateRandomText(6);
+            
+            // Sync WPM estimation with Python visualize_snr_performance_onnx.py
+            const sample_wpm = gen.estimateWpmForTargetFrames(
+                targetText,
+                1000, // target_frames (10s)
+                15, 45 // min_wpm, max_wpm
+            );
+
+            const timing = gen.generateTiming(targetText, sample_wpm);
             const cleanWaveform = gen.generateWaveform(timing);
-            const noisyWaveform = sim.applyNoise(cleanWaveform, snr);
+            
+            // Python's data_gen.py always returns 10 seconds.
+            // Pad JS waveform to match 10 seconds exactly.
+            const targetSamples = 10.0 * SAMPLE_RATE;
+            let fullWaveform = new Float32Array(targetSamples);
+            fullWaveform.set(cleanWaveform.subarray(0, Math.min(cleanWaveform.length, targetSamples)));
+            const noisyWaveform = sim.applyNoise(fullWaveform, { snr_2500: snr });
             const filteredWaveform = sim.applyFilter(noisyWaveform);
 
             // Normalize waveform to peak 1.0 (Sync with data_gen.py generate_sample)
@@ -73,7 +90,8 @@ async function evaluate() {
             const { logits, signal_logits, numClasses } = await runFullInference(session, specFrames, ort);
             
             // Trim back to original length (subsampled)
-            const originalSeqLen = Math.floor((filteredWaveform.length + HOP_LENGTH - 1) / HOP_LENGTH);
+            // Sync with computeSpecFrames: nFrames = Math.floor((waveform.length - N_FFT) / HOP_LENGTH) + 1
+            const originalSeqLen = Math.floor((filteredWaveform.length - N_FFT) / HOP_LENGTH) + 1;
             const originalOutLen = Math.floor((originalSeqLen + SUBSAMPLING_RATE - 1) / SUBSAMPLING_RATE);
 
             const trimmedLogits = logits.slice(0, originalOutLen * numClasses);
@@ -87,15 +105,27 @@ async function evaluate() {
             results.push(cer);
 
             if (cer > 0 && snr >= -4) {
-                console.log(`[SNR ${snr}dB] Mismatch:`);
-                console.log(`  Ref: "${targetText}"`);
-                console.log(`  Hyp: "${decodedText}"`);
-                console.log(`  CER: ${cer.toFixed(4)}`);
+                mismatches.push({
+                    snr,
+                    targetText,
+                    decodedText,
+                    cer
+                });
             }
         }
 
         const avgCer = totalDistance / totalChars;
         console.log(`${snr.toString().padStart(7)} | ${avgCer.toFixed(4)}  | ${results.map(r => r.toFixed(2)).join(' ')}`);
+    }
+
+    if (mismatches.length > 0) {
+        console.log(`\n--- Mismatch Details (SNR >= -4dB) ---`);
+        for (const m of mismatches) {
+            console.log(`[SNR ${m.snr}dB] Mismatch:`);
+            console.log(`  Ref: "${m.targetText}"`);
+            console.log(`  Hyp: "${m.decodedText}"`);
+            console.log(`  CER: ${m.cer.toFixed(4)}`);
+        }
     }
 }
 

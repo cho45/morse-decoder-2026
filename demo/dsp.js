@@ -86,7 +86,8 @@ export class DSP {
     static generateGaussianNoise(length, sigma = 1.0) {
         const noise = new Float32Array(length);
         for (let i = 0; i < length; i += 2) {
-            const u1 = Math.random();
+            // Avoid u1 = 0 to prevent log(0) = -Infinity
+            const u1 = 1.0 - Math.random();
             const u2 = Math.random();
             const mag = sigma * Math.sqrt(-2.0 * Math.log(u1));
             noise[i] = mag * Math.cos(2.0 * Math.PI * u2);

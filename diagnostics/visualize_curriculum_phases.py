@@ -75,8 +75,8 @@ def visualize_phases():
     
     for ax, (idx, p) in zip(axes, phases_to_plot):
         # Apply phase settings to dataset
-        dataset.min_snr = p.min_snr
-        dataset.max_snr = p.max_snr
+        dataset.min_snr_2500 = p.min_snr_2500
+        dataset.max_snr_2500 = p.max_snr_2500
         dataset.jitter_max = p.jitter
         dataset.weight_var = p.weight_var
         dataset.fading_speed_min = p.fading_speed[0]
@@ -94,7 +94,7 @@ def visualize_phases():
         # Generate one sample
         waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[0]
         
-        title = f"Phase {idx}: {p.name} | SNR={p.min_snr:.1f}-{p.max_snr:.1f}\nDrift={p.drift_prob} | AGC={p.agc_prob} | QRM={p.qrm_prob} | Impulse={p.impulse_prob}"
+        title = f"Phase {idx}: {p.name} | SNR_2500={p.min_snr_2500:.1f}-{p.max_snr_2500:.1f}\nDrift={p.drift_prob} | AGC={p.agc_prob} | QRM={p.qrm_prob} | Impulse={p.impulse_prob}"
         _, duration = plot_spectrogram(ax, waveform, title)
         
         # Overlay signal labels (dots/dashes) using colors

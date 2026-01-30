@@ -28,7 +28,7 @@ def test_single_sample_convergence():
     
     # "A" (.-) 1つだけの固定サンプル
     # 収束テストのため、10秒固定ではなく短い時間 (1.0s) で生成する
-    waveform, text, _, _ = generate_sample("A", wpm=20, snr_db=50, max_duration=1.0)
+    waveform, text, _, _ = generate_sample("A", wpm=20, snr_2500=50, max_duration=1.0)
     # Note: generate_sample now accepts max_duration.
     waveforms = waveform.unsqueeze(0).to(trainer.device)
     lengths = torch.tensor([waveform.size(0)]).to(trainer.device)

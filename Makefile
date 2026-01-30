@@ -33,7 +33,7 @@ performance:
 	@echo "Using checkpoint: $(CHECKPOINT)"
 	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance.py --checkpoint $(CHECKPOINT) --samples 50 --output diagnostics/visualize_snr_performance.png
 
-performance_onnx:
+performance_onnx: onnx
 	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_onnx.py \
 		--models demo/cw_decoder.onnx demo/cw_decoder_quantized.onnx \
 		--labels "Demo FP32" "Demo INT8" \
@@ -48,6 +48,9 @@ performance_pt_streaming:
 	@echo "Using checkpoint: $(CHECKPOINT)"
 	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_pt_streaming.py --checkpoint $(CHECKPOINT) --samples 50 --output diagnostics/visualize_snr_performance_pt_streaming.png
 
+analyze-char-errors:
+	$(DOCKER_RUN) python3 -u diagnostics/analyze_char_errors.py
+
 test-js:
 	cd demo && npm test
 
@@ -56,3 +59,10 @@ evaluate-js:
 
 show-curriculum:
 	$(DOCKER_RUN) python3 curriculum.py
+
+update-all-diagnostics:
+	make performance
+	make performance_onnx
+	make performance_pt_streaming
+	make analyze-char-errors
+

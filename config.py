@@ -17,6 +17,12 @@ F_MAX = 900.0       # 抽出する周波数範囲の上限 (Hz)
 N_BINS = 14         # スペクトログラムから抽出するビン数
 MIN_FREQ = 600.0    # 学習データの最小周波数 (Hz)
 MAX_FREQ = 800.0    # 学習データの最大周波数 (Hz)
+SNR_REF_BW = 2500.0 # SNR の基準帯域幅 (Hz)。2500Hz は SSB 帯域相当。
+
+# Evaluation Parameters
+EVAL_SNR_MIN = -18
+EVAL_SNR_MAX = 0
+EVAL_SNR_STEP = 1
 
 # Augmentation Parameters
 QRN_PROB = 0.3          # 雷ノイズ (Static Crashes) の発生確率

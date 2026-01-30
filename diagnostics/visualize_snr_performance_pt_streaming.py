@@ -86,7 +86,7 @@ class PyTorchStreamingEvaluator:
         
         return full_logits, full_signal_logits, full_boundary_logits
 
-    def evaluate_batch(self, texts: List[str], snr_db: float, wpm: int = 20, random_freq: bool = False) -> List[float]:
+    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False) -> List[float]:
         cers = []
         for text in texts:
             freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
@@ -101,7 +101,7 @@ class PyTorchStreamingEvaluator:
                 )
 
             waveform, _, _, _ = generate_sample(
-                text=text, wpm=sample_wpm, snr_db=snr_db, frequency=freq,
+                text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=0.0, min_fading=1.0
             )
             
@@ -123,7 +123,7 @@ def main():
     args = parser.parse_args()
 
     evaluator = PyTorchStreamingEvaluator(args.checkpoint)
-    snrs = np.arange(-18, -2, 1)
+    snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
     
     avg_cers = []
     print(f"Evaluating PyTorch Streaming Performance")
@@ -140,9 +140,9 @@ def main():
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.3, label='CER 10%')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.3, label='CER 5%')
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
-    plt.xlabel("SNR (dB)")
+    plt.xlabel("SNR (in 2500Hz BW) [dB]")
     plt.ylabel("Character Error Rate (CER)")
-    plt.title(f"PyTorch Streaming Model Performance: SNR vs CER")
+    plt.title(f"PyTorch Streaming Model Performance: SNR_2500 vs CER")
     plt.legend()
     plt.ylim(-0.05, 1.05)
     plt.gca().invert_yaxis()

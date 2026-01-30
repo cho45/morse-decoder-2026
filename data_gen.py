@@ -372,13 +372,24 @@ class HFChannelSimulator:
         
         return waveform * fading
 
-    def apply_noise(self, waveform: np.ndarray, snr_db: float = 10.0, impulse_prob: float = 0.0) -> np.ndarray:
+    def apply_noise(self, waveform: np.ndarray, impulse_prob: float = 0.0, snr_2500: float = 10.0) -> np.ndarray:
         """Apply AWGN and impulse noise."""
+
         # AWGN
         # SNR is defined based on the average power of the signal during the MARK (ON) state.
         # For a sine wave with amplitude 1.0, the power is 0.5.
         mark_power = 0.5
-        noise_power = mark_power / (10**(snr_db / 10))
+        
+        # C/N0 (dB-Hz) calculation
+        # SNR_2500 = C/N0 - 10*log10(2500)
+        cn0_db_hz = snr_2500 + 10 * np.log10(config.SNR_REF_BW)
+        
+        # Noise power density N0 (Watts/Hz)
+        n0 = mark_power / (10**(cn0_db_hz / 10))
+        
+        # Total noise power in the full bandwidth (Fs/2)
+        noise_power = n0 * (self.sample_rate / 2)
+        
         noise = np.random.normal(0, np.sqrt(noise_power), len(waveform))
         
         # Impulse noise
@@ -390,8 +401,9 @@ class HFChannelSimulator:
             
         return waveform + noise + impulses
 
-    def apply_qrm(self, waveform: np.ndarray, snr_db: float = 5.0) -> np.ndarray:
+    def apply_qrm(self, waveform: np.ndarray, snr_2500: float = 5.0) -> np.ndarray:
         """Apply interference from another Morse signal."""
+
         # Simplified QRM: just another tone with some offset
         t = np.arange(len(waveform)) / self.sample_rate
         offset = random.uniform(-200, 200)
@@ -405,7 +417,11 @@ class HFChannelSimulator:
         qrm *= qrm_mask
         
         sig_avg_watts = np.mean(waveform**2)
-        qrm_avg_watts = sig_avg_watts / (10 ** (snr_db / 10))
+        # Use same bandwidth normalization as AWGN for QRM
+        cn0_db_hz = snr_2500 + 10 * np.log10(config.SNR_REF_BW)
+        n0 = sig_avg_watts / (10**(cn0_db_hz / 10))
+        qrm_avg_watts = n0 * (self.sample_rate / 2)
+        
         qrm *= np.sqrt(qrm_avg_watts + 1e-12)
         
         return waveform + qrm
@@ -519,7 +535,7 @@ class HFChannelSimulator:
         b, a = scipy.signal.butter(4, cutoff / nyquist, btype='low')
         return scipy.signal.lfilter(b, a, waveform)
 
-def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate: int = config.SAMPLE_RATE,
+def generate_sample(text: str, wpm: int = 20, sample_rate: int = config.SAMPLE_RATE,
                     jitter: float = 0.0, weight: float = 1.0,
                     fading_speed: float = 0.1, min_fading: float = 0.05,
                     frequency: float = 700.0,
@@ -533,7 +549,9 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
                     agc_enabled: bool = False,
                     multipath_delay: float = 0.0,
                     clipping_threshold: float = 1.0,
-                    max_duration: float = 10.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    max_duration: float = 10.0,
+                    snr_2500: float = 10.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+
     gen = MorseGenerator(sample_rate=sample_rate)
     sim = HFChannelSimulator(sample_rate=sample_rate)
     
@@ -549,16 +567,16 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
         waveform = sim.apply_tx_filter(waveform, cutoff=tx_lowpass)
 
     # Only apply channel effects if SNR is below a certain threshold (e.g., 45dB)
-    if snr_db < 45:
+    if snr_2500 < 45:
         # 1. Channel propagation effects
         waveform = sim.apply_fading(waveform, speed_hz=fading_speed, min_fading=min_fading)
         if multipath_delay > 0:
             waveform = sim.apply_multipath(waveform, delay_ms=multipath_delay)
 
         # 2. Add noise and interference (Antenna input)
-        waveform = sim.apply_noise(waveform, snr_db=snr_db, impulse_prob=impulse_prob)
+        waveform = sim.apply_noise(waveform, snr_2500=snr_2500, impulse_prob=impulse_prob)
         if random.random() < qrm_prob:
-            waveform = sim.apply_qrm(waveform, snr_db=snr_db + random.uniform(0, 10))
+            waveform = sim.apply_qrm(waveform, snr_2500=snr_2500 + random.uniform(0, 10))
         if qrn_strength > 0:
             waveform = sim.apply_qrn(waveform, strength=qrn_strength)
         if agc_enabled and random.random() < qrm_prob:
@@ -592,7 +610,7 @@ def generate_sample(text: str, wpm: int = 20, snr_db: float = 10.0, sample_rate:
 
 class CWDataset(Dataset):
     def __init__(self, num_samples: int = 1000, min_wpm: int = 15, max_wpm: int = 40,
-                 min_snr: float = 5.0, max_snr: float = 25.0,
+                 min_snr_2500: float = 10.0, max_snr_2500: float = 30.0,
                  jitter_max: float = 0.1, weight_var: float = 0.2,
                  allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
                  focus_chars: str = None, focus_prob: float = 0.5,
@@ -611,11 +629,12 @@ class CWDataset(Dataset):
                  agc_prob: float = 0.0,
                  multipath_prob: float = 0.0,
                  clipping_prob: float = 0.0):
+
         self.num_samples = num_samples
         self.min_wpm = min_wpm
         self.max_wpm = max_wpm
-        self.min_snr = min_snr
-        self.max_snr = max_snr
+        self.min_snr_2500 = min_snr_2500
+        self.max_snr_2500 = max_snr_2500
         self.jitter_max = jitter_max
         self.weight_var = weight_var
         self.min_len = min_len
@@ -760,7 +779,7 @@ class CWDataset(Dataset):
                 if sum(t[1] for t in timing) < max_duration - 0.2:
                     break
                 # else retry
-        snr = random.uniform(self.min_snr, self.max_snr)
+        snr = random.uniform(self.min_snr_2500, self.max_snr_2500)
         
         # Determine jitter and weight based on curriculum settings
         jitter = random.uniform(0, self.jitter_max)
@@ -802,7 +821,7 @@ class CWDataset(Dataset):
             clipping_threshold = random.uniform(0.3, 0.8)
 
         waveform, label, signal_labels, boundary_labels = generate_sample(
-            text, wpm=wpm, snr_db=snr, jitter=jitter, weight=weight,
+            text, wpm=wpm, snr_2500=snr, jitter=jitter, weight=weight,
             fading_speed=fading_speed, min_fading=self.min_fading,
             frequency=frequency,
             tx_lowpass=tx_lowpass,
@@ -824,7 +843,7 @@ if __name__ == "__main__":
     sample_rate = config.SAMPLE_RATE
     print(f"Generating sample: {sample_text}")
     
-    waveform, label, signal_labels = generate_sample(sample_text, wpm=25, snr_db=15, sample_rate=sample_rate)
+    waveform, label, signal_labels, _ = generate_sample(sample_text, wpm=25, snr_2500=20, sample_rate=sample_rate)
     
     output_file = "sample_cw.wav"
     # Convert back to numpy for scipy saving

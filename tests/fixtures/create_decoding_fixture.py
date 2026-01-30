@@ -44,7 +44,7 @@ def create_fixture():
         # EXACTLY as in visualize_snr_performance.py evaluate_batch
         freq = 700.0
         waveform, _, _, _ = generate_sample(
-            text=case['text'], wpm=case['wpm'], snr_db=case['snr'], frequency=freq,
+            text=case['text'], wpm=case['wpm'], snr_2500=case['snr'], frequency=freq,
             jitter=0.0, weight=1.0, fading_speed=0.0, min_fading=1.0,
             qrm_prob=0.1, impulse_prob=0.001
         )

@@ -75,6 +75,11 @@ class ONNXPerformanceEvaluator:
         
         states = self.init_states(batch_size, n_bins)
         
+        # [FIX] Initialize PCEN state with the first frame to avoid warmup issues.
+        # Sync with demo/inference.js runFullInference
+        if seq_len > 0:
+            states['pcen_state'] = mels[:, 0:1, :n_bins].numpy().copy()
+
         all_logits = []
         all_signal_logits = []
         all_boundary_logits = []
@@ -137,7 +142,7 @@ class ONNXPerformanceEvaluator:
         
         return torch.from_numpy(full_logits), torch.from_numpy(full_signal_logits), torch.from_numpy(full_boundary_logits)
 
-    def evaluate_batch(self, texts: List[str], snr_db: float, wpm: int = 20, random_freq: bool = False,
+    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
                        qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
         cers = []
@@ -154,7 +159,7 @@ class ONNXPerformanceEvaluator:
                 )
 
             waveform, _, _, _ = generate_sample(
-                text=text, wpm=sample_wpm, snr_db=snr_db, frequency=freq,
+                text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
                 qrm_prob=qrm_prob, impulse_prob=impulse_prob
             )
@@ -188,7 +193,7 @@ def main():
         return
 
     labels = args.labels if args.labels else [os.path.basename(m) for m in args.models]
-    snrs = np.arange(-18, 2, 1)
+    snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
 
     
     plt.figure(figsize=(12, 8))
@@ -219,9 +224,9 @@ def main():
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.3, label='CER 10%')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.3, label='CER 5%')
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
-    plt.xlabel("SNR (dB)")
+    plt.xlabel("SNR (in 2500Hz BW) [dB]")
     plt.ylabel("Character Error Rate (CER)")
-    plt.title(f"ONNX Model Comparison: SNR vs CER (Lower is better)")
+    plt.title(f"ONNX Model Comparison: SNR_2500 vs CER (Lower is better)")
     plt.legend()
     plt.ylim(-0.05, 1.05)
     plt.gca().invert_yaxis()

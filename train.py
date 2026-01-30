@@ -336,8 +336,8 @@ class Trainer:
         
         # Apply curriculum to train dataset
         self.train_dataset.chars = p.chars
-        self.train_dataset.min_snr = p.min_snr
-        self.train_dataset.max_snr = p.max_snr
+        self.train_dataset.min_snr_2500 = p.min_snr_2500
+        self.train_dataset.max_snr_2500 = p.max_snr_2500
         self.train_dataset.min_wpm = p.min_wpm
         self.train_dataset.max_wpm = p.max_wpm
         self.train_dataset.jitter_max = p.jitter
@@ -365,15 +365,15 @@ class Trainer:
 
         print(f"Epoch {epoch} | Phase {self.current_phase} ({p.name})")
         print(f"  Chars: {p.chars} | Focus: {self.train_dataset.focus_chars}")
-        print(f"  Env: SNR={p.min_snr}-{p.max_snr}dB, WPM={p.min_wpm}-{p.max_wpm}, Jitter={p.jitter}, WeightVar={p.weight_var}, Gain={p.min_gain_db}dB")
+        print(f"  Env: SNR_2500={p.min_snr_2500:.1f}-{p.max_snr_2500:.1f}dB, WPM={p.min_wpm}-{p.max_wpm}, Jitter={p.jitter}, WeightVar={p.weight_var}, Gain={p.min_gain_db}dB")
         print(f"  Aug: Fading={p.min_fading} (spd {p.fading_speed}), Drift={p.drift_prob}, QRN={p.qrn_prob}, AGC={p.agc_prob}, Multipath={p.multipath_prob}, Clipping={p.clipping_prob}")
         print(f"  Prob: Phrase={p.phrase_prob}, Focus={p.focus_prob} | Penalty: {p.penalty_weight}")
 
         # Apply same curriculum to validation dataset
         self.val_dataset.min_wpm = self.train_dataset.min_wpm
         self.val_dataset.max_wpm = self.train_dataset.max_wpm
-        self.val_dataset.min_snr = self.train_dataset.min_snr
-        self.val_dataset.max_snr = self.train_dataset.max_snr
+        self.val_dataset.min_snr_2500 = self.train_dataset.min_snr_2500
+        self.val_dataset.max_snr_2500 = self.train_dataset.max_snr_2500
         self.val_dataset.jitter_max = self.train_dataset.jitter_max
         self.val_dataset.weight_var = self.train_dataset.weight_var
         self.val_dataset.fading_speed_min = self.train_dataset.fading_speed_min
@@ -421,16 +421,13 @@ class Trainer:
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = lr
 
-            self.optimizer.zero_grad()
+            # 勾配累積の処理
             mels, input_lengths = self.compute_mels_and_lengths(waveforms, lengths)
             targets = targets.to(self.device)
             target_lengths = target_lengths.to(self.device)
             
             # Forward
-            # logits: (B, T, C)
             (logits, signal_logits, boundary_logits), _ = self.model(mels)
-            
-            # Ensure input_lengths does not exceed logits size
             input_lengths = torch.clamp(input_lengths, max=logits.size(1))
             
             loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
@@ -439,14 +436,20 @@ class Trainer:
                 print(f"Warning: Loss is {loss}, skipping batch")
                 continue
                 
+            # 累積ステップ数で正規化
+            loss = loss / self.args.accumulation_steps
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-            self.optimizer.step()
             
-            total_loss_accum += loss.item()
+            # 指定ステップごとに更新
+            if (batch_idx + 1) % self.args.accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+            
+            total_loss_accum += loss.item() * self.args.accumulation_steps
             
             if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item():.4f} (CTC: {loss_dict['ctc'].item():.4f}, Sig: {loss_dict['sig'].item():.4f}, Bnd: {loss_dict['bound'].item():.4f}, Pnlty: {loss_dict['penalty'].item():.4f}) | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+                print(f"Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * self.args.accumulation_steps:.4f} (CTC: {loss_dict['ctc'].item():.4f}, Sig: {loss_dict['sig'].item():.4f}, Bnd: {loss_dict['bound'].item():.4f}, Pnlty: {loss_dict['penalty'].item():.4f}) | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
                 
                 # Debug lengths and logits
                 with torch.no_grad():
@@ -634,6 +637,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4) # Fine-tuning LR
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=5.0)
+    parser.add_argument("--accumulation-steps", type=int, default=1, help="Number of steps to accumulate gradients before update")
     parser.add_argument("--d-model", type=int, default=config.D_MODEL)
     parser.add_argument("--n-head", type=int, default=config.N_HEAD)
     parser.add_argument("--num-layers", type=int, default=config.NUM_LAYERS)
@@ -647,6 +651,11 @@ def main():
     args = parser.parse_args()
     
     trainer = Trainer(args)
+
+    # 勾配累積がサンプル数と整合しているかチェック (数学的厳密性の確保)
+    if args.samples_per_epoch % (args.batch_size * args.accumulation_steps) != 0:
+        raise ValueError(f"samples_per_epoch ({args.samples_per_epoch}) must be divisible by "
+                         f"batch_size * accumulation_steps ({args.batch_size * args.accumulation_steps})")
     
     start_epoch = 1
     resume_path = args.resume

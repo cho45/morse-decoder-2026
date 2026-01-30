@@ -6,7 +6,7 @@ import config
 
 def test_generate_sample_with_signal_labels():
     text = "K" # -.-
-    waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=20, snr_db=100)
+    waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=20, snr_2500=100)
     
     assert isinstance(waveform, torch.Tensor)
     assert label == text
@@ -38,7 +38,7 @@ def test_dataset_returns_signal_labels():
 def test_signal_labels_alignment():
     # Very simple case: long dash
     text = "T" # -
-    waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=10, snr_db=100)
+    waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=10, snr_2500=100)
     
     # Check if we have 2s (Dah) in the signal_labels for 'T'
     assert torch.any(signal_labels == 2)

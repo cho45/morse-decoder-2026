@@ -84,7 +84,7 @@ def investigate_gain(checkpoint_path):
         
         # Generate clean sample first, then apply gain
         waveform, label, signal_labels, boundary_labels = generate_sample(
-            test_text, wpm=20, snr_db=100, frequency=700.0
+            test_text, wpm=20, snr_2500=100, frequency=700.0
         )
         
         # Apply gain

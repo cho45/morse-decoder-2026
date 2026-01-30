@@ -56,7 +56,7 @@ def test_hf_simulator():
     assert faded.shape == waveform.shape
     assert not np.array_equal(faded, waveform)
     
-    noised = sim.apply_noise(waveform, snr_db=10)
+    noised = sim.apply_noise(waveform, snr_2500=10)
     assert noised.shape == waveform.shape
     
     qrm = sim.apply_qrm(waveform)
@@ -66,7 +66,7 @@ def test_hf_simulator():
     assert filtered.shape == waveform.shape
 
 def test_generate_sample():
-    waveform, label, signal_labels, boundary_labels = generate_sample("TEST", wpm=20, snr_db=20)
+    waveform, label, signal_labels, boundary_labels = generate_sample("TEST", wpm=20, snr_2500=20)
     assert isinstance(waveform, torch.Tensor)
     assert isinstance(label, str)
     assert isinstance(signal_labels, torch.Tensor)

@@ -6,13 +6,13 @@ from data_gen import generate_sample, CWDataset
 
 def test_generate_sample_gain_db():
     # min_gain_db=0.0 (default) should always have max amplitude 1.0
-    waveform, _, _, _ = generate_sample("TEST", min_gain_db=0.0, snr_db=100)
+    waveform, _, _, _ = generate_sample("TEST", min_gain_db=0.0, snr_2500=100)
     assert np.max(np.abs(waveform.numpy())) == pytest.approx(1.0)
 
     # min_gain_db=-40.0 should have varying max amplitudes in log scale
     max_amps = []
     for _ in range(50):
-        waveform, _, _, _ = generate_sample("TEST", min_gain_db=-40.0, snr_db=100)
+        waveform, _, _, _ = generate_sample("TEST", min_gain_db=-40.0, snr_2500=100)
         max_amps.append(np.max(np.abs(waveform.numpy())))
     
     max_amps = np.array(max_amps)
@@ -28,7 +28,7 @@ def test_generate_sample_gain_db():
 
 def test_cw_dataset_gain_db():
     # Test if CWDataset passes min_gain_db to generate_sample
-    dataset = CWDataset(num_samples=20, min_gain_db=-20.0, min_snr=100, max_snr=100)
+    dataset = CWDataset(num_samples=20, min_gain_db=-20.0, min_snr_2500=100, max_snr_2500=100)
     max_amps = []
     for i in range(len(dataset)):
         waveform, _, _, _, _, _ = dataset[i]

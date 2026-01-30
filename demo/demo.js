@@ -23,6 +23,7 @@ let gainNode = null;
 let masterGainNode = null;
 let noiseNode = null;
 let filterNode = null;
+let outputFilterNode = null;
 let session = null;
 let isRunning = false;
 let streamInference = null; // StreamInference instance
@@ -359,15 +360,22 @@ async function playMorse(text, signal) {
     }
 }
 
-function createWhiteNoise(durationSeconds, snr) {
+function createWhiteNoise(durationSeconds, snr_2500) {
     const bufferSize = audioContext.sampleRate * durationSeconds;
     const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
     const data = buffer.getChannelData(0);
 
-    // Match data_gen.py: SNR is based on the average power of the signal during the MARK (ON) state.
-    // For a sine wave with amplitude 1.0, the power is 0.5.
+    // Match data_gen.js / data_gen.py:
+    // SNR_2500 is defined relative to 2500Hz bandwidth.
+    // C/N0 = SNR_2500 + 10 * log10(2500)
+    const cn0 = snr_2500 + 10 * Math.log10(2500);
+
+    // For a sine wave with amplitude 1.0, the power (C) is 0.5.
     const sigMarkWatts = 0.5;
-    const noiseAvgWatts = sigMarkWatts / Math.pow(10, snr / 10);
+    // N0 = C / 10^(cn0/10)
+    const n0 = sigMarkWatts / Math.pow(10, cn0 / 10);
+    // Total noise power in Nyquist bandwidth (Fs/2)
+    const noiseAvgWatts = n0 * (audioContext.sampleRate / 2);
     const sigma = Math.sqrt(noiseAvgWatts);
 
     // Box-Muller transform for Gaussian noise
@@ -455,14 +463,21 @@ startBtn.onclick = async () => {
     masterGainNode.gain.setValueAtTime(parseFloat(volumeSlider.value), audioContext.currentTime);
     
     // 3. Noise (White noise)
-    noiseNode = createWhiteNoise(10, parseInt(snrSlider.value));
+    noiseNode = createWhiteNoise(10, parseInt(snrSlider.value)); // snrSlider.value is SNR_2500
     
-    // 4. Bandpass Filter (Radio-like CW filter)
+    // 4. Bandpass Filter (Radio-like CW filter, 500Hz bandwidth for inference)
     filterNode = audioContext.createBiquadFilter();
     filterNode.type = 'bandpass';
     filterNode.frequency.setValueAtTime(freq, audioContext.currentTime);
     // Q factor for ~500Hz bandwidth at 700Hz: Q = center_freq / bandwidth
     filterNode.Q.setValueAtTime(freq / 500, audioContext.currentTime);
+
+    // 4.5 Output Filter (300Hz bandwidth for human hearing)
+    outputFilterNode = audioContext.createBiquadFilter();
+    outputFilterNode.type = 'bandpass';
+    outputFilterNode.frequency.setValueAtTime(freq, audioContext.currentTime);
+    // Q factor for ~300Hz bandwidth at 700Hz: Q = center_freq / bandwidth
+    outputFilterNode.Q.setValueAtTime(freq / 300, audioContext.currentTime);
 
     // Connect Sender: Osc -> Gain -> Filter
     oscillator.connect(gainNode);
@@ -473,9 +488,11 @@ startBtn.onclick = async () => {
     // Filter output goes to Master Gain
     filterNode.connect(masterGainNode);
 
-    // Master Gain output goes to both Receiver (for inference) and Destination (for hearing)
+    // Master Gain output goes to Receiver (for inference) and Output Filter (for hearing)
     masterGainNode.connect(morseNode);
-    masterGainNode.connect(audioContext.destination);
+    masterGainNode.connect(outputFilterNode);
+    // Output Filter goes to audio destination (human hearing)
+    outputFilterNode.connect(audioContext.destination);
 
     oscillator.start();
     noiseNode.start();
@@ -513,6 +530,10 @@ stopBtn.onclick = () => {
     if (filterNode) {
         filterNode.disconnect();
         filterNode = null;
+    }
+    if (outputFilterNode) {
+        outputFilterNode.disconnect();
+        outputFilterNode = null;
     }
     if (morseNode) {
         morseNode.disconnect();
