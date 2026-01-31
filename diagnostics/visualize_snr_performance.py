@@ -21,7 +21,7 @@ class PerformanceEvaluator:
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         print(f"Loading checkpoint from {checkpoint_path} on {self.device}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.model = StreamingConformer(
             n_mels=config.N_BINS,

@@ -41,6 +41,10 @@ async function evaluate() {
 
     const mismatches = [];
 
+    // Inference timing statistics
+    let totalInferenceMs = 0;
+    let totalInferenceFrames = 0;
+
     for (const snr of SNR_RANGE) {
         let totalDistance = 0;
         let totalChars = 0;
@@ -87,7 +91,11 @@ async function evaluate() {
             const specFrames = computeSpecFrames(paddedWaveform);
 
             // Inference (Chunked mode matching Python)
+            const inferenceStart = performance.now();
             const { logits, signal_logits, numClasses } = await runFullInference(session, specFrames, ort);
+            const inferenceMs = performance.now() - inferenceStart;
+            totalInferenceMs += inferenceMs;
+            totalInferenceFrames += specFrames.length;
             
             // Trim back to original length (subsampled)
             // Sync with computeSpecFrames: nFrames = Math.floor((waveform.length - N_FFT) / HOP_LENGTH) + 1
@@ -127,6 +135,13 @@ async function evaluate() {
             console.log(`  CER: ${m.cer.toFixed(4)}`);
         }
     }
+
+    // Inference timing statistics
+    console.log(`\n--- Inference Timing Statistics ---`);
+    console.log(`Total frames:     ${totalInferenceFrames}`);
+    console.log(`Total time:       ${totalInferenceMs.toFixed(2)} ms`);
+    console.log(`Time per frame:   ${(totalInferenceMs / totalInferenceFrames).toFixed(4)} ms`);
+    console.log(`Throughput:       ${(totalInferenceFrames / totalInferenceMs * 1000).toFixed(2)} frames/sec`);
 }
 
 evaluate().catch(err => {

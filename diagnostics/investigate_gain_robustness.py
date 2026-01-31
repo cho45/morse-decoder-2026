@@ -23,7 +23,7 @@ def investigate_gain(checkpoint_path):
         return
 
     print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model = StreamingConformer().to(device)
     
     # Handle size mismatch due to new PCEN parameters

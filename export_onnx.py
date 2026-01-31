@@ -54,7 +54,8 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     # Checkpoint があれば読み込む（なければランダム初期値でエクスポート）
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # PyTorch 2.6+ compatibility: weights_only=False to allow loading arbitrary globals like argparse.Namespace
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
         if checkpoint_path:
@@ -112,6 +113,9 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
 
     print(f"Exporting to {output_path}...")
 
+    # [IMPORTANT] Explicitly disable dynamo exporter to use the legacy TorchScript-based one.
+    # This is necessary because the new Dynamo exporter has different requirements for dynamic shapes
+    # and argument structures that are currently incompatible with our dynamic_axes configuration.
     torch.onnx.export(
         wrapper,
         (x, pcen_state, sub_cache, *layer_states_flat),
@@ -121,7 +125,8 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
         dynamic_axes=dynamic_axes,
         opset_version=17, # Using a recent opset
         do_constant_folding=True,
-        training=torch.onnx.TrainingMode.EVAL
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=False
     )
     print("Export complete.")
 

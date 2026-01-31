@@ -1,10 +1,12 @@
 numpy
 scipy
 onnx
-onnxruntime
+onnxruntime-gpu
+onnxscript
 pyaudio
 pytest
 matplotlib
 seaborn
 pandas
 scikit-learn
+tqdm

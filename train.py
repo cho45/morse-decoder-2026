@@ -685,7 +685,7 @@ def main():
     if resume_path:
         if os.path.isfile(resume_path):
             print(f"Loading checkpoint '{resume_path}'")
-            checkpoint = torch.load(resume_path, map_location=trainer.device)
+            checkpoint = torch.load(resume_path, map_location=trainer.device, weights_only=False)
             start_epoch = checkpoint['epoch'] + 1
             
             # Load curriculum state

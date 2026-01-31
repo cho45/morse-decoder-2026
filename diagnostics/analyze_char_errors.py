@@ -143,7 +143,7 @@ def analyze_char_errors(checkpoint_path, num_samples=500, batch_size=16, output_
     trainer = Trainer(args)
     
     print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     trainer.model.load_state_dict(checkpoint['model_state_dict'])
     trainer.model.eval()
     

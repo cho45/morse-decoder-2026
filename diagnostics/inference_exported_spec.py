@@ -41,7 +41,7 @@ def run_inference(json_path, checkpoint_path, device="cpu"):
     spec_tensor = torch.from_numpy(spec_data).to(device) # (T, 14)
     
     # 2. Load Model from Checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model = StreamingConformer(
         n_mels=config.N_BINS,
         num_classes=config.NUM_CLASSES,

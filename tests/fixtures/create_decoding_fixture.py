@@ -19,7 +19,7 @@ def create_fixture():
         checkpoint_path = os.path.join("checkpoints", checkpoints[0])
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     model = StreamingConformer(
         n_mels=config.N_BINS,

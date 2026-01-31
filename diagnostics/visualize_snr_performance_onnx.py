@@ -8,6 +8,9 @@ import sys
 import random
 import string
 import onnxruntime as ort
+import concurrent.futures
+import multiprocessing
+import signal
 from tqdm import tqdm
 from typing import List, Tuple, Dict
 
@@ -22,11 +25,52 @@ def generate_random_text(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
     return "".join(random.choices(chars, k=length)) + " "
 
+def worker_init():
+    """Initialize worker process."""
+    # Prevent workers from using multiple threads for torch operations
+    # which can cause contention with the parent process and other workers.
+    torch.set_num_threads(1)
+
+def generate_sample_wrapper(args):
+    """Wrapper for parallel generation."""
+    text, snr_2500, wpm, random_freq, fading_speed, min_fading, qrm_prob, impulse_prob = args
+    
+    freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
+    
+    # Adaptive WPM logic
+    sample_wpm = wpm
+    if wpm == 20:
+        # We need a temporary generator for estimation
+        gen = MorseGenerator()
+        sample_wpm = gen.estimate_wpm_for_target_frames(
+            text,
+            target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
+            min_wpm=15, max_wpm=45
+        )
+
+    waveform, _, _, _ = generate_sample(
+        text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
+        jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
+        qrm_prob=qrm_prob, impulse_prob=impulse_prob
+    )
+    
+    return waveform.numpy(), text
+
 class ONNXPerformanceEvaluator:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, executor: concurrent.futures.ProcessPoolExecutor):
         print(f"Loading ONNX model from {model_path}")
-        # Use CPU provider for maximum compatibility
-        self.session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+        # Dynamic quantization (INT8) often hangs or is unsupported on CUDAExecutionProvider.
+        # Use CPU for quantized models, and CUDA for others if available.
+        is_quantized = "quantized" in model_path.lower()
+        
+        available_providers = ort.get_available_providers()
+        providers = []
+        if not is_quantized and 'CUDAExecutionProvider' in available_providers:
+            providers.append('CUDAExecutionProvider')
+        providers.append('CPUExecutionProvider')
+        
+        print(f"Model: {os.path.basename(model_path)} | Quantized: {is_quantized} | Providers: {providers}")
+        self.session = ort.InferenceSession(model_path, providers=providers)
         
         # Determine number of layers from inputs
         self.num_layers = 0
@@ -44,6 +88,7 @@ class ONNXPerformanceEvaluator:
         self.f_bin_start = int(round(config.F_MIN * config.N_FFT / config.SAMPLE_RATE))
         self.f_bin_end = self.f_bin_start + config.N_BINS
         self.gen = MorseGenerator()
+        self.executor = executor
 
     def preprocess(self, waveform: torch.Tensor) -> torch.Tensor:
         """Standardized preprocessing matching inference_utils.py."""
@@ -145,37 +190,58 @@ class ONNXPerformanceEvaluator:
     def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
                        qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
-        cers = []
-        for text in texts:
-            freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
+        
+        args_list = [
+            (text, snr_2500, wpm, random_freq, fading_speed, min_fading, qrm_prob, impulse_prob)
+            for text in texts
+        ]
+        
+        # Parallel generation using persistent executor
+        results = list(self.executor.map(generate_sample_wrapper, args_list))
             
-            # Adaptive WPM for phrases to fit in 10s
-            sample_wpm = wpm
-            if wpm == 20:
-                sample_wpm = self.gen.estimate_wpm_for_target_frames(
-                    text,
-                    target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
-                    min_wpm=15, max_wpm=45
-                )
+        waveforms = []
+        target_texts = []
+        for wf, txt in results:
+            waveforms.append(torch.from_numpy(wf))
+            target_texts.append(txt)
+            
+        # Stack into batch
+        batch_waveform = torch.stack(waveforms)
+        
+        # Preprocess batch
+        mels = self.preprocess(batch_waveform)
+        
+        # Run inference on batch
+        # If the batch is very large, you might want to split it here,
+        # but for 30-100 samples, a single batch is usually faster on GPU.
+        logits, signal_logits, boundary_logits = self.run_inference(mels)
+        
+        # Move to CPU for decoding logic which is non-vectorized anyway
+        logits = logits.cpu()
+        signal_logits = signal_logits.cpu()
+        boundary_logits = boundary_logits.cpu()
 
-            waveform, _, _, _ = generate_sample(
-                text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
-                jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
-                qrm_prob=qrm_prob, impulse_prob=impulse_prob
-            )
-            
-            mels = self.preprocess(waveform)
-            logits, signal_logits, boundary_logits = self.run_inference(mels)
-            
+        # Decode and calculate CER
+        cers = []
+        bound_probs_batch = torch.sigmoid(boundary_logits).squeeze(-1)
+        
+        # CER calculation is CPU bound and string-heavy, so we just loop
+        for i in range(len(texts)):
             # Unified Decoding
-            bound_probs = torch.sigmoid(boundary_logits[0]).squeeze(-1)
-            decoded, _ = decode_multi_task(logits[0], signal_logits[0], bound_probs)
-            
-            cer = calculate_cer(text, decoded)
+            decoded, _ = decode_multi_task(logits[i], signal_logits[i], bound_probs_batch[i])
+            cer = calculate_cer(target_texts[i], decoded)
             cers.append(cer)
+            
         return cers
 
 def main():
+    # Use 'spawn' instead of 'fork' to avoid deadlocks with torch/CUDA in subprocesses.
+    # This must be called before any multiprocessing-related code.
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", type=str, nargs='+', required=True, help="List of ONNX model paths")
     parser.add_argument("--labels", type=str, nargs='+', help="Labels for the models in the plot")
@@ -198,28 +264,43 @@ def main():
     
     plt.figure(figsize=(12, 8))
     
-    for model_path, label in zip(args.models, labels):
-        if not os.path.exists(model_path):
-            print(f"Warning: Model not found at {model_path}. Skipping.")
-            continue
-            
-        evaluator = ONNXPerformanceEvaluator(model_path)
+    # Create a single executor for the entire run
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=multiprocessing.cpu_count(),
+        initializer=worker_init
+    ) as executor:
         
-        avg_cers = []
-        print(f"Evaluating model: {label}")
+        # Setup signal handler for clean exit
+        def signal_handler(sig, frame):
+            print("\nInterrupt received, shutting down...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            sys.exit(0)
         
-        for snr in tqdm(snrs):
-            texts = [generate_random_text(6) for _ in range(args.samples)]
-            cers = evaluator.evaluate_batch(
-                texts, snr, random_freq=args.random_freq,
-                fading_speed=args.fading_speed, min_fading=args.min_fading,
-                qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
-            )
-            avg_cer = np.mean(cers)
-            avg_cers.append(avg_cer)
-            print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
-        plt.plot(snrs, avg_cers, marker='o', label=f'{label} (Avg CER)')
+        for model_path, label in zip(args.models, labels):
+            if not os.path.exists(model_path):
+                print(f"Warning: Model not found at {model_path}. Skipping.")
+                continue
+                
+            evaluator = ONNXPerformanceEvaluator(model_path, executor)
+            
+            avg_cers = []
+            print(f"Evaluating model: {label}")
+            
+            for snr in tqdm(snrs):
+                texts = [generate_random_text(6) for _ in range(args.samples)]
+                cers = evaluator.evaluate_batch(
+                    texts, snr, random_freq=args.random_freq,
+                    fading_speed=args.fading_speed, min_fading=args.min_fading,
+                    qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
+                )
+                avg_cer = np.mean(cers)
+                avg_cers.append(avg_cer)
+                print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
+
+            plt.plot(snrs, avg_cers, marker='o', label=f'{label} (Avg CER)')
 
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.3, label='CER 10%')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.3, label='CER 5%')

@@ -1,5 +1,5 @@
 # Use official PyTorch image which has torchaudio pre-installed
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 
 # Set working directory
 WORKDIR /workspace
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Default command
 CMD ["bash"]

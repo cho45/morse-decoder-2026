@@ -50,7 +50,7 @@ class StreamDecoder:
         self.device = torch.device(device)
         
         # Load checkpoint to get args
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         train_args = checkpoint['args']
         
         self.model = StreamingConformer(

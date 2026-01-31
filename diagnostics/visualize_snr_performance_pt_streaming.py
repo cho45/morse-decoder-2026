@@ -7,6 +7,8 @@ import os
 import sys
 import random
 import string
+import concurrent.futures
+import multiprocessing
 from tqdm import tqdm
 from typing import List, Tuple, Dict
 
@@ -19,11 +21,26 @@ import config
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
 from diagnostics.visualize_snr_performance import generate_random_text
 
+# Global evaluator for worker processes
+_evaluator = None
+
+
+def init_worker(checkpoint_path: str, device: str = "cpu"):
+    """Initialize evaluator in each worker process."""
+    global _evaluator
+    _evaluator = PyTorchStreamingEvaluator(checkpoint_path, device)
+
+
+def process_single_sample(args) -> float:
+    """Process a single sample in worker process."""
+    text, snr_2500, wpm, random_freq = args
+    return _evaluator.evaluate_single(text, snr_2500, wpm, random_freq)
+
 class PyTorchStreamingEvaluator:
     def __init__(self, checkpoint_path: str, device: str = "cpu"):
+        self.checkpoint_path = checkpoint_path
         self.device = torch.device(device)
-        print(f"Loading checkpoint from {checkpoint_path} on {self.device}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.model = StreamingConformer(
             n_mels=config.N_BINS,
@@ -86,33 +103,30 @@ class PyTorchStreamingEvaluator:
         
         return full_logits, full_signal_logits, full_boundary_logits
 
-    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False) -> List[float]:
-        cers = []
-        for text in texts:
-            freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
-            
-            # Adaptive WPM for phrases to fit in 10s
-            sample_wpm = wpm
-            if wpm == 20:
-                sample_wpm = self.gen.estimate_wpm_for_target_frames(
-                    text,
-                    target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
-                    min_wpm=15, max_wpm=45
-                )
+    def evaluate_single(self, text: str, snr_2500: float, wpm: int = 20, random_freq: bool = False) -> float:
+        """Evaluate a single sample and return CER."""
+        freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
 
-            waveform, _, _, _ = generate_sample(
-                text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
-                jitter=0.0, weight=1.0, fading_speed=0.0, min_fading=1.0
+        # Adaptive WPM for phrases to fit in 10s
+        sample_wpm = wpm
+        if wpm == 20:
+            sample_wpm = self.gen.estimate_wpm_for_target_frames(
+                text,
+                target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
+                min_wpm=15, max_wpm=45
             )
-            
-            mels = preprocess_waveform(waveform, self.device)
-            logits, signal_logits, boundary_logits = self.run_inference_streaming(mels)
-            
-            bound_probs = torch.sigmoid(boundary_logits[0]).squeeze(-1)
-            decoded, _ = decode_multi_task(logits[0], signal_logits[0], bound_probs)
-            cer = calculate_cer(text, decoded)
-            cers.append(cer)
-        return cers
+
+        waveform, _, _, _ = generate_sample(
+            text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
+            jitter=0.0, weight=1.0, fading_speed=0.0, min_fading=1.0
+        )
+
+        mels = preprocess_waveform(waveform, self.device)
+        logits, signal_logits, boundary_logits = self.run_inference_streaming(mels)
+
+        bound_probs = torch.sigmoid(boundary_logits[0]).squeeze(-1)
+        decoded, _ = decode_multi_task(logits[0], signal_logits[0], bound_probs)
+        return calculate_cer(text, decoded)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -120,20 +134,42 @@ def main():
     parser.add_argument("--samples", type=int, default=30, help="Samples per SNR point")
     parser.add_argument("--output", type=str, default="diagnostics/visualize_snr_performance_pt_streaming.png")
     parser.add_argument("--random-freq", action="store_true", help="Enable frequency randomization")
+    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (default: CPU count)")
     args = parser.parse_args()
 
-    evaluator = PyTorchStreamingEvaluator(args.checkpoint)
     snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
-    
+
     avg_cers = []
-    print(f"Evaluating PyTorch Streaming Performance")
-    
-    for snr in tqdm(snrs):
-        texts = [generate_random_text(6) for _ in range(args.samples)]
-        cers = evaluator.evaluate_batch(texts, snr, random_freq=args.random_freq)
-        avg_cer = np.mean(cers)
-        avg_cers.append(avg_cer)
-        print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
+    print(f"Evaluating PyTorch Streaming Performance (parallel)")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Limit workers for GPU to avoid memory contention; use more for CPU
+    default_workers = 4 if device == "cuda" else None
+    num_workers = args.workers if args.workers is not None else default_workers
+    print(f"Using device: {device}, workers: {num_workers}")
+
+    mp_context = multiprocessing.get_context("spawn")
+    executor = concurrent.futures.ProcessPoolExecutor(
+        max_workers=num_workers,
+        mp_context=mp_context,
+        initializer=init_worker,
+        initargs=(args.checkpoint, device)
+    )
+
+    try:
+        for snr in tqdm(snrs):
+            texts = [generate_random_text(6) for _ in range(args.samples)]
+            args_list = [(text, snr, 20, args.random_freq) for text in texts]
+            cers = list(executor.map(process_single_sample, args_list))
+            avg_cer = np.mean(cers)
+            avg_cers.append(avg_cer)
+            print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
+    except KeyboardInterrupt:
+        print("\nInterrupted. Shutting down workers...")
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=False)
 
     plt.figure(figsize=(12, 8))
     plt.plot(snrs, avg_cers, marker='o', label='PyTorch Streaming (Avg CER)')
