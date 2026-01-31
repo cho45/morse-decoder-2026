@@ -13,6 +13,7 @@ const HOP_MS = 10;
 const MAX_FREQ = 4000;
 const PEAK_LOCK_MS = 3000;
 const HISTORY_LEN = 800; // History length for StreamInference
+const NOISE_GAIN_VAL = 0.01;
 
 // --- State Variables ---
 let audioContext = null;
@@ -116,6 +117,48 @@ class Station {
         this.active = false;
         try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) {}
     }
+}
+
+function calculateVolumeFromSNR(snrDb, sampleRate) {
+    // Noise Generator creates unit variance (RMS=1.0) white noise.
+    // It is scaled by NOISE_GAIN_VAL.
+    // SNR is defined in 2500Hz bandwidth.
+    //
+    // Noise Power Density (N0) = (NoiseRMS^2 / (Fs/2))
+    // Noise Power in 2500Hz = N0 * 2500
+    //
+    // However, our noise generator is simple:
+    // Noise Amplitude A_n = NOISE_GAIN_VAL
+    // Total Noise Power P_n_total = A_n^2 (since variance is 1 before gain)
+    //
+    // The previous formula derived from data_gen.js logic:
+    // A_signal = G_noise * sqrt( (10000 / Fs) * 10^(SNR/10) )
+    //
+    // Let's re-verify:
+    // data_gen.js:
+    // cn0_db_hz = snr_2500 + 10*log10(2500)
+    // n0 = markPower / 10^(cn0/10)  (where markPower=0.5 for sine amplitude 1.0)
+    // noisePowerTotal = n0 * (Fs/2)
+    // sigma = sqrt(noisePowerTotal)
+    //
+    // Here we fix Noise Gain (sigma equivalent) and want Signal Amplitude.
+    // Let Signal Amplitude be A_s. Mark Power = 0.5 * A_s^2
+    // We want to find A_s given Noise Gain G_n.
+    //
+    // Effective Noise Sigma = G_n
+    // Noise Power Total = G_n^2
+    //
+    // From data_gen:
+    // G_n^2 = (0.5 * A_s^2 / 10^((SNR+10log10(2500))/10)) * (Fs/2)
+    // G_n^2 = (0.5 * A_s^2 / (10^(SNR/10) * 2500)) * (Fs/2)
+    // G_n^2 = (A_s^2 * Fs) / (4 * 2500 * 10^(SNR/10))
+    // G_n^2 = (A_s^2 * Fs) / (10000 * 10^(SNR/10))
+    //
+    // Solve for A_s:
+    // A_s^2 = G_n^2 * 10000 * 10^(SNR/10) / Fs
+    // A_s = G_n * sqrt( (10000 / Fs) * 10^(SNR/10) )
+    
+    return NOISE_GAIN_VAL * Math.sqrt((10000 / sampleRate) * Math.pow(10, snrDb / 10));
 }
 
 // --- ONNX Inference ---
@@ -359,22 +402,23 @@ demoBtn.onclick = async () => {
 
     const noise = new NoiseNode(audioContext, { type: 'whitenoise' });
     const noiseGain = audioContext.createGain();
-    noiseGain.gain.value = 0.01;
+    noiseGain.gain.value = NOISE_GAIN_VAL;
     noise.connect(noiseGain);
     noiseGain.connect(analysisMix);
     noiseGain.connect(masterGainNode);
     demoNodes.push(noise);
 
     const stations = [
-        { freq: 650,  wpm: 18, jitter: 0.05, vol: 0.3, msg: "CQ CQ DE JA1ABC K" },
-        { freq: 1200, wpm: 25, jitter: 0.1,  vol: 0.1, msg: "CQ CQ DE K1XYZ K" },
-        { freq: 1800, wpm: 35, jitter: 0.02, vol: 0.5, msg: "CQ CQ DE G4ZOO K" },
-        { freq: 2500, wpm: 20, jitter: 0.15, vol: 0.05, msg: "CQ CQ DE JH1UMV K" },
-        { freq: 3200, wpm: 28, jitter: 0.05, vol: 0.2, msg: "CQ CQ DE DF7CB K" }
+        { freq: 650,  wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
+        { freq: 1200, wpm: 25, jitter: 0.1,  snr: 10, msg: "CQ CQ DE K1XYZ K" },
+        { freq: 1800, wpm: 35, jitter: 0.02, snr: 30, msg: "CQ CQ DE G4ZOO K" },
+        { freq: 2500, wpm: 20, jitter: 0.15, snr: 0,  msg: "CQ CQ DE JH1UMV K" },
+        { freq: 3200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE DF7CB K" }
     ];
 
     stations.forEach(s => {
-        const st = new Station(audioContext, s.freq, s.wpm, s.jitter, s.vol, analysisMix);
+        const vol = calculateVolumeFromSNR(s.snr, audioContext.sampleRate);
+        const st = new Station(audioContext, s.freq, s.wpm, s.jitter, vol, analysisMix);
         st.gain.connect(masterGainNode);
         st.play(s.msg);
         demoNodes.push(st);

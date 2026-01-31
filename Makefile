@@ -1,7 +1,7 @@
 .PHONY: test build train onnx test-js evaluate-js show-curriculum
 
 IMAGE_NAME = cw-decoder
-DOCKER_RUN = docker run --rm --gpus all -v $(shell pwd):/workspace $(IMAGE_NAME)
+DOCKER_RUN = docker run --rm --gpus all --shm-size=2g -v $(shell pwd):/workspace $(IMAGE_NAME)
 
 # Default to latest checkpoint in checkpoints/ directory
 CHECKPOINT ?= $(shell ls -t checkpoints/checkpoint_epoch_*.pt 2>/dev/null | head -1)
@@ -49,7 +49,7 @@ performance_pt_streaming:
 	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_pt_streaming.py --checkpoint $(CHECKPOINT) --samples 50 --output diagnostics/visualize_snr_performance_pt_streaming.png
 
 analyze-char-errors:
-	$(DOCKER_RUN) python3 -u diagnostics/analyze_char_errors.py
+	$(DOCKER_RUN) python3 -u diagnostics/analyze_char_errors.py --samples 500 --snr "6,-6,-12"
 
 test-js:
 	cd demo && npm test
