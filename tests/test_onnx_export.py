@@ -115,7 +115,8 @@ def export_model_to_onnx(model, onnx_path, seq_len=40):
         dynamic_axes=dynamic_axes,
         opset_version=17,
         do_constant_folding=True,
-        training=torch.onnx.TrainingMode.EVAL
+        training=torch.onnx.TrainingMode.EVAL,
+        dynamo=False  # Use legacy TorchScript exporter for compatibility
     )
 
     return wrapper, input_names, output_names
