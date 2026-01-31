@@ -9,7 +9,7 @@ def test_generate_sample_with_signal_labels():
     waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=20, snr_2500=100)
     
     assert isinstance(waveform, torch.Tensor)
-    assert label == text
+    assert label == text + " "
     assert isinstance(signal_labels, torch.Tensor)
     assert isinstance(boundary_labels, torch.Tensor)
     

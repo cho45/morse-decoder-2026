@@ -88,7 +88,7 @@ class PerformanceEvaluator:
 
 def generate_random_text(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=length))
+    return "".join(random.choices(chars, k=length)) + " "   
 
 def main():
     parser = argparse.ArgumentParser()

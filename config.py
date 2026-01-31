@@ -6,14 +6,14 @@ training, and streaming inference.
 
 # Audio / DSP Parameters
 SAMPLE_RATE = 16000 # サンプリングレート (Hz)
-N_FFT = 512         # FFT窓サイズ (32ms @ 16kHz)
+N_FFT = 1024        # FFT窓サイズ (64ms @ 16kHz) - 解像度向上
 HOP_LENGTH = 160    # フレームの移動間隔 (10ms @ 16kHz)
-F_MIN = 500.0       # 抽出する周波数範囲の下限 (Hz)
-F_MAX = 900.0       # 抽出する周波数範囲の上限 (Hz)
-# 16000 / 512 = 31.25 Hz/bin
-# 500 / 31.25 = 16 (Bin Index)
-# 900 / 31.25 = 28.8 -> 29 (Bin Index)
-# 29 - 16 + 1 = 14 bins
+F_MIN = 600.0       # 抽出する周波数範囲の下限 (Hz) - 範囲を絞って解像度を確保
+F_MAX = 800.0       # 抽出する周波数範囲の上限 (Hz)
+# 16000 / 1024 = 15.625 Hz/bin
+# 600 / 15.625 = 38.4 -> 38 (Bin Index)
+# 38 + 14 - 1 = 51 (Bin Index)
+# 51 * 15.625 = 796.875 Hz
 N_BINS = 14         # スペクトログラムから抽出するビン数
 MIN_FREQ = 600.0    # 学習データの最小周波数 (Hz)
 MAX_FREQ = 800.0    # 学習データの最大周波数 (Hz)
@@ -41,7 +41,7 @@ DROPOUT = 0.1        # ドロップアウト率
 
 # Streaming Parameters
 MAX_CACHE_LEN = 1000  # ストリーミング推論時の過去キャッシュの最大フレーム数 (約20秒分)
-LOOKAHEAD_FRAMES = 10 # 未来の信号をどれだけ参照するか (10フレーム = 100ms)
+LOOKAHEAD_FRAMES = 20 # 未来の信号をどれだけ参照するか (20フレーム = 200ms) - 積分時間の延長
 TARGET_FRAMES = 1000  # 学習時のターゲットフレーム数 (約10秒)
 
 # Phrase Generation Parameters
@@ -93,7 +93,7 @@ import string
 # 標準的な使用文字。スペースは物理的な「空白」として Signal Head で扱うため、CTC 語彙からは除外する。
 # [修正] MORSE_DICT に存在するすべての記号を網羅するように修正。
 # 不足していたもの: ' ! & : ; = + _ " $ @
-STD_CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,-()'!&:;=+_\"$@"))
+STD_CHARS = sorted(list(string.ascii_uppercase + string.digits + "/?.,-()'!&:;=+_\"$@ "))
 # 略符号 (Prosigns) やよく使われる略語を独立したトークンとして扱う
 # [修正] <AA> を追加し、<HHHH> を <HH> に修正。
 PROSIGNS = ["<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"]

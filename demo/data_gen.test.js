@@ -7,17 +7,19 @@ describe('MorseGenerator', () => {
 
     it('should tokenize text with prosigns correctly', () => {
         // <BT> is not in MORSE_DICT of demo/data_gen.js, let's use <NJ> which is present
-        const tokens = gen.textToMorseTokens('CQ <NJ> TEST');
+        const tokens = gen.textToMorseTokens('CQ <NJ> TEST ');
         expect(tokens).toContain('<NJ>');
-        expect(tokens).toEqual(['C', 'Q', '<NJ>', 'T', 'E', 'S', 'T']);
+        expect(tokens).toEqual(['C', 'Q', ' ', '<NJ>', ' ', 'T', 'E', 'S', 'T', ' ']);
     });
 
     it('should generate timing for "E"', () => {
         const timing = gen.generateTiming('E', 20);
-        // 'E' is '.', so timing should be [{classId: 1, duration: dotLen}]
-        expect(timing.length).toBe(1);
+        // 'E' is '.', so timing should be [{classId: 1, duration: dotLen}, {classId: 5, duration: wordSpaceLen}]
+        // because of mandatory trailing space
+        expect(timing.length).toBe(2);
         expect(timing[0].classId).toBe(1);
         expect(timing[0].duration).toBeCloseTo(1.2 / 20, 5);
+        expect(timing[1].classId).toBe(5);
     });
 
     it('should generate timing for "CQ"', () => {
@@ -25,8 +27,9 @@ describe('MorseGenerator', () => {
         // C: -.-. (4 elements + 3 intra-char spaces)
         // Inter-char space (1)
         // Q: --.- (4 elements + 3 intra-char spaces)
-        // Total: 7 + 1 + 7 = 15 elements
-        expect(timing.length).toBe(15);
+        // Mandatory trailing space (1)
+        // Total: 7 + 1 + 7 + 1 = 16 elements
+        expect(timing.length).toBe(16);
     });
 
     it('should generate waveform for "E" with correct envelope and duration', () => {
@@ -37,9 +40,10 @@ describe('MorseGenerator', () => {
         const waveform = gen.generateWaveform(timing, freq, riseTime);
         
         const dotLenSamples = Math.floor((1.2 / wpm) * sampleRate);
+        const wordSpaceSamples = Math.floor((7 * 1.2 / wpm) * sampleRate);
         const preSilenceSamples = Math.floor(0.2 * sampleRate);
         const postSilenceSamples = Math.floor(0.55 * sampleRate);
-        const expectedLength = dotLenSamples + preSilenceSamples + postSilenceSamples;
+        const expectedLength = dotLenSamples + wordSpaceSamples + preSilenceSamples + postSilenceSamples;
         
         // Allow +- 1 sample diff
         expect(Math.abs(waveform.length - expectedLength)).toBeLessThanOrEqual(1);
@@ -82,7 +86,9 @@ describe('MorseGenerator', () => {
     it('should handle unknown characters', () => {
         // '#' is not in MORSE_DICT
         const timing = gen.generateTiming('#', 20);
-        expect(timing).toEqual([]);
+        // '#' is ignored, but mandatory trailing space generates a Word Space (5)
+        expect(timing.length).toBe(1);
+        expect(timing[0].classId).toBe(5);
     });
 
     it('should handle unclosed prosigns', () => {
@@ -110,7 +116,8 @@ describe('MorseGenerator', () => {
         const waveform = gen.generateWaveform(timing);
         
         const dotLen = 1.2 / wpm;
-        const expectedDuration = dotLen + 0.2 + 0.55; // timing + pre + post
+        const wordSpaceLen = 7 * dotLen;
+        const expectedDuration = dotLen + wordSpaceLen + 0.2 + 0.55; // timing + pre + post
         const expectedSamples = Math.floor(expectedDuration * sampleRate);
         
         expect(Math.abs(waveform.length - expectedSamples)).toBeLessThanOrEqual(1);

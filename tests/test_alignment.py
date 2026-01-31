@@ -78,9 +78,11 @@ def test_mel_impulse_alignment():
         print(f"\nMel energy at frame 5 (silence): {mel_energies[5].item():.4f}")
         print(f"Mel energy at frame 10 (signal): {mel_energies[10].item():.4f}")
         
-        # In our fixed scaling, silence is 0.0.
-        # Signal energy depends on frequency bins, but should be clearly non-zero.
-        assert mel_energies[5] < 0.01, f"Frame 5 should be silent, got {mel_energies[5].item()}"
+        # With N_FFT=1024, the window is large (64ms).
+        # Trigger at sample 1600 (frame 10).
+        # Frame 5 covers [800, 1824], so it ALREADY contains the signal!
+        # Frame 0 covers [0, 1024], which should be truly silent.
+        assert mel_energies[0] < 0.01, f"Frame 0 should be silent, got {mel_energies[0].item()}"
         assert mel_energies[10] > 0.1, f"Frame 10 should be active, got {mel_energies[10].item()}"
 
 def test_impulse_alignment():
@@ -125,9 +127,10 @@ def test_impulse_alignment():
         print(f"Input Mel peak frame: {input_peak_frame}")
         print(f"Expected output peak frame: {expected_output_peak}")
         
-        # Allow 2 frame tolerance for windowing effects in center=False with N_FFT=512
+        # Allow more tolerance for large N_FFT (1024).
+        # Signal starts at 1600. Input peak frame is where the signal is most centered in the window.
         theoretical_frame = trigger_sample // config.HOP_LENGTH
-        assert abs(input_peak_frame - theoretical_frame) <= 2, \
+        assert abs(input_peak_frame - theoretical_frame) <= 4, \
             f"Input peak at {input_peak_frame}, expected near {theoretical_frame}"
 
 if __name__ == "__main__":

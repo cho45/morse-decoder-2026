@@ -97,9 +97,11 @@ def test_cer_with_prosigns():
     from inference_utils import calculate_cer
     # Prosign を含む場合の CER 計算の正確性を検証
     # "<SOS> K" vs "<SOS> R"
-    # スペースは calculate_cer 内部で除去されるため、実質 "<SOS>K" vs "<SOS>R"
-    # 距離 1, 長さ 2 (SOS=1, K=1) -> CER 0.5
-    assert calculate_cer("<SOS> K", "<SOS> R") == 0.5
+    # スペースは現在語彙に含まれるため、除去されずそのまま計算される
+    # "<SOS> K" -> ["<SOS>", " ", "K"] (length 3)
+    # "<SOS> R" -> ["<SOS>", " ", "R"]
+    # 距離 1, 長さ 3 -> CER 1/3
+    assert calculate_cer("<SOS> K", "<SOS> R") == pytest.approx(1/3)
 
     # "<SK>" vs "SK"
     # 距離 2 (正規化により <SK> は 1文字, "SK" は 2文字), 長さ 1 -> CER 2.0
@@ -107,9 +109,9 @@ def test_cer_with_prosigns():
 
     # 複雑なケース
     # "CQ DE <SOS> K" vs "CQ DE <SOS> R"
-    # 除去後: "CQDE<SOS>K" vs "CQDE<SOS>R"
-    # 距離 1, 長さ 6 -> CER 1/6
-    assert calculate_cer("CQ DE <SOS> K", "CQ DE <SOS> R") == pytest.approx(1/6)
+    # "CQ DE <SOS> K" -> ["C", "Q", " ", "D", "E", " ", "<SOS>", " ", "K"] (length 9)
+    # 距離 1, 長さ 9 -> CER 1/9
+    assert calculate_cer("CQ DE <SOS> K", "CQ DE <SOS> R") == pytest.approx(1/9)
 
 if __name__ == "__main__":
     # 手動実行用

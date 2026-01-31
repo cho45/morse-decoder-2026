@@ -167,29 +167,37 @@ def analyze_char_errors(checkpoint_path, num_samples=500, batch_size=16, output_
         print(f"  {r:5s} -> {h:5s}: {count:3d} times ({rate:5.1f}% of {r})")
 
     # 2. Confusion Matrix Plot
-    plt.figure(figsize=(16, 13))
     all_labels = vocab + ['<DEL>']
     cm = confusion_matrix(all_refs, all_hyps, labels=all_labels)
     
     # Normalize by row (reference) to get probabilities
     cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     cm_norm = np.nan_to_num(cm_norm)
+
+    # Create a version without the diagonal (correct predictions) to highlight errors
+    cm_errors = cm_norm.copy()
+    np.fill_diagonal(cm_errors, 0)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 26))
     
-    # Use LogNorm to highlight small errors while keeping the diagonal visible
-    # We use a small epsilon for zero values to avoid log(0)
-    eps = 1e-4
-    
+    # Plot 1: Standard Confusion Matrix
     sns.heatmap(cm_norm, annot=False, fmt='.2f', cmap='Blues',
-                xticklabels=all_labels, yticklabels=all_labels,
-                norm=colors.LogNorm(vmin=eps, vmax=1.0))
-    
-    plt.title(f"Confusion Matrix (Log Scale Normalized) - {os.path.basename(checkpoint_path)}")
-    plt.xlabel("Predicted")
-    plt.ylabel("Reference")
+                xticklabels=all_labels, yticklabels=all_labels, ax=ax1)
+    ax1.set_title(f"Confusion Matrix (Normalized) - {os.path.basename(checkpoint_path)}")
+    ax1.set_xlabel("Predicted")
+    ax1.set_ylabel("Reference")
+
+    # Plot 2: Errors Only (Diagonal Zeroed)
+    sns.heatmap(cm_errors, annot=False, fmt='.2f', cmap='YlOrRd',
+                xticklabels=all_labels, yticklabels=all_labels, ax=ax2)
+    ax2.set_title(f"Confusion Matrix (Errors Only, Normalized) - {os.path.basename(checkpoint_path)}")
+    ax2.set_xlabel("Predicted")
+    ax2.set_ylabel("Reference")
+
     plt.tight_layout()
     plot_path = f"{output_prefix}.png"
     plt.savefig(plot_path)
-    print(f"\nConfusion matrix saved to: {plot_path}")
+    print(f"\nConfusion matrices saved to: {plot_path}")
 
     # 3. Morse Length Analysis
     morse_len_stats = defaultdict(lambda: {'correct': 0, 'total': 0})

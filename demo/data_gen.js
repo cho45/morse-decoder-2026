@@ -88,15 +88,19 @@ export class MorseGenerator {
                     }
                 }
             }
-            if (text[i] !== ' ') {
-                tokens.push(text[i].toUpperCase());
-            }
+            // Space is now a valid token
+            tokens.push(text[i].toUpperCase());
             i++;
         }
         return tokens;
     }
 
     generateTiming(text, wpm = 20, farnsworthWpm = null, jitter = 0.0, weight = 1.0) {
+        // Ensure text ends with a space to make boundary behavior consistent
+        if (!text.endsWith(" ")) {
+            text += " ";
+        }
+
         if (farnsworthWpm === null) {
             farnsworthWpm = wpm;
         }

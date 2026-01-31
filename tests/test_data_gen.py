@@ -71,7 +71,7 @@ def test_generate_sample():
     assert isinstance(label, str)
     assert isinstance(signal_labels, torch.Tensor)
     assert isinstance(boundary_labels, torch.Tensor)
-    assert label == "TEST"
+    assert label == "TEST "
     assert waveform.ndim == 1
     assert isinstance(signal_labels, torch.Tensor)
 

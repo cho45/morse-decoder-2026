@@ -18,6 +18,7 @@ class DummyArgs:
         self.curriculum_phase = 0
         self.resume = None
         self.freeze_encoder = False
+        self.accumulation_steps = 1
 
 def test_trainer_init():
     args = DummyArgs()

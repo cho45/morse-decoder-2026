@@ -112,6 +112,7 @@ class MorseGenerator:
                     break
             if found: continue
 
+            # Space is now a valid token in config.CHARS
             tokens.append(text[i])
             i += 1
         return tokens
@@ -133,10 +134,15 @@ class MorseGenerator:
         words_raw = text.split(' ')
         
         for i, word_raw in enumerate(words_raw):
-            if not word_raw: continue
+            # i < len(words_raw) - 1 check handles the case where text ends with a space
+            if not word_raw and i < len(words_raw) - 1: continue
             tokens = self.text_to_morse_tokens(word_raw)
             
             for j, char in enumerate(tokens):
+                if char == ' ':
+                    # Explicitly handle space tokens as Inter-word space (7 units)
+                    timing.append((5, word_space_len))
+                    continue
                 code = MORSE_DICT.get(char, "")
                 # print(f"DEBUG: token='{char}', code='{code}'")
                 for k, symbol in enumerate(code):
@@ -295,31 +301,33 @@ class MorseGenerator:
         time_ptr = int(pre_silence * self.sample_rate)
         for class_id, duration in timing:
             duration_samples = int(duration * self.sample_rate)
-            if class_id in [4, 5]: # Inter-char space or Inter-word space (文字の終了)
+            if class_id == 4: # Inter-char space (文字の終了)
                 # 空白の終了時点（＝次の要素の開始直前）を特定
                 trigger_sample = time_ptr + duration_samples
-                
-                # 信号が完全に終了した後の最初のフレームを特定する。
-                # torchaudio center=False では、フレーム m はサンプル m * HOP_LENGTH から始まる。
-                # よって、trigger_sample // HOP_LENGTH が、そのサンプルを含むかそれ以降の最初のフレーム。
                 trigger_frame = trigger_sample // config.HOP_LENGTH
-                
-                # 物理的な境界（空白の終了＝次の開始直前）から、
-                # モデルの出力遅延とCTCスパイクの幅を考慮して未来方向に5フレーム分立てる。
                 for offset in range(5):
                     if 0 <= trigger_frame + offset < num_frames:
                         boundary_frames[trigger_frame + offset] = 1.0
+            elif class_id == 5: # Inter-word space (単語間空白 = 前の文字の終了 + スペース文字の終了)
+                # 1. 前の文字の終了境界 (空白開始から 3ユニット後)
+                # 単語間空白(7ユニット)のうち、最初の3ユニットを文字間空白、残り4ユニットをスペース文字分とみなす
+                char_end_trigger = time_ptr + int(3 * dot_len_sec * self.sample_rate)
+                char_end_frame = char_end_trigger // config.HOP_LENGTH
+                for offset in range(5):
+                    if 0 <= char_end_frame + offset < num_frames:
+                        boundary_frames[char_end_frame + offset] = 1.0
+                
+                # 2. スペース文字自体の終了境界 (空白の終了時点)
+                space_end_trigger = time_ptr + duration_samples
+                space_end_frame = space_end_trigger // config.HOP_LENGTH
+                for offset in range(5):
+                    if 0 <= space_end_frame + offset < num_frames:
+                        boundary_frames[space_end_frame + offset] = 1.0
             
             time_ptr += duration_samples
 
-        # シーケンスの最後（最後の文字の終了後、文字間空白分(3ユニット)待ってから確定）
-        # 文字間空白を待つことで、信号との重なりを確実に避ける。
-        char_space_samples = int(3 * dot_len_sec * self.sample_rate)
-        trigger_sample_final = time_ptr + char_space_samples
-        trigger_frame_final = trigger_sample_final // config.HOP_LENGTH
-        for offset in range(5):
-            if 0 <= trigger_frame_final + offset < num_frames:
-                boundary_frames[trigger_frame_final + offset] = 1.0
+        # すべての文字（スペースを含む）の終了時に境界が立つようになったため、
+        # ここでの末尾の自動生成は不要。
 
         for i in range(num_frames):
             center_sample = i * config.HOP_LENGTH + config.N_FFT // 2
@@ -557,6 +565,10 @@ def generate_sample(text: str, wpm: int = 20, sample_rate: int = config.SAMPLE_R
     
     # Human artifacts are now controlled by arguments
     
+    # ワードの最後にも必ずスペースが入るようにし、境界ラベルの挙動を一貫させる
+    if not text.endswith(" "):
+        text += " "
+        
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
     waveform, signal_labels, boundary_labels = gen.generate_waveform(
         timing, frequency=frequency, wpm=wpm, rise_time=rise_time, drift_hz=drift_hz, max_duration=max_duration
@@ -688,7 +700,7 @@ class CWDataset(Dataset):
         # 599 -> 5NN conversion for realism
         rst = rst.replace('9', 'N')
         
-        return template.format(
+        phrase = template.format(
             call=call1,
             call1=call1,
             call2=call2,
@@ -698,6 +710,10 @@ class CWDataset(Dataset):
             weather=weather,
             temp=temp
         )
+        # ワードの最後にも必ずスペースが入るようにし、挙動を一貫させる
+        if not phrase.endswith(" "):
+            phrase += " "
+        return phrase
 
     def __len__(self):
         return self.num_samples
@@ -770,9 +786,12 @@ class CWDataset(Dataset):
                     # 単語間空白の学習機会を増やすため、挿入確率を 0.4 に引き上げ
                     if random.random() < 0.4:
                         text += " "
-                text = text.strip()
                 
-                if not text: text = "CQ"
+                # ワードの最後にも必ずスペースが入るようにし、挙動を一貫させる
+                if not text.endswith(" "):
+                    text += " "
+                
+                if not text.strip(): text = "CQ "
                 
                 # Verify if it fits
                 timing = self.gen.generate_timing(text, wpm=wpm)

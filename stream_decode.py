@@ -22,42 +22,25 @@ class CTCDecoder:
     def __init__(self, id_to_char):
         self.id_to_char = id_to_char
         self.last_id = 0 # Start with blank or 0
-        self.space_pending = False
         
     def decode(self, logits: torch.Tensor, sig_logits: torch.Tensor, boundary_logits: torch.Tensor) -> str:
         """
-        Greedy decoding of CTC logits with physical space insertion and boundary gating.
-        logits: (1, T, C)
-        sig_logits: (1, T, 4)
-        boundary_logits: (1, T, 1)
+        Greedy decoding of CTC logits.
+        Spaces are now part of the CTC vocabulary.
         """
         # (1, T, C) -> (T, C)
         l = logits[0]
-        s = sig_logits[0]
-        b = torch.sigmoid(boundary_logits[0]).squeeze(-1)
-        
-        # We need to maintain state for streaming, but decode_multi_task is currently stateless.
-        # For stream_decode.py (which handles chunks), we'll use a slightly modified version
-        # of the logic to handle last_id and space_pending across chunks.
         
         # Extract predictions for this chunk
         preds = l.argmax(dim=-1)
-        sig_preds = s.argmax(dim=-1)
         
         decoded_str = ""
         for t in range(len(preds)):
-            if sig_preds[t] == 3:
-                self.space_pending = True
-                
-            is_boundary = b[t] > 0.2
-            idx = preds[t].item() if is_boundary else 0
+            idx = preds[t].item()
             
             if idx != self.last_id:
                 if idx != 0:
                     char = self.id_to_char.get(idx, "")
-                    if self.space_pending:
-                        decoded_str += " "
-                        self.space_pending = False
                     decoded_str += char
                 self.last_id = idx
         return decoded_str

@@ -21,7 +21,7 @@ import {
 // これは ONNX Runtime の制限によるものです：state updates が output より前に実行されるため、
 // パディングを行うとモデルの内部キャッシュ（ConvSubsampling, ConformerConvModule, Attention）が
 // 破損してしまいます。
-const DEFAULT_CHUNK_SIZE = 12; // 120ms。Must be multiple of 4 (SUBSAMPLING_RATE^2)
+const DEFAULT_CHUNK_SIZE = 20; // 200ms。Must be multiple of 4 (SUBSAMPLING_RATE^2)
 const DEFAULT_HISTORY_LENGTH = 800;
 
 /**
@@ -381,10 +381,6 @@ export class StreamInference extends EventTarget {
 
                 // Track new characters
                 if (decodeResult.newChar) {
-                    if (decodeResult.spaceInserted) {
-                        this._events.push({ char: ' ', pos: framePos - 1 });
-                        newChars.push(' ');
-                    }
                     this._events.push({ char: decodeResult.newChar, pos: framePos });
                     newChars.push(decodeResult.newChar);
                 }

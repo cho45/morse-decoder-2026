@@ -80,15 +80,14 @@ def levenshtein_prosign(a: str, b: str) -> Tuple[int, List[Tuple[str, str, str]]
     return dp[n][m], ops[::-1]
 
 def calculate_cer(ref: str, hyp: str) -> float:
-    """Calculate Character Error Rate using Levenshtein distance with prosign handling."""
-    ref_no_space = ref.replace(" ", "")
-    hyp_no_space = hyp.replace(" ", "")
+    """Calculate Character Error Rate using Levenshtein distance with prosign handling.
+    Includes spaces in the calculation as they are now part of the vocabulary.
+    """
+    if not ref:
+        return 1.0 if hyp else 0.0
     
-    if not ref_no_space:
-        return 1.0 if hyp_no_space else 0.0
-    
-    dist, _ = levenshtein_prosign(ref_no_space, hyp_no_space)
-    return dist / len(map_prosigns(ref_no_space))
+    dist, _ = levenshtein_prosign(ref, hyp)
+    return dist / len(map_prosigns(ref))
 
 def preprocess_waveform(waveform: torch.Tensor, device: torch.device) -> torch.Tensor:
     """
@@ -132,14 +131,13 @@ def decode_multi_task(
     space_threshold: float = 0.1
 ) -> Tuple[str, List[Tuple[str, int]]]:
     """
-    Greedy decoding with Signal Head gating and Boundary Head gating.
+    Greedy decoding using CTC only.
     Returns:
         decoded_text: str
         timed_output: List of (char, frame_index)
     """
     # Get predictions
     preds = ctc_logits.argmax(dim=-1) # (T,)
-    sig_preds = sig_logits.argmax(dim=-1) # (T,)
     
     decoded_indices = []
     decoded_positions = []
@@ -153,27 +151,18 @@ def decode_multi_task(
             decoded_positions.append(t)
         prev = idx
         
-    # 2. Gated Space Reconstruction
+    # 2. Results Construction
+    # Spaces are now handled directly by CTC as part of the vocabulary.
+    # We no longer need the Signal Head based space reconstruction.
     result = []
     timed_output = []
 
-    for i, (idx, pos) in enumerate(zip(decoded_indices, decoded_positions)):
-        # Append character first
+    for idx, pos in zip(decoded_indices, decoded_positions):
         char = id_to_char.get(idx, "")
         result.append(char)
         timed_output.append((char, pos))
 
-        # Check for inter-word space AFTER current character
-        # Space is detected between current position and next character position
-        # This reflects the CW signal timing: character fires → space detected → next character fires
-        if i + 1 < len(decoded_positions):
-            next_pos = decoded_positions[i + 1]
-            # Check if word space (class 3) exists between current and next character
-            # Gated by Boundary Head probability to prevent false positives in noise
-            if any(sig_preds[pos:next_pos] == 3) and any(bound_probs[pos:next_pos] > space_threshold):
-                result.append(" ")
-
-    return "".join(result).strip(), timed_output
+    return "".join(result), timed_output
 
 def visualize_inference(
     mels: torch.Tensor,

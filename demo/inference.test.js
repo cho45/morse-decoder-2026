@@ -28,8 +28,8 @@ describe('Inference Logic', () => {
         
         expect(logits).toBeInstanceOf(Float32Array);
         expect(signal_logits).toBeInstanceOf(Float32Array);
-        // The model file (cw_decoder_quantized.onnx) has 63 classes.
-        expect(numClasses).toBe(63);
+        // The model file (cw_decoder_quantized.onnx) should match CHARS.length + 1 (blank).
+        expect(numClasses).toBe(CHARS.length + 1);
         
         // Subsampling rate is 2, so 8 frames -> 4 output frames
         expect(logits.length / numClasses).toBe(4);
@@ -77,8 +77,8 @@ describe('Inference Logic', () => {
         const aIndex = CHARS.indexOf('A') + 1;
         allLogits[aIndex] = 10;
 
-        // Frame 1: Space (class 3)
-        allSignalLogits[1 * 4 + 3] = 10;
+        // Frame 1: Space (CTC ID 1)
+        allLogits[1 * numClasses + 1] = 10;
 
         // Frame 2: Character 'B'
         const bIndex = CHARS.indexOf('B') + 1;
@@ -120,10 +120,8 @@ describe('Inference Logic', () => {
         allLogits[4 * numClasses + iIndex] = 10.0;  // 'I' at t=4
         allLogits[12 * numClasses + tIndex] = 10.0; // 'T' at t=12
 
-        // Word space signal at t=7-9
-        allSignalLogits[7 * 4 + 3] = 10.0;
-        allSignalLogits[8 * 4 + 3] = 10.0;
-        allSignalLogits[9 * 4 + 3] = 10.0;
+        // Word space via CTC ID 1 at t=8
+        allLogits[8 * numClasses + 1] = 10.0;
 
         const decoded = decodeFull(allLogits, allSignalLogits, numClasses);
 
@@ -163,11 +161,9 @@ describe('Inference Logic', () => {
         allLogits[10 * numClasses + eIndex] = 10.0;
         allLogits[15 * numClasses + kIndex] = 10.0;
 
-        // Word spaces
-        allSignalLogits[5 * 4 + 3] = 10.0;
-        allSignalLogits[6 * 4 + 3] = 10.0;
-        allSignalLogits[12 * 4 + 3] = 10.0;
-        allSignalLogits[13 * 4 + 3] = 10.0;
+        // Word spaces via CTC ID 1
+        allLogits[6 * numClasses + 1] = 10.0;
+        allLogits[13 * numClasses + 1] = 10.0;
 
         const decoded = decodeFull(allLogits, allSignalLogits, numClasses);
         expect(decoded).toBe("CQ DE K");
@@ -175,7 +171,7 @@ describe('Inference Logic', () => {
 
     it('should decode "CQ" correctly using both full and chunk inference', async () => {
         const gen = new MorseGenerator(SAMPLE_RATE);
-        const targetText = "CQ CQ DE JH1UMV K";
+        const targetText = "CQ CQ DE JH1UMV K ";
         const timing = gen.generateTiming(targetText, 25);
         const cleanWaveform = gen.generateWaveform(timing);
         
@@ -262,16 +258,20 @@ describe('Inference Logic', () => {
             expect(result.text).toBe('HI');
             expect(result.newChar).toBe('I');
 
-            // Frame 4-6: word space detected
+            // Frame 4-6: word space via CTC ID 1
             for (let i = 4; i < 7; i++) {
                 let ctcLogits = new Float32Array(numClasses).fill(-10);
                 let sigLogits = new Float32Array(4).fill(-10);
-                ctcLogits[0] = 10.0; // blank
-                sigLogits[3] = 10.0; // word space
+                if (i === 5) {
+                    ctcLogits[1] = 10.0; // space
+                } else {
+                    ctcLogits[0] = 10.0; // blank
+                }
+                sigLogits[0] = 2.0;
                 result = decoder.decodeFrame(ctcLogits, sigLogits, 0.5);
             }
 
-            // Frame 7: 'T' fires (space should be inserted before this character)
+            // Frame 7: 'T' fires
             let ctcLogits7 = new Float32Array(numClasses).fill(-10);
             let sigLogits7 = new Float32Array(4).fill(-10);
             const tIndex = CHARS.indexOf('T') + 1;
@@ -281,13 +281,13 @@ describe('Inference Logic', () => {
             result = decoder.decodeFrame(ctcLogits7, sigLogits7, 0.5);
             expect(result.text).toBe('HI T');
             expect(result.newChar).toBe('T');
-            expect(result.spaceInserted).toBe(true);
         });
 
         it('should reset state correctly', () => {
-            const decoder = new ChunkedDecoder(63);
+            const numClasses = CHARS.length + 1;
+            const decoder = new ChunkedDecoder(numClasses);
 
-            let ctcLogits = new Float32Array(63).fill(-10);
+            let ctcLogits = new Float32Array(numClasses).fill(-10);
             let sigLogits = new Float32Array(4).fill(-10);
             ctcLogits[1] = 10.0; // some character
             sigLogits[0] = 2.0;

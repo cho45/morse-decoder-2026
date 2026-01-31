@@ -249,9 +249,14 @@ function drawProbs(canvas, history, labels, onlyTop = false, decodedEvents = [],
             const evPosOutput = Math.floor(ev.pos / 2);
             const x = (evPosOutput - currentBasePos) * step;
             if (x > 0 && x < w) {
-                ctx.fillText(ev.char, x, 20);
+                const isSpace = ev.char === ' ';
+                const displayChar = isSpace ? '␣' : ev.char;
+                ctx.fillText(displayChar, x, 20);
                 ctx.beginPath();
-                ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)';
+                // Use a more visible color and thicker line for decoded positions.
+                // Highlight spaces with a different color (blue-ish).
+                ctx.strokeStyle = isSpace ? 'rgba(0, 100, 255, 0.5)' : 'rgba(0, 0, 0, 0.4)';
+                ctx.lineWidth = isSpace ? 2 : 1;
                 ctx.moveTo(x, 0);
                 ctx.lineTo(x, h);
                 ctx.stroke();
@@ -311,7 +316,7 @@ async function playMorse(text, signal) {
             if (char === ' ') {
                 // Word space is 7 dits.
                 // Since the previous character already added 3 dits (char space),
-                // we only need to add 4 more dits here.
+                // we add 4 more dits here.
                 schedTime += getLen(4);
                 continue;
             }
@@ -343,8 +348,9 @@ async function playMorse(text, signal) {
             // BUT wait: the standard says 3 dits BETWEEN characters.
             // If the NEXT character is a space, we handle it in the ' ' block.
             // If the NEXT character is another letter, we need 3 dits.
-            const nextChar = chars[i + 1];
-            if (nextChar && nextChar !== ' ') {
+            // Character space is 3 dits.
+            // Add this after every character, regardless of what follows.
+            if (chars[i + 1]) {
                 schedTime += getLen(3);
             }
         }

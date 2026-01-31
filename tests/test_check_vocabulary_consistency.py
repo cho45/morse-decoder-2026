@@ -22,10 +22,7 @@ def test_vocabulary_consistency():
     
     missing_chars = []
     
-    for char in MORSE_DICT.keys():
-        if char == ' ':
-            continue
-            
+    for char in list(MORSE_DICT.keys()) + [' ']:
         mock_waveform = torch.zeros(16000)
         mock_signal_labels = torch.zeros(100)
         mock_boundary_labels = torch.zeros(100)

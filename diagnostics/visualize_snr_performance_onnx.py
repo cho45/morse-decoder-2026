@@ -20,7 +20,7 @@ from inference_utils import preprocess_waveform, decode_multi_task, calculate_ce
 
 def generate_random_text(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=length))
+    return "".join(random.choices(chars, k=length)) + " "
 
 class ONNXPerformanceEvaluator:
     def __init__(self, model_path: str):

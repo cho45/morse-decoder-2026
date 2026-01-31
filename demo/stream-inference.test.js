@@ -295,7 +295,7 @@ describe('StreamInference', () => {
 
             // Generate CW signal
             const gen = new MorseGenerator(SAMPLE_RATE);
-            const targetText = "CQ";
+            const targetText = "CQ CQ ";
             const timing = gen.generateTiming(targetText, 25);
             const waveform = gen.generateWaveform(timing);
 

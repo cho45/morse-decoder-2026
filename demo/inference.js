@@ -12,15 +12,15 @@ export const N_HEAD = 4;
 export const D_K = D_MODEL / N_HEAD;
 export const KERNEL_SIZE = 31;
 
-export const N_FFT = 512;
+export const N_FFT = 1024;
 export const HOP_LENGTH = 160;
-export const F_MIN = 500.0;
+export const F_MIN = 600.0;
 export const SAMPLE_RATE = 16000;
-export const LOOKAHEAD_FRAMES = 10;
+export const LOOKAHEAD_FRAMES = 20;
 export const SUBSAMPLING_RATE = 2;
 
-// Vocabulary MUST match config.py and model dimensions (63 classes = 62 chars + 1 blank)
-export const CHARS = ["!", "\"", "$", "&", "'", "(", ")", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "=", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_", "<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
+// Vocabulary MUST match config.py and model dimensions (64 classes = 63 chars + 1 blank)
+export const CHARS = [" ", "!", "\"", "$", "&", "'", "(", ")", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "=", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_", "<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
 export const ID_TO_CHAR = {};
 CHARS.forEach((char, i) => { ID_TO_CHAR[i + 1] = char; });
 console.log("Vocabulary initialized:", CHARS.length, "chars");
@@ -308,47 +308,16 @@ export function decodeFull(allLogits, allSignalLogits, numClasses) {
         prevId = maxId;
     }
 
-    // 2. Gated Space Reconstruction
+    // 2. Results Construction
+    // Spaces are now handled directly by CTC.
     let result = "";
 
     for (let i = 0; i < decodedIndices.length; i++) {
         const idx = decodedIndices[i];
-        const pos = decodedPositions[i];
-
-        // Append character first
         result += ID_TO_CHAR[idx] || "";
-
-        // Check for inter-word space AFTER current character
-        // Space is detected between current position and next character position
-        // This reflects the CW signal timing: character fires → space detected → next character fires
-        if (i + 1 < decodedPositions.length) {
-            const nextPos = decodedPositions[i + 1];
-            // Check if word space (class 3) exists between current and next character
-            let foundSpace = false;
-            for (let t = pos; t < nextPos; t++) {
-                const sigLogits = allSignalLogits.slice(t * 4, (t + 1) * 4);
-                // Argmax
-                let maxSigId = 0;
-                let maxSigVal = -Infinity;
-                for (let s = 0; s < 4; s++) {
-                    if (sigLogits[s] > maxSigVal) {
-                        maxSigVal = sigLogits[s];
-                        maxSigId = s;
-                    }
-                }
-                if (maxSigId === 3) {
-                    foundSpace = true;
-                    break;
-                }
-            }
-
-            if (foundSpace) {
-                result += " ";
-            }
-        }
     }
 
-    return result.trim();
+    return result;
 }
 
 /**
@@ -366,7 +335,8 @@ export function calculateCER(ref, hyp) {
     });
 
     function mapProsigns(text) {
-        let res = text.replace(/\s+/g, "");
+        if (!text) return "";
+        let res = text;
         for (const [ps, char] of Object.entries(prosignMapping)) {
             // Replace all occurrences
             res = res.split(ps).join(char);
@@ -377,12 +347,12 @@ export function calculateCER(ref, hyp) {
     const refMapped = mapProsigns(ref);
     const hypMapped = mapProsigns(hyp);
 
-    if (!refMapped) {
-        return hypMapped ? 1.0 : 0.0;
-    }
-
     const n = refMapped.length;
     const m = hypMapped.length;
+
+    if (n === 0) {
+        return m === 0 ? 0.0 : 1.0;
+    }
     const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
 
     for (let i = 0; i <= n; i++) dp[i][0] = i;
@@ -421,7 +391,6 @@ export class ChunkedDecoder {
     reset() {
         this.decodedText = "";
         this.lastCharId = -1;
-        this.spaceAfterLastChar = false; // Track if word space was detected after last character
     }
 
     /**
@@ -442,33 +411,11 @@ export class ChunkedDecoder {
             }
         }
 
-        // Signal Argmax
-        let maxSigId = 0;
-        let maxSigVal = -Infinity;
-        for (let s = 0; s < 4; s++) {
-            if (sigLogits[s] > maxSigVal) {
-                maxSigVal = sigLogits[s];
-                maxSigId = s;
-            }
-        }
-
         let newChar = null;
         let spaceInserted = false;
 
-        // Check for word space signal (class 3)
-        if (maxSigId === 3 && this.decodedText.length > 0) {
-            this.spaceAfterLastChar = true;
-        }
-
         // Character emission: Skip blank (0) and repeated characters
         if (maxId !== 0 && maxId !== this.lastCharId) {
-            // Insert space before new character if space was detected after previous character
-            if (this.spaceAfterLastChar) {
-                this.decodedText += " ";
-                this.spaceAfterLastChar = false;
-                spaceInserted = true;
-            }
-
             const char = ID_TO_CHAR[maxId] || "";
             this.decodedText += char;
             newChar = char;

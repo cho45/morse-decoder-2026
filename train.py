@@ -17,7 +17,7 @@ from model import StreamingConformer
 import config
 import visualize_logs
 from curriculum import CurriculumManager
-from inference_utils import decode_multi_task, calculate_cer
+from inference_utils import decode_multi_task, calculate_cer, map_prosigns
 
 # Use centralized config
 CHARS = config.CHARS
@@ -230,6 +230,7 @@ class Trainer:
                         found = True
                         break
                 if not found:
+                    # Always include characters that are in the vocabulary (including space)
                     if text[i] in CHAR_TO_ID:
                         tokens.append(text[i])
                     i += 1
@@ -528,8 +529,9 @@ class Trainer:
                         b_probs
                     )
                     
-                    reference = texts[i].strip()
-                    ref_len = len(reference.replace(" ", ""))
+                    reference = texts[i]
+                    # Use map_prosigns to count prosigns as single characters, but keep spaces
+                    ref_len = len(map_prosigns(reference))
                     
                     # Unified CER calculation
                     dist_rate = calculate_cer(reference, hypothesis)
