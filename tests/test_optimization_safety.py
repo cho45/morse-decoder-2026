@@ -75,7 +75,8 @@ class TestPCENStateManagement:
         x = torch.zeros(1, 0, n_mels)
 
         with torch.no_grad():
-            y, new_state = pcen(x)
+            state = torch.zeros(1, 1, n_mels)
+            y, new_state = pcen(x, state)
 
         # Output should be empty
         assert y.shape == (1, 0, n_mels)
@@ -91,7 +92,8 @@ class TestPCENStateManagement:
         # First call with positive input
         x1 = torch.rand(1, 50, n_mels)
         with torch.no_grad():
-            y1, state1 = pcen(x1)
+            state0 = torch.zeros(1, 1, n_mels)
+            y1, state1 = pcen(x1, state0)
 
         # Second call with new input using state1
         x2 = torch.rand(1, 50, n_mels)
@@ -101,7 +103,8 @@ class TestPCENStateManagement:
         # Compare with single batch call
         x_batch = torch.cat([x1, x2], dim=1)
         with torch.no_grad():
-            y_batch, _ = pcen(x_batch)
+            state_batch = torch.zeros(1, 1, n_mels)
+            y_batch, _ = pcen(x_batch, state_batch)
 
         # States should match (within tolerance for numerical precision)
         assert torch.allclose(torch.cat([y1, y2], dim=1), y_batch, atol=1e-5)
@@ -115,7 +118,8 @@ class TestPCENStateManagement:
         # Start with zero input
         x = torch.zeros(1, 50, n_mels)
         with torch.no_grad():
-            y, state = pcen(x)
+            state0 = torch.zeros(1, 1, n_mels)
+            y, state = pcen(x, state0)
 
         # Output should be finite
         assert torch.isfinite(y).all()
@@ -357,10 +361,14 @@ class TestConformerBlockStreaming:
         # Batch inference
         x = torch.rand(1, 100, d_model)
         with torch.no_grad():
-            y_batch, _ = block(x)
+            attn_cache = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+            conv_cache = torch.zeros(1, d_model, kernel_size - 1)
+            y_batch, _ = block(x, (attn_cache, conv_cache))
 
         # Streaming inference
-        states = None
+        attn_cache = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+        conv_cache = torch.zeros(1, d_model, kernel_size - 1)
+        states = (attn_cache, conv_cache)
         y_streams = []
         chunk_size = 20
 
@@ -391,7 +399,8 @@ class TestCacheInitialization:
         # First call with cache=None
         x = torch.rand(1, 50, d_model)
         with torch.no_grad():
-            y1, cache1 = conv(x, cache=None)
+            cache0 = torch.zeros(1, d_model, kernel_size - 1)
+            y1, cache1 = conv(x, cache=cache0)
 
         # Second call with returned cache
         with torch.no_grad():
@@ -417,13 +426,15 @@ class TestCacheInitialization:
 
         # Streaming with cache
         with torch.no_grad():
-            y_part1, cache = conv(x_part1, cache=None)
+            cache0 = torch.zeros(1, d_model, kernel_size - 1)
+            y_part1, cache = conv(x_part1, cache=cache0)
             y_part2, _ = conv(x_part2, cache=cache)
         y_stream = torch.cat([y_part1, y_part2], dim=1)
 
         # Batch inference
         with torch.no_grad():
-            y_batch, _ = conv(x, cache=None)
+            cache_batch = torch.zeros(1, d_model, kernel_size - 1)
+            y_batch, _ = conv(x, cache=cache_batch)
 
         # Compare (ConvModule 出力は (B, L, D) 形式)
         assert torch.allclose(y_stream, y_batch, atol=1e-5)
@@ -440,7 +451,8 @@ class TestCacheInitialization:
         # First call with cache=None
         x = torch.rand(1, 50, d_model)
         with torch.no_grad():
-            y1, cache1 = attn(x, cache=None)
+            cache0 = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+            y1, cache1 = attn(x, cache=cache0)
 
         # Second call with returned cache
         with torch.no_grad():
@@ -468,10 +480,11 @@ class TestBatchSizeSupport:
         x = torch.rand(batch_size, seq_len, d_model)
 
         with torch.no_grad():
-            y_batch, _ = attn(x, cache=None)
+            cache_batch = (torch.zeros(batch_size, n_head, 0, d_model // n_head), torch.zeros(batch_size, n_head, 0, d_model // n_head), torch.tensor(0))
+            y_batch, _ = attn(x, cache=cache_batch)
 
         # Streaming with batch
-        states = None
+        states = (torch.zeros(batch_size, n_head, 0, d_model // n_head), torch.zeros(batch_size, n_head, 0, d_model // n_head), torch.tensor(0))
         y_streams = []
         chunk_size = 20
 
@@ -499,10 +512,11 @@ class TestBatchSizeSupport:
         x = torch.rand(batch_size, seq_len, d_model)
 
         with torch.no_grad():
-            y_batch, _ = conv(x, cache=None)
+            cache_batch = torch.zeros(batch_size, d_model, kernel_size - 1)
+            y_batch, _ = conv(x, cache=cache_batch)
 
         # Streaming with batch
-        states = None
+        states = torch.zeros(batch_size, d_model, kernel_size - 1)
         y_streams = []
         chunk_size = 20
 

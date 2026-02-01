@@ -41,7 +41,8 @@ def test_input_output_alignment():
             
             # 2. Get actual output length from the model
             # Structural test only, weights don't matter for length
-            (logits, _, _), _ = trainer.model(mels)
+            states = trainer.model.get_initial_states(mels.size(0), mels.device)
+            (logits, _, _), _ = trainer.model(mels, states)
             actual_output_length = logits.size(1)
             
             print(f"\nTesting length: {length} samples")
@@ -107,7 +108,8 @@ def test_impulse_alignment():
     
     with torch.no_grad():
         mels, _ = trainer.compute_mels_and_lengths(waveform, lengths_tensor)
-        (logits, _, _), _ = trainer.model(mels)
+        states = trainer.model.get_initial_states(mels.size(0), mels.device)
+        (logits, _, _), _ = trainer.model(mels, states)
         
         # Strict physical alignment test:
         # A signal starting at sample S must result in a peak at a predictable frame F.

@@ -80,11 +80,8 @@ class StreamDecoder:
         self.bin_end = self.bin_start + config.N_BINS
         
         self.decoder = CTCDecoder(ID_TO_CHAR)
-        self.states = (
-            torch.zeros(1, 1, config.N_BINS).to(self.device), # pcen_state
-            None, # sub_cache
-            None  # layer_states
-        )
+        # Use model helper to create initial states
+        self.states = self.model.get_initial_states(1, device=self.device)
         
         # Buffer for audio samples (including overlap for STFT)
         self.audio_buffer = np.array([], dtype=np.float32)

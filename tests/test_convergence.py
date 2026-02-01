@@ -47,7 +47,8 @@ def test_single_sample_convergence():
     for i in range(300): # 必要最小限のステップ数に短縮
         optimizer.zero_grad()
         mels, input_lengths = trainer.compute_mels_and_lengths(waveforms, lengths)
-        (logits, _, _), _ = trainer.model(mels)
+        states = trainer.model.get_initial_states(mels.size(0), mels.device)
+        (logits, _, _), _ = trainer.model(mels, states)
         
         if i == 0:
             print(f"\n[DEBUG] Logits T: {logits.size(1)}, input_lengths: {input_lengths.item()}")

@@ -20,8 +20,10 @@ def test_subsampling_causality():
     x2[:, 10:, :] += 1.0
     
     with torch.no_grad():
-        y1, _ = subsampling(x1)
-        y2, _ = subsampling(x2)
+        cache1 = torch.zeros(1, 1, 2, config.N_BINS)
+        y1, _ = subsampling(x1, cache1)
+        cache2 = torch.zeros(1, 1, 2, config.N_BINS)
+        y2, _ = subsampling(x2, cache2)
     
     # Output at frame i corresponds to input around 2*i.
     # If causality holds, output frame i should be identical if 2*i < 10.
@@ -51,8 +53,10 @@ def test_model_causality():
     x2[:, 20:, :] += 0.5
     
     with torch.no_grad():
-        (y1, _, _), _ = model(x1)
-        (y2, _, _), _ = model(x2)
+        states1 = model.get_initial_states(x1.size(0), x1.device)
+        (y1, _, _), _ = model(x1, states1)
+        states2 = model.get_initial_states(x2.size(0), x2.device)
+        (y2, _, _), _ = model(x2, states2)
     
     # Check output frames before the change (approx T/2)
     diff = torch.abs(y1[:, :10, :] - y2[:, :10, :]).max().item()
@@ -71,12 +75,13 @@ def test_strict_streaming_consistency():
     x = torch.rand(1, T, config.N_BINS)
     
     with torch.no_grad():
-        (y_batch, _, _), _ = model(x)
+        states_batch = model.get_initial_states(x.size(0), x.device)
+        (y_batch, _, _), _ = model(x, states_batch)
     
     # Test different chunk sizes
     for chunk_size in [2, 4, 10]:
         y_streams = []
-        states = None
+        states = model.get_initial_states(x.size(0), x.device)
         with torch.no_grad():
             for i in range(0, T, chunk_size):
                 chunk = x[:, i:i+chunk_size, :]

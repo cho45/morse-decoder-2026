@@ -428,7 +428,8 @@ class Trainer:
             target_lengths = target_lengths.to(self.device)
             
             # Forward
-            (logits, signal_logits, boundary_logits), _ = self.model(mels)
+            states = self.model.get_initial_states(mels.size(0), mels.device)
+            (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
             input_lengths = torch.clamp(input_lengths, max=logits.size(1))
             
             loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
@@ -503,7 +504,8 @@ class Trainer:
                 targets = targets.to(self.device)
                 target_lengths = target_lengths.to(self.device)
                 
-                (logits, signal_logits, boundary_logits), _ = self.model(mels)
+                states = self.model.get_initial_states(mels.size(0), mels.device)
+                (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
                 loss, _ = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets)
                 total_loss += loss.item()
                 

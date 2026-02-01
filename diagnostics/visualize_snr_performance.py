@@ -67,7 +67,8 @@ class PerformanceEvaluator:
         mels = preprocess_waveform(waveforms_batch, self.device)
         
         with torch.no_grad():
-            (ctc_batch, sig_batch, bound_batch), _ = self.model(mels)
+            states = self.model.get_initial_states(mels.size(0), self.device)
+            (ctc_batch, sig_batch, bound_batch), _ = self.model(mels, states)
             # Move results back to CPU for decoding
             ctc_batch = ctc_batch.cpu()
             sig_batch = sig_batch.cpu()

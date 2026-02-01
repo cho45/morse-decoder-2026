@@ -70,7 +70,7 @@ class PyTorchStreamingEvaluator:
         seq_len = mels.size(1)
         chunk_size = 40 # Same as ONNX evaluator
         
-        states = None # Initial states
+        states = self.model.get_initial_states(batch_size, self.device)
         
         all_logits = []
         all_signal_logits = []

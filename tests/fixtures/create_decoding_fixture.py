@@ -52,7 +52,8 @@ def create_fixture():
         mels = preprocess_waveform(waveform, device)
         
         with torch.no_grad():
-            (logits, sig_logits, bound_logits), _ = model(mels)
+            states = model.get_initial_states(mels.size(0), device)
+            (logits, sig_logits, bound_logits), _ = model(mels, states)
             
         # Save raw logits
         logits_list = logits[0].cpu().numpy().tolist()

@@ -13,17 +13,17 @@ def get_device():
 def test_rel_pe_shapes():
     d_model = 64
     pe = RelPositionalEncoding(d_model)
-    res = pe(length=100, offset=0)
+    res = pe(length=100, offset=torch.tensor(0))
     assert res.shape == (100, d_model)
     
-    res_offset = pe(length=50, offset=100)
+    res_offset = pe(length=50, offset=torch.tensor(100))
     assert res_offset.shape == (50, d_model)
 
 def test_rel_pe_device():
     device = get_device()
     d_model = 64
     pe = RelPositionalEncoding(d_model).to(device)
-    res = pe(length=100)
+    res = pe(length=100, offset=torch.tensor(0, device=device))
     assert res.device.type == device.type
 
 # --- Tests for CausalMultiHeadAttention ---
@@ -36,12 +36,14 @@ def test_attention_causality():
     # Use positive inputs for PCEN-related components
     x = torch.rand(1, 100, d_model)
     with torch.no_grad():
-        out1, _ = attn(x)
+        cache1 = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+        out1, _ = attn(x, cache1)
         
         # Modify future frames (index 50+)
         x_modified = x.clone()
         x_modified[:, 50:, :] += 1.0
-        out2, _ = attn(x_modified)
+        cache2 = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+        out2, _ = attn(x_modified, cache2)
         
     # Output before frame 50 must be identical
     assert torch.allclose(out1[:, :50, :], out2[:, :50, :], atol=1e-6)
@@ -55,10 +57,11 @@ def test_attention_streaming_consistency():
     # Use positive inputs for PCEN-related components
     x = torch.rand(1, 100, d_model)
     with torch.no_grad():
-        y_batch, _ = attn(x)
+        cache_batch = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
+        y_batch, _ = attn(x, cache_batch)
         
         # Stream by 10-frame chunks
-        states = None
+        states = (torch.zeros(1, n_head, 0, d_model // n_head), torch.zeros(1, n_head, 0, d_model // n_head), torch.tensor(0))
         y_streams = []
         for i in range(0, 100, 10):
             chunk = x[:, i:i+10, :]
@@ -77,9 +80,10 @@ def test_conv_module_streaming_consistency():
     # Use positive inputs for PCEN-related components
     x = torch.rand(1, 100, d_model)
     with torch.no_grad():
-        y_batch, _ = conv(x)
+        cache_batch = torch.zeros(1, d_model, 30)
+        y_batch, _ = conv(x, cache_batch)
         
-        states = None
+        states = torch.zeros(1, d_model, 30)
         y_streams = []
         for i in range(0, 100, 10):
             chunk = x[:, i:i+10, :]
@@ -99,12 +103,14 @@ def test_subsampling_causality():
     # Use positive inputs for PCEN-related components
     x = torch.rand(1, 100, in_channels)
     with torch.no_grad():
-        out1, _ = sub(x)
+        cache1 = torch.zeros(1, 1, 2, in_channels)
+        out1, _ = sub(x, cache1)
         
         # Modify future input
         x_mod = x.clone()
         x_mod[:, 80:, :] += 1.0
-        out2, _ = sub(x_mod)
+        cache2 = torch.zeros(1, 1, 2, in_channels)
+        out2, _ = sub(x_mod, cache2)
         
     # Output is 2x downsampled. Frame 40 in output roughly corresponds to frame 80 in input.
     assert torch.allclose(out1[:, :35, :], out2[:, :35, :], atol=1e-6)
@@ -119,12 +125,13 @@ def test_subsampling_streaming_consistency():
     # Use positive inputs for PCEN-related components
     x = torch.rand(1, 100, in_channels)
     with torch.no_grad():
-        y_batch, _ = sub(x)
+        cache_batch = torch.zeros(1, 1, 2, in_channels)
+        y_batch, _ = sub(x, cache_batch)
         
-        states = None
+        states = torch.zeros(1, 1, 2, in_channels)
         y_streams = []
         # Non-even chunk sizes to test robustness
-        chunks = [13, 7, 20, 40, 20] 
+        chunks = [13, 7, 20, 40, 20]
         start = 0
         for sz in chunks:
             chunk = x[:, start:start+sz, :]
@@ -150,10 +157,11 @@ def test_model_full_streaming_consistency():
     # Use positive inputs for PCEN
     x = torch.rand(1, 200, config.N_BINS).to(device)
     with torch.no_grad():
-        (y_batch, _, _), _ = model(x)
+        states_batch = model.get_initial_states(1, device)
+        (y_batch, _, _), _ = model(x, states_batch)
         
         # Start with None to match batch inference (initializes from first frame)
-        states = None
+        states = model.get_initial_states(1, device)
         y_streams = []
         for i in range(0, 200, 20):
             chunk = x[:, i:i+20, :]

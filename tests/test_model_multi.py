@@ -11,7 +11,8 @@ def test_model_multi_output():
     model = StreamingConformer(n_mels=n_mels, num_classes=num_classes)
     x = torch.randn(batch_size, seq_len, n_mels)
     
-    (logits, signal_logits, boundary_logits), _ = model(x)
+    states = model.get_initial_states(batch_size, x.device)
+    (logits, signal_logits, boundary_logits), _ = model(x, states)
     
     # CTC Logits
     assert logits.shape == (batch_size, seq_len // config.SUBSAMPLING_RATE, num_classes)
@@ -28,7 +29,8 @@ def test_streaming_multi_output():
     x = torch.randn(1, chunk_size, config.N_BINS)
     
     with torch.no_grad():
-        (logits, signal_logits, boundary_logits), states = model(x)
+        states = model.get_initial_states(1, x.device)
+        (logits, signal_logits, boundary_logits), states = model(x, states)
         
         assert logits.shape == (1, chunk_size // config.SUBSAMPLING_RATE, config.NUM_CLASSES)
         assert signal_logits.shape == (1, chunk_size // config.SUBSAMPLING_RATE, config.NUM_SIGNAL_CLASSES)

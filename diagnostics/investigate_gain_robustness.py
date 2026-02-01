@@ -103,11 +103,13 @@ def investigate_gain(checkpoint_path):
         with torch.no_grad():
             # Capture PCEN output manually for visualization
             input_scaled = mels * model.input_scale
-            pcen_out, _ = model.pcen(input_scaled)
+            pcen_state = torch.zeros(input_scaled.size(0), 1, config.N_BINS, device=device)
+            pcen_out, _ = model.pcen(input_scaled, pcen_state)
             activations['pcen_out'] = pcen_out.detach()
             
             # Full model forward
-            (logits, sig_logits, bound_logits), _ = model(mels)
+            states = model.get_initial_states(mels.size(0), device)
+            (logits, sig_logits, bound_logits), _ = model(mels, states)
         
         # Plotting
         ax_in = axes[i, 0]

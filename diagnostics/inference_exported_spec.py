@@ -53,7 +53,7 @@ def run_inference(json_path, checkpoint_path, device="cpu"):
     model.eval()
     
     # 3. Initialize States and Decoder
-    states = None
+    states = model.get_initial_states(1, device)
     decoder = CTCDecoder(config.ID_TO_CHAR)
     
     # 4. Inference Loop (Chunking like demo-mic.js)

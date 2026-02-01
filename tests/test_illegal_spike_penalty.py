@@ -40,7 +40,8 @@ def test_illegal_spike_penalty():
 
     # 1. 正常な（Blankに近い）ロジットでの Loss
     with torch.no_grad():
-        (logits_clean, signal_logits, boundary_logits), _ = trainer.model(mels)
+        states = trainer.model.get_initial_states(mels.size(0), mels.device)
+        (logits_clean, signal_logits, boundary_logits), _ = trainer.model(mels, states)
         # Blank を優勢にする
         logits_clean[:, :, 0] = 10.0
         logits_clean[:, :, 1:] = -10.0

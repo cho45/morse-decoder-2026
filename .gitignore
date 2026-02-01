@@ -4,4 +4,6 @@ __pycache__/
 checkpoints/
 evaluation_results/
 node_modules/
-
+pytorch/
+.claude/
+plan/

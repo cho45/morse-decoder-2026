@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import onnxruntime as ort
+import onnx
 import numpy as np
 import argparse
 import config
@@ -11,36 +12,38 @@ class ONNXWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.num_layers = len(model.layers)
+        self.num_layers = config.NUM_LAYERS
 
-    def forward(self, x, pcen_state, sub_cache, *layer_states_flat):
+    def forward(self, x: torch.Tensor, pcen_state: torch.Tensor, sub_cache: torch.Tensor,
+                attn_k_0: torch.Tensor, attn_v_0: torch.Tensor, offset_0: torch.Tensor, conv_cache_0: torch.Tensor,
+                attn_k_1: torch.Tensor, attn_v_1: torch.Tensor, offset_1: torch.Tensor, conv_cache_1: torch.Tensor,
+                attn_k_2: torch.Tensor, attn_v_2: torch.Tensor, offset_2: torch.Tensor, conv_cache_2: torch.Tensor,
+                attn_k_3: torch.Tensor, attn_v_3: torch.Tensor, offset_3: torch.Tensor, conv_cache_3: torch.Tensor):
         """
-        x: (B, T, F)
-        pcen_state: (B, 1, F)
-        sub_cache: (B, 1, T_sub, F)
-        layer_states_flat: [attn_k_0, attn_v_0, offset_0, conv_cache_0, attn_k_1, ...]
+        Flattened forward for torch.export compatibility.
         """
-        layer_states = []
-        for i in range(0, len(layer_states_flat), 4):
-            k = layer_states_flat[i]
-            v = layer_states_flat[i+1]
-            offset = layer_states_flat[i+2] # Keep as tensor
-            conv = layer_states_flat[i+3]
-            layer_states.append(((k, v, offset), conv))
+        # States are always provided as tensors to avoid specialization.
+        layer_states = [
+            ((attn_k_0, attn_v_0, offset_0), conv_cache_0),
+            ((attn_k_1, attn_v_1, offset_1), conv_cache_1),
+            ((attn_k_2, attn_v_2, offset_2), conv_cache_2),
+            ((attn_k_3, attn_v_3, offset_3), conv_cache_3),
+        ]
         
         states = (pcen_state, sub_cache, layer_states)
         
         (logits, signal_logits, boundary_logits), (new_pcen_state, new_sub_cache, new_layer_states) = self.model(x, states)
         
         # Flatten new states
-        new_states_flat = [new_pcen_state, new_sub_cache]
+        res = [logits, signal_logits, boundary_logits, new_pcen_state, new_sub_cache]
         for (new_attn, new_conv) in new_layer_states:
-            new_states_flat.append(new_attn[0]) # k
-            new_states_flat.append(new_attn[1]) # v
-            new_states_flat.append(new_attn[2].view(())) # offset (0-dim tensor)
-            new_states_flat.append(new_conv)
+            res.append(new_attn[0]) # k
+            res.append(new_attn[1]) # v
+            # offset is a Tensor or SymInt
+            res.append(new_attn[2])
+            res.append(new_conv)
             
-        return logits, signal_logits, boundary_logits, *new_states_flat
+        return tuple(res)
 
 def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     device = torch.device("cpu")
@@ -67,8 +70,8 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     wrapper.eval()  # Ensure wrapper is in eval mode for correct ONNX export
 
     # Dummy inputs
-    batch_size = 1
-    seq_len = 40 # Multiple of 4
+    batch_size = 2
+    seq_len = 12 # Multiple of 4, within dynamic_shapes [3, 20]
     # Use positive values for spectrogram dummy input to avoid NaNs in PCEN (log/pow)
     x = torch.rand(batch_size, seq_len, config.N_BINS)
     
@@ -76,58 +79,78 @@ def export(checkpoint_path=None, output_path="cw_decoder.onnx"):
     sub_cache = torch.zeros(batch_size, 1, 2, config.N_BINS) # Initial sub_cache
     
     layer_states_flat = []
+    # Use non-zero, non-one cache length for example inputs to avoid 0/1 specialization issues.
+    example_cache_len = 10
     for _ in range(config.NUM_LAYERS):
         # attn_k, attn_v: (B, n_head, T_attn, d_k)
         d_k = config.D_MODEL // config.N_HEAD
-        layer_states_flat.append(torch.zeros(batch_size, config.N_HEAD, 0, d_k)) # k
-        layer_states_flat.append(torch.zeros(batch_size, config.N_HEAD, 0, d_k)) # v
-        layer_states_flat.append(torch.tensor(0, dtype=torch.long)) # offset (0-dim)
+        layer_states_flat.append(torch.zeros(batch_size, config.N_HEAD, example_cache_len, d_k)) # k
+        layer_states_flat.append(torch.zeros(batch_size, config.N_HEAD, example_cache_len, d_k)) # v
+        layer_states_flat.append(torch.tensor(example_cache_len, dtype=torch.long)) # offset (scalar tensor)
         # conv_cache: (B, d_model, kernel_size - 1)
         layer_states_flat.append(torch.zeros(batch_size, config.D_MODEL, config.KERNEL_SIZE - 1))
 
     input_names = ['x', 'pcen_state', 'sub_cache']
     output_names = ['logits', 'signal_logits', 'boundary_logits', 'new_pcen_state', 'new_sub_cache']
     
-    dynamic_axes = {
-        'x': {0: 'batch_size', 1: 'seq_len'},
-        'pcen_state': {0: 'batch_size'},
-        'sub_cache': {0: 'batch_size', 2: 'sub_cache_len'},
-        'logits': {0: 'batch_size', 1: 'out_seq_len'},
-        'signal_logits': {0: 'batch_size', 1: 'out_seq_len'},
-        'boundary_logits': {0: 'batch_size', 1: 'out_seq_len'},
-        'new_pcen_state': {0: 'batch_size'},
-        'new_sub_cache': {0: 'batch_size', 2: 'new_sub_cache_len'},
-    }
-
     for i in range(config.NUM_LAYERS):
         input_names.extend([f'attn_k_{i}', f'attn_v_{i}', f'offset_{i}', f'conv_cache_{i}'])
         output_names.extend([f'new_attn_k_{i}', f'new_attn_v_{i}', f'new_offset_{i}', f'new_conv_cache_{i}'])
-        
-        dynamic_axes[f'attn_k_{i}'] = {0: 'batch_size', 2: 'attn_cache_len'}
-        dynamic_axes[f'attn_v_{i}'] = {0: 'batch_size', 2: 'attn_cache_len'}
-        dynamic_axes[f'conv_cache_{i}'] = {0: 'batch_size'}
-        
-        dynamic_axes[f'new_attn_k_{i}'] = {0: 'batch_size', 2: 'new_attn_cache_len'}
-        dynamic_axes[f'new_attn_v_{i}'] = {0: 'batch_size', 2: 'new_attn_cache_len'}
-        dynamic_axes[f'new_conv_cache_{i}'] = {0: 'batch_size'}
 
     print(f"Exporting to {output_path}...")
 
-    # [IMPORTANT] Explicitly disable dynamo exporter to use the legacy TorchScript-based one.
-    # This is necessary because the new Dynamo exporter has different requirements for dynamic shapes
-    # and argument structures that are currently incompatible with our dynamic_axes configuration.
-    torch.onnx.export(
+    # [IMPORTANT] Use dynamo=True to use the new torch.export-based exporter.
+    # This requires flattened inputs/outputs for the wrapper.
+    
+    # Define dynamic shapes for torch.export
+    batch = torch.export.Dim("batch", min=1, max=4)
+    # Use min=2 to avoid 0/1 specialization issues where possible
+    seq = torch.export.Dim("seq", min=2, max=100)
+    sub_cache_len = torch.export.Dim("sub_cache_len", min=0, max=100)
+    attn_cache_len = torch.export.Dim("attn_cache_len", min=0, max=config.MAX_CACHE_LEN)
+    
+    # Define dynamic shapes for offsets as well.
+    # For scalar tensors, an empty dict {} marks them as dynamic in torch.export.
+    
+    dynamic_shapes = {
+        "x": {0: batch, 1: seq},
+        "pcen_state": {0: batch},
+        "sub_cache": {0: batch, 2: sub_cache_len},
+    }
+    for i in range(config.NUM_LAYERS):
+        dynamic_shapes[f"attn_k_{i}"] = {0: batch, 2: attn_cache_len}
+        dynamic_shapes[f"attn_v_{i}"] = {0: batch, 2: attn_cache_len}
+        # For scalar tensors, an empty dict {} marks them as dynamic in torch.export.
+        dynamic_shapes[f"offset_{i}"] = {}
+        dynamic_shapes[f"conv_cache_{i}"] = {0: batch}
+
+    # Step 1: Create an ExportedProgram with explicit constraints
+    print("Creating ExportedProgram...")
+    # Use strict=False to avoid over-specialization on example inputs (e.g. batch=1, cache=0)
+    exported_program = torch.export.export(
         wrapper,
-        (x, pcen_state, sub_cache, *layer_states_flat),
-        output_path,
+        args=(x, pcen_state, sub_cache, *layer_states_flat),
+        dynamic_shapes=dynamic_shapes,
+        strict=False
+    )
+
+    # Step 2: Convert ExportedProgram to ONNX
+    print(f"Exporting ExportedProgram to {output_path}...")
+    onnx_program = torch.onnx.export(
+        exported_program,
+        args=(), # ExportedProgram already contains example inputs
+        f=None,  # Return ONNXProgram instead of writing to file directly
         input_names=input_names,
         output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        opset_version=17, # Using a recent opset
+        opset_version=18,
         do_constant_folding=True,
-        training=torch.onnx.TrainingMode.EVAL,
-        dynamo=False
+        dynamo=True
     )
+    
+    # Save the ONNX model using the ONNXProgram.save API
+    # This is the recommended way to serialize models in PyTorch 2.6+
+    onnx_program.save(output_path)
+
     print("Export complete.")
 
     # Verification

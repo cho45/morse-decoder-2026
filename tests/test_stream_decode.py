@@ -87,6 +87,9 @@ def test_stream_decoder_init(dummy_checkpoint):
     # states is (pcen_state, sub_cache, layer_states)
     assert decoder.states is not None
     assert len(decoder.states) == 3
+    # Ensure states are initialized as tensors
+    assert torch.is_tensor(decoder.states[0])
+    assert torch.is_tensor(decoder.states[1])
     os.remove(dummy_checkpoint)
 
 def test_stream_decoder_process_chunk(dummy_checkpoint):

@@ -37,7 +37,8 @@ class TestTrainBoundary(unittest.TestCase):
         
         # Forward & Loss
         trainer.optimizer.zero_grad()
-        (logits, signal_logits, boundary_logits), _ = trainer.model(mels)
+        states = trainer.model.get_initial_states(batch_size, trainer.device)
+        (logits, signal_logits, boundary_logits), _ = trainer.model(mels, states)
         
         # マスキングロジックの再現
         logits_masked = logits.clone()

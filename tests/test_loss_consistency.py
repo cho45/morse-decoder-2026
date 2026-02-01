@@ -44,7 +44,8 @@ def test_train_val_loss_consistency():
 
     # 1. 学習時のロジックをシミュレート (train_epoch 内の計算)
     trainer.model.train()
-    (logits, signal_logits, boundary_logits), _ = trainer.model(mels)
+    states_train = trainer.model.get_initial_states(mels.size(0), mels.device)
+    (logits, signal_logits, boundary_logits), _ = trainer.model(mels, states_train)
     
     # 学習用マスキング
     bound_t = boundary_targets[:, :logits.size(1)]
@@ -59,7 +60,8 @@ def test_train_val_loss_consistency():
     # 2. 検証時のロジックをシミュレート (validate 内の計算)
     trainer.model.eval()
     with torch.no_grad():
-        (logits_val, signal_logits_val, boundary_logits_val), _ = trainer.model(mels)
+        states_val = trainer.model.get_initial_states(mels.size(0), mels.device)
+        (logits_val, signal_logits_val, boundary_logits_val), _ = trainer.model(mels, states_val)
         
         # 検証用マスキング (train.py の validate メソッドからコピーしたロジック)
         # 予測値ではなく正解ラベルを使用するように修正

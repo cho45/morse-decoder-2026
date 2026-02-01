@@ -82,7 +82,8 @@ def analyze_char_errors_for_snr(trainer, snr, num_samples, batch_size, device):
     with torch.no_grad():
         for waveforms, targets, lengths, target_lengths, texts, wpms, signal_targets, boundary_targets, is_phrases in dataloader:
             mels, input_lengths = trainer.compute_mels_and_lengths(waveforms, lengths)
-            (logits, signal_logits, boundary_logits), _ = trainer.model(mels)
+            states = trainer.model.get_initial_states(mels.size(0), trainer.device)
+            (logits, signal_logits, boundary_logits), _ = trainer.model(mels, states)
             
             # Prepare tasks for parallel decoding
             for i in range(logits.size(0)):
