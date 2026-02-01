@@ -181,3 +181,151 @@ def test_pcen_ema_vectorized_equivalence():
     # Check equivalence
     diff = torch.abs(s_rec - s_vec).max().item()
     assert diff < 1e-6, f"Vectorized EMA differs from recursive. Max diff: {diff}"
+
+def test_narrow_vs_slice_equivalence():
+    """Verify that narrow and slice operations produce identical results."""
+    
+    # Test 1: CausalMultiHeadAttention cache trimming logic
+    batch_size = 2
+    n_head = 4
+    d_k = 64
+    cache_len = 150
+    max_cache = 100
+    
+    k = torch.rand(batch_size, n_head, cache_len, d_k)
+    
+    # Slice method (old implementation)
+    k_slice = k[:, :, -max_cache:, :]
+    
+    # Narrow method (new implementation)
+    k_full_len = k.size(2)
+    k_start = k_full_len - max_cache
+    actual_start = max(0, k_start)
+    actual_len = k_full_len - actual_start
+    k_narrow = k.narrow(2, actual_start, actual_len)
+    
+    # Check equivalence
+    diff = torch.abs(k_slice - k_narrow).max().item()
+    assert diff < 1e-6, f"narrow and slice differ in attention cache. Diff: {diff}"
+    
+    # Test 2: ConformerConvModule cache saving logic
+    batch_size = 2
+    d_model = 256
+    kernel_size = 31
+    cache_len_target = kernel_size - 1
+    total_len = 100
+    
+    x = torch.rand(batch_size, d_model, total_len)
+    
+    # Slice method (old implementation)
+    x_slice = x[:, :, -cache_len_target:]
+    
+    # Narrow method (new implementation)
+    start_idx = total_len - cache_len_target
+    x_narrow = x.narrow(2, start_idx, cache_len_target)
+    
+    # Check equivalence
+    diff = torch.abs(x_slice - x_narrow).max().item()
+    assert diff < 1e-6, f"narrow and slice differ in conv cache. Diff: {diff}"
+
+def test_pcen_ema_large_sequence():
+    """Verify numerical stability of PCEN EMA for large sequence lengths."""
+    from model import PCEN
+    
+    pcen = PCEN(config.N_BINS)
+    
+    for T in [100, 500, 1000]:
+        x = torch.rand(1, T, config.N_BINS)
+        state = torch.rand(1, 1, config.N_BINS)
+        
+        with torch.no_grad():
+            E, new_state = pcen(x, state)
+        
+        # Check no NaN values
+        assert not torch.isnan(E).any(), f"PCEN output contains NaN for T={T}"
+        assert not torch.isnan(new_state).any(), f"PCEN new_state contains NaN for T={T}"
+        
+        # Check all values are finite
+        assert torch.isfinite(E).all(), f"PCEN output contains inf for T={T}"
+        assert torch.isfinite(new_state).all(), f"PCEN new_state contains inf for T={T}"
+
+def test_get_initial_states_cache_len():
+    """Verify get_initial_states handles different cache_len values correctly."""
+    model = StreamingConformer(num_layers=2)
+    
+    for cache_len in [0, 10, 50]:
+        states = model.get_initial_states(1, device="cpu", cache_len=cache_len)
+        
+        pcen_state, sub_cache, layer_states = states
+        
+        # Check pcen_state shape
+        assert pcen_state.shape == (1, 1, config.N_BINS), f"pcen_state shape mismatch for cache_len={cache_len}"
+        
+        # Check sub_cache shape
+        assert sub_cache.shape == (1, 1, 2, config.N_BINS), f"sub_cache shape mismatch for cache_len={cache_len}"
+        
+        # Check layer_states count
+        assert len(layer_states) == 2, f"layer_states count mismatch for cache_len={cache_len}"
+        
+        # Check each layer's cache shapes
+        for i, (attn_cache, conv_cache) in enumerate(layer_states):
+            k, v, offset = attn_cache
+            assert k.shape == (1, config.N_HEAD, cache_len, config.D_MODEL // config.N_HEAD), \
+                f"Layer {i}: k shape mismatch for cache_len={cache_len}"
+            assert v.shape == (1, config.N_HEAD, cache_len, config.D_MODEL // config.N_HEAD), \
+                f"Layer {i}: v shape mismatch for cache_len={cache_len}"
+            assert offset.item() == cache_len, \
+                f"Layer {i}: offset mismatch for cache_len={cache_len}"
+            assert conv_cache.shape == (1, config.D_MODEL, config.KERNEL_SIZE - 1), \
+                f"Layer {i}: conv_cache shape mismatch for cache_len={cache_len}"
+
+def test_conv_subsampling_boundary():
+    """Verify ConvSubsampling handles boundary condition correctly."""
+    subsampling = ConvSubsampling(config.N_BINS, config.D_MODEL)
+    subsampling.eval()
+    
+    # Input length = 1 (after concatenating cache: l_in = 2 + 1 = 3, n_out = (3-3)//2+1 = 1)
+    x = torch.rand(1, 1, config.N_BINS)
+    cache = torch.zeros(1, 1, 2, config.N_BINS)
+    
+    with torch.no_grad():
+        y, new_cache = subsampling(x, cache)
+    
+    # Expected output length = n_out = 1
+    assert y.shape == (1, 1, config.D_MODEL), f"Expected shape (1, 1, {config.D_MODEL}), got {y.shape}"
+
+def test_conv_subsampling_too_short():
+    """Verify ConvSubsampling raises error when concatenated input length < 3."""
+    subsampling = ConvSubsampling(config.N_BINS, config.D_MODEL)
+    subsampling.eval()
+    
+    # Input length = 0 (after concatenating cache: l_in = 2 + 0 = 2 < 3, should raise error)
+    x = torch.rand(1, 0, config.N_BINS)
+    cache = torch.zeros(1, 1, 2, config.N_BINS)
+    
+        # In eager mode, torch._check should raise an error
+    with pytest.raises(RuntimeError, match="Expected cond to be True, but got False"):
+        with torch.no_grad():
+            y, new_cache = subsampling(x, cache)
+
+@pytest.mark.parametrize("batch_size", [1, 2, 4])
+@pytest.mark.parametrize("seq_len", [20, 40, 80, 160])
+def test_dynamic_shape_inference(batch_size, seq_len):
+    """Verify model inference works correctly with different batch sizes and sequence lengths."""
+    model = StreamingConformer(num_layers=2)
+    model.eval()
+    
+    states = model.get_initial_states(batch_size, device="cpu")
+    x = torch.rand(batch_size, seq_len, config.N_BINS)
+    
+    with torch.no_grad():
+        (logits, sig_out, bound_out), new_states = model(x, states)
+    
+    # Check output shapes
+    expected_seq_len = seq_len // config.SUBSAMPLING_RATE
+    assert logits.shape == (batch_size, expected_seq_len, config.NUM_CLASSES), \
+        f"logits shape mismatch: expected ({batch_size}, {expected_seq_len}, {config.NUM_CLASSES}), got {logits.shape}"
+    assert sig_out.shape == (batch_size, expected_seq_len, config.NUM_SIGNAL_CLASSES), \
+        f"signal logits shape mismatch: expected ({batch_size}, {expected_seq_len}, {config.NUM_SIGNAL_CLASSES}), got {sig_out.shape}"
+    assert bound_out.shape == (batch_size, expected_seq_len, 1), \
+        f"boundary logits shape mismatch: expected ({batch_size}, {expected_seq_len}, 1), got {bound_out.shape}"

@@ -634,5 +634,29 @@ class TestRelPositionalEncodingONNX:
                 os.unlink(onnx_path)
 
 
+def test_model_dynamo_compatible():
+    """Verify torch.compile (Dynamo) works with the model."""
+    model = StreamingConformer(num_layers=4)
+    model.eval()
+    
+    states = model.get_initial_states(1, device="cpu")
+    x = torch.rand(1, 40, config.N_BINS)
+    
+    # Compile with Dynamo
+    compiled = torch.compile(model, backend="inductor")
+    
+    # Warmup compilation
+    with torch.no_grad():
+        (logits, sig_out, bound_out), new_states = compiled(x, states)
+    
+    # Verify output shapes
+    assert logits.shape == (1, 20, config.NUM_CLASSES)
+    assert sig_out.shape == (1, 20, config.NUM_SIGNAL_CLASSES)
+    assert bound_out.shape == (1, 20, 1)
+
+
+
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
