@@ -20,10 +20,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from data_gen import generate_sample, CWDataset, MorseGenerator
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
+from diagnostics.visualize_snr_performance import get_evaluation_texts
 
-def generate_random_text(length: int = 6) -> str:
-    chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=length)) + " "
 
 def worker_init():
     """Initialize worker process."""
@@ -37,24 +35,17 @@ def generate_sample_wrapper(args):
     
     freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
     
-    # Adaptive WPM logic
+    # Fixed WPM 15 for evaluation stability
     sample_wpm = wpm
-    if wpm == 20:
-        # We need a temporary generator for estimation
-        gen = MorseGenerator()
-        sample_wpm = gen.estimate_wpm_for_target_frames(
-            text,
-            target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
-            min_wpm=15, max_wpm=45
-        )
 
-    waveform, _, _, _ = generate_sample(
+    # generate_sample will handle text reconstruction/truncation
+    waveform, actual_text, _, _ = generate_sample(
         text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
         jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
         qrm_prob=qrm_prob, impulse_prob=impulse_prob
     )
     
-    return waveform.numpy(), text
+    return waveform.numpy(), actual_text
 
 class ONNXPerformanceEvaluator:
     def __init__(self, model_path: str, executor: concurrent.futures.ProcessPoolExecutor):
@@ -289,10 +280,14 @@ def main():
             avg_cers = []
             print(f"Evaluating model: {label}")
             
+            dataset = CWDataset()
             for snr in tqdm(snrs):
-                texts = [generate_random_text(6) for _ in range(args.samples)]
+                # Mixed high-density text and phrases using centralized logic
+                random_texts, phrase_texts = get_evaluation_texts(args.samples // 2, dataset, wpm=15)
+                texts = random_texts + phrase_texts
+                
                 cers = evaluator.evaluate_batch(
-                    texts, snr, random_freq=args.random_freq,
+                    texts, snr, wpm=15, random_freq=args.random_freq,
                     fading_speed=args.fading_speed, min_fading=args.min_fading,
                     qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
                 )

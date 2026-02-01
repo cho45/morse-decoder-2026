@@ -19,7 +19,7 @@ from model import StreamingConformer
 from data_gen import generate_sample, CWDataset, MorseGenerator
 import config
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
-from diagnostics.visualize_snr_performance import generate_random_text
+from diagnostics.visualize_snr_performance import get_evaluation_texts
 
 # Global evaluator for worker processes
 _evaluator = None
@@ -108,15 +108,11 @@ class PyTorchStreamingEvaluator:
         freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
 
         # Adaptive WPM for phrases to fit in 10s
+        # Fixed WPM for evaluation stability
         sample_wpm = wpm
-        if wpm == 20:
-            sample_wpm = self.gen.estimate_wpm_for_target_frames(
-                text,
-                target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
-                min_wpm=15, max_wpm=45
-            )
 
-        waveform, _, _, _ = generate_sample(
+        # generate_sample will handle text reconstruction/truncation
+        waveform, actual_text, _, _ = generate_sample(
             text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
             jitter=0.0, weight=1.0, fading_speed=0.0, min_fading=1.0
         )
@@ -126,7 +122,7 @@ class PyTorchStreamingEvaluator:
 
         bound_probs = torch.sigmoid(boundary_logits[0]).squeeze(-1)
         decoded, _ = decode_multi_task(logits[0], signal_logits[0], bound_probs)
-        return calculate_cer(text, decoded)
+        return calculate_cer(actual_text, decoded)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -157,9 +153,13 @@ def main():
     )
 
     try:
+        dataset = CWDataset()
         for snr in tqdm(snrs):
-            texts = [generate_random_text(6) for _ in range(args.samples)]
-            args_list = [(text, snr, 20, args.random_freq) for text in texts]
+            # Mixed high-density text and phrases using centralized logic
+            random_texts, phrase_texts = get_evaluation_texts(args.samples // 2, dataset, wpm=15)
+            texts = random_texts + phrase_texts
+            
+            args_list = [(text, snr, 15, args.random_freq) for text in texts]
             cers = list(executor.map(process_single_sample, args_list))
             avg_cer = np.mean(cers)
             avg_cers.append(avg_cer)

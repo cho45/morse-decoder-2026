@@ -299,9 +299,9 @@ class Trainer:
         with torch.no_grad():
             # (B, T) -> (B, 1, T)
             soft_bound = bound_t.unsqueeze(1)
-            # 左右 7フレーム程度を許容 (計 15フレーム)
-            # フェーズ進展に伴う境界の曖昧さを許容し、Deletion を抑制するために拡大
-            soft_bound = F.max_pool1d(soft_bound, kernel_size=15, stride=1, padding=7)
+            # [修正] 遊び（許容範囲）を 15フレーム(300ms) から 5フレーム(100ms) に縮小
+            # 規律を厳格化し、符号の途中でスパイクを出す Partial Decoding を抑制する
+            soft_bound = F.max_pool1d(soft_bound, kernel_size=5, stride=1, padding=2)
             soft_bound = soft_bound.squeeze(1)
             
         # ペナルティ対象： バウンダリ（およびその周辺）でない場所
@@ -322,10 +322,10 @@ class Trainer:
         bound_loss = (raw_bound_loss * mask).sum() / (mask.sum() + 1e-6)
 
         # 損失の重みバランスを調整:
-        # 信号認識 (Sig Loss) の重みを 10.0 に落ち着かせ、CTC の重みを 2.0 に強化。
+        # 信号認識 (Sig Loss) の重みを 5.0 に落ち着かせ、CTC の重みを 2.0 に強化。
         # これにより、信号の物理構造を維持しつつ、文字識別能力の向上を図る。
         # 低 SNR 環境下でのアライメント崩壊を防ぐため、Illegal Spike Penalty は 0.5倍で維持。
-        total_loss = 2.0 * ctc_loss + 10.0 * sig_loss + 1.0 * bound_loss + (penalty_weight * 0.5) * illegal_spike_loss
+        total_loss = 10.0 * ctc_loss + 2.0 * sig_loss + 1.0 * bound_loss + (penalty_weight * 0.5) * illegal_spike_loss
         
         return total_loss, {'ctc': ctc_loss, 'sig': sig_loss, 'bound': bound_loss, 'penalty': illegal_spike_loss}
 

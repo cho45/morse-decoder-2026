@@ -2,7 +2,7 @@ import torch
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_gen import CWDataset
+from data_gen import CWDataset, MorseGenerator
 import config
 
 def test_low_wpm_limit():
@@ -31,7 +31,10 @@ def test_low_wpm_limit():
         # At 10 WPM, 1 unit = 1.2/10 = 0.12s.
         # PARIS standard (50 units) = 6s.
         # 10 seconds allows about 1.6 words = 8-10 chars.
-        assert len(label) <= 15, f"Text length {len(label)} too long for 10 WPM"
+        # We count tokens (chars + prosigns) because prosigns are long in string length.
+        gen = MorseGenerator()
+        tokens = gen.text_to_morse_tokens(label)
+        assert len(tokens) <= 15, f"Token count {len(tokens)} too long for 10 WPM (Text: '{label}')"
 
     print(f"Max frames observed: {max_frames}")
     print("Low WPM limit test passed!")

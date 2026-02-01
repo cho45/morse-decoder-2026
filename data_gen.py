@@ -203,37 +203,65 @@ class MorseGenerator:
         Estimate the maximum number of characters that can fit in target_frames at given WPM.
         Using PARIS standard (50 units per word, 5 chars + 1 space).
         """
-        # Subtract silence (approx 1.0s total for pre/post silence)
-        target_sec = max(0.5, (target_frames * config.HOP_LENGTH / self.sample_rate) - 1.0)
+        # Subtract minimal silence (0.2s total)
+        target_sec = max(0.5, (target_frames * config.HOP_LENGTH / self.sample_rate) - 0.2)
         
         # total_units = target_sec * (WPM * 50 / 60) = target_sec * WPM / 1.2
         total_units = (target_sec * wpm) / 1.2
         
         # Average units per character:
-        # PARIS is 50 units for 5 chars + 1 space = 50/6 = 8.33 units/char.
-        # Some characters are long (e.g., '0' is 19 units).
-        # We use a very conservative 15 units/char to ensure it fits even with numbers.
-        max_chars = int(total_units / 15)
+        # PARIS is 50 units for 5 chars + 1 space = 8.33 units/char.
+        # We use 13 units/char (less conservative than 15) to increase density while keeping buffer.
+        max_chars = int(total_units / 13)
         return max(1, max_chars)
+
+    def estimate_duration(self, text: str, wpm: int, weight: float = 1.0) -> float:
+        """Estimate the duration of text in seconds at given WPM."""
+        dot_len = 1.2 / wpm
+        # Count approximate units in text
+        tokens = self.text_to_morse_tokens(text)
+        total_units = 0
+        for token in tokens:
+            if token == ' ':
+                total_units += 7
+                continue
+            code = MORSE_DICT.get(token, "")
+            for symbol in code:
+                if symbol == '.': total_units += 1 * weight
+                elif symbol == '-': total_units += 3 * weight
+                total_units += 1 # Intra-char space
+            total_units += 3 # Inter-char space
+        return total_units * dot_len
 
     def generate_waveform(self, timing: List[Tuple[int, float]], frequency: float = 700.0,
                           waveform_type: str = 'sine', rise_time: float = 0.005, wpm: int = 20,
-                          drift_hz: float = 0.0, max_duration: float = 10.0) -> np.ndarray:
+                          drift_hz: float = 0.0, max_duration: float = 10.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Tuple[int, float]]]:
         """
         Convert timing sequence to audio waveform.
         Always returns a waveform of exactly max_duration seconds.
+        Returns (waveform, signal_frames, boundary_frames, actual_timing)
         """
-        total_timing_duration = sum(t[1] for t in timing)
+        # Ensure we fit in max_duration with a safety margin
+        safety_margin = 0.1
+        allowed_duration = max_duration - safety_margin * 2
         
-        # Ensure we fit in max_duration
-        if total_timing_duration > max_duration - 0.2:
-            # This should have been handled by caller, but we truncate just in case
-            pass
+        filtered_timing = []
+        current_sum = 0
+        for t in timing:
+            if current_sum + t[1] > allowed_duration:
+                break
+            filtered_timing.append(t)
+            current_sum += t[1]
+        timing = filtered_timing
+        total_timing_duration = current_sum
 
         # Randomly place the signal within the 10s window
-        # Allow at least 0.1s at the start and end
-        max_start = max(0.1, max_duration - total_timing_duration - 0.1)
-        pre_silence = random.uniform(0.1, max_start)
+        # Ensure at least safety_margin at the end
+        available_silence = max_duration - total_timing_duration
+        if available_silence > safety_margin * 2:
+            pre_silence = random.uniform(safety_margin, available_silence - safety_margin)
+        else:
+            pre_silence = 0.0
         
         total_samples = int(max_duration * self.sample_rate)
         waveform = np.zeros(total_samples)
@@ -349,7 +377,7 @@ class MorseGenerator:
                 if time_ptr > center_sample:
                     break
                     
-        return waveform, signal_frames, boundary_frames
+        return waveform, signal_frames, boundary_frames, timing
 
 class HFChannelSimulator:
     def __init__(self, sample_rate: int = config.SAMPLE_RATE):
@@ -570,9 +598,55 @@ def generate_sample(text: str, wpm: int = 20, sample_rate: int = config.SAMPLE_R
         text += " "
         
     timing = gen.generate_timing(text, wpm=wpm, jitter=jitter, weight=weight)
-    waveform, signal_labels, boundary_labels = gen.generate_waveform(
+    waveform, signal_labels, boundary_labels, actual_timing = gen.generate_waveform(
         timing, frequency=frequency, wpm=wpm, rise_time=rise_time, drift_hz=drift_hz, max_duration=max_duration
     )
+    
+    # Reconstruct text from actual_timing to ensure label-waveform consistency
+    # (especially at low WPM where truncation might occur)
+    tokens = gen.text_to_morse_tokens(text)
+    reconstructed_text = ""
+    
+    # timing contains elements like (1, dur), (2, dur), (3, dur), (4, dur), (5, dur)
+    # We need to find how many tokens from the original text are fully included
+    current_timing_idx = 0
+    for token in tokens:
+        if token == ' ':
+            # Inter-word space (5)
+            if current_timing_idx < len(actual_timing) and actual_timing[current_timing_idx][0] == 5:
+                reconstructed_text += " "
+                current_timing_idx += 1
+            else:
+                break
+            continue
+            
+        code = MORSE_DICT.get(token, "")
+        token_fully_included = True
+        temp_idx = current_timing_idx
+        for k, symbol in enumerate(code):
+            # Symbol (1 or 2)
+            if temp_idx < len(actual_timing) and actual_timing[temp_idx][0] in [1, 2]:
+                temp_idx += 1
+            else:
+                token_fully_included = False; break
+            
+            # Intra-char space (3)
+            if k < len(code) - 1:
+                if temp_idx < len(actual_timing) and actual_timing[temp_idx][0] == 3:
+                    temp_idx += 1
+                else:
+                    token_fully_included = False; break
+        
+        if token_fully_included:
+            reconstructed_text += token
+            current_timing_idx = temp_idx
+            # Inter-char space (4)
+            if current_timing_idx < len(actual_timing) and actual_timing[current_timing_idx][0] == 4:
+                current_timing_idx += 1
+        else:
+            break
+            
+    text = reconstructed_text
     
     # Apply TX filter (soften edges) before channel effects
     if tx_lowpass is not None:
@@ -725,8 +799,12 @@ class CWDataset(Dataset):
         for attempt in range(5): # Retry if text is too long for WPM limits
             if is_phrase:
                 text = self.generate_phrase()
+                # Strictly limit phrase length to max_len tokens (including space)
+                phrase_tokens = self.gen.text_to_morse_tokens(text)
+                if len(phrase_tokens) > self.max_len - 1:
+                    text = "".join(phrase_tokens[:self.max_len - 1])
+                
                 # Adaptive WPM for phrases to fit in 10s
-                # Use a slightly smaller target to leave room for silence
                 wpm = self.gen.estimate_wpm_for_target_frames(text, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH), min_wpm=self.min_wpm, max_wpm=self.max_wpm)
                 
                 # Verify if it fits
@@ -734,7 +812,6 @@ class CWDataset(Dataset):
                 if sum(t[1] for t in timing) < max_duration - 0.2:
                     break
                 else:
-                    # If it doesn't fit even at max_wpm, we'll retry with another phrase
                     if wpm >= self.max_wpm and attempt < 4:
                         continue
                     break
@@ -744,34 +821,26 @@ class CWDataset(Dataset):
 
                 # Generate random text
                 max_allowed_len = self.gen.estimate_max_chars_for_wpm(wpm, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH))
-                # Ensure length doesn't exceed VRAM-safe limit for this WPM
-                length = random.randint(self.min_len, max(self.min_len, min(self.max_len, max_allowed_len)))
+                # Target length must respect BOTH self.max_len and physical 10s limit
+                # Leave 1 token room for the mandatory trailing space
+                target_limit = min(self.max_len - 1, max_allowed_len - 1)
+                length = random.randint(self.min_len, max(self.min_len, target_limit))
                 
                 # Randomly choose from available tokens (chars + prosigns)
-                # Filter out spaces for random choice, we will add them manually
                 valid_tokens = self.gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else self.chars
                 valid_tokens = [t for t in valid_tokens if t != ' ']
                 
-                # Create a list of tokens
                 if self.focus_chars and random.random() < self.focus_prob:
-                    # Weighted sampling: Include at least one focus char, and higher prob for others
-                    # Mix focus chars and valid tokens
-                    # focus_chars をトークンに分解する
                     focus_tokens = self.gen.text_to_morse_tokens(self.focus_chars)
                     focus_valid = [t for t in focus_tokens if t != ' ' and t in valid_tokens]
-                    
                     if focus_valid:
-                        # Ensure at least 50% are focus chars, and try to include DIFFERENT focus chars
                         k_focus = max(1, length // 2)
                         k_other = length - k_focus
-                        
-                        # focus_valid から可能な限り多様に選ぶ (LとRの両方を入れるため、および Prosigns のため)
                         if len(focus_valid) > 1 and k_focus >= len(focus_valid):
-                            tokens = random.sample(focus_valid, len(focus_valid)) # 必ず全種類1つは入れる
+                            tokens = random.sample(focus_valid, len(focus_valid))
                             tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
                         else:
                             tokens = random.choices(focus_valid, k=k_focus)
-                        
                         tokens += random.choices(valid_tokens, k=k_other)
                         random.shuffle(tokens)
                     else:
@@ -779,15 +848,18 @@ class CWDataset(Dataset):
                 else:
                     tokens = random.choices(valid_tokens, k=length)
                 
-                # Join them, occasionally adding spaces
+                # Join them, ensuring the final token count (including spaces) does not exceed target_limit
                 text = ""
+                token_count = 0
                 for t in tokens:
+                    if token_count >= target_limit: break
                     text += t
-                    # 単語間空白の学習機会を増やすため、挿入確率を 0.4 に引き上げ
-                    if random.random() < 0.4:
+                    token_count += 1
+                    if token_count < target_limit and random.random() < 0.4:
                         text += " "
+                        token_count += 1
                 
-                # ワードの最後にも必ずスペースが入るようにし、挙動を一貫させる
+                # Ensure trailing space
                 if not text.endswith(" "):
                     text += " "
                 
@@ -797,7 +869,6 @@ class CWDataset(Dataset):
                 timing = self.gen.generate_timing(text, wpm=wpm)
                 if sum(t[1] for t in timing) < max_duration - 0.2:
                     break
-                # else retry
         snr = random.uniform(self.min_snr_2500, self.max_snr_2500)
         
         # Determine jitter and weight based on curriculum settings

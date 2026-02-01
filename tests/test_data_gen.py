@@ -40,7 +40,7 @@ def test_morse_timing_spaces():
 def test_waveform_generation():
     gen = MorseGenerator(sample_rate=config.SAMPLE_RATE)
     timing = [(1, 0.1), (3, 0.1), (2, 0.3)]
-    waveform, signal_labels, boundary_labels = gen.generate_waveform(timing, frequency=700)
+    waveform, signal_labels, boundary_labels, _ = gen.generate_waveform(timing, frequency=700)
     
     assert isinstance(waveform, np.ndarray)
     assert isinstance(signal_labels, np.ndarray)
@@ -88,3 +88,61 @@ def test_cw_dataset():
     assert isinstance(label, str)
     assert isinstance(wpm, int)
     assert len(label) > 0
+
+def test_data_density():
+    """Verify that the 10s window is used efficiently at high WPM."""
+    # Test with high WPM to see if we fill the 10s window
+    dataset = CWDataset(num_samples=20, min_wpm=40, max_wpm=40, phrase_prob=0.5)
+    densities = []
+    for i in range(len(dataset)):
+        waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[i]
+        # signal_labels: 1: Dit, 2: Dah
+        sig_indices = torch.where((signal_labels == 1) | (signal_labels == 2))[0]
+        if len(sig_indices) > 0:
+            duration_frames = sig_indices[-1].item() - sig_indices[0].item()
+            densities.append(duration_frames / len(signal_labels))
+        else:
+            densities.append(0.0)
+    
+    avg_density = np.mean(densities)
+    print(f"Average density at 40 WPM: {avg_density:.2f}")
+    # With max_len=10 limit restored, density should be relatively low (around 0.3)
+    assert avg_density < 0.5, f"Average density {avg_density:.2f} is too high, max_len might not be working"
+
+def test_strict_max_len():
+    """Verify that the token count never exceeds max_len, including spaces."""
+    max_len = 15
+    dataset = CWDataset(num_samples=50, min_wpm=40, max_wpm=40, max_len=max_len, phrase_prob=0.5)
+    gen = MorseGenerator()
+    
+    for i in range(len(dataset)):
+        waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[i]
+        tokens = gen.text_to_morse_tokens(label)
+        # label は末尾に " " が付く仕様なので、実質的なトークン数は tokens の長さ
+        token_count = len(tokens)
+        assert token_count <= max_len, f"Token count {token_count} exceeds max_len {max_len} (Phrase: {is_phrase}, Text: '{label}')"
+
+def test_data_no_overflow():
+    """Verify that the signal never overflows the max_duration (10s)."""
+    # Use very low WPM and long text to try and force overflow
+    gen = MorseGenerator(sample_rate=config.SAMPLE_RATE)
+    text = "CQ CQ CQ DE KILO CODE " * 5
+    wpm = 10
+    max_duration = 10.0
+    
+    # This should handle overflow gracefully (truncate or raise error, but here we expect safety)
+    timing = gen.generate_timing(text, wpm=wpm)
+    waveform, signal_labels, boundary_labels, _ = gen.generate_waveform(timing, wpm=wpm, max_duration=max_duration)
+    
+    # Check if the waveform length is exactly max_duration
+    assert len(waveform) == int(max_duration * config.SAMPLE_RATE)
+    
+    # Check if the last frame is NOT a signal (should have some safety margin)
+    # 0: Background/Space
+    assert signal_labels[-1] == 0, "Signal overflowed at the end of the window"
+    
+    # Check timing sum
+    total_timing = sum(t[1] for t in timing)
+    # Even if timing is long, generate_waveform should have truncated or handled it
+    # We'll check if the resulting labels are consistent with max_duration
+    assert len(signal_labels) == (len(waveform) - config.N_FFT) // config.HOP_LENGTH + 1

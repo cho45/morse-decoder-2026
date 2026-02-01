@@ -7,7 +7,7 @@ import sys
 import random
 import string
 from tqdm import tqdm
-from typing import List
+from typing import List, Tuple
 
 # Add parent directory to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,29 +35,26 @@ class PerformanceEvaluator:
         self.model.eval()
         self.gen = MorseGenerator()
 
-    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False,
+    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 15, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
                        qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
         waveforms = []
         sample_wpms = []
         freqs = []
+        actual_texts = []
         
         # 1. Generate all waveforms in CPU loop
         for text in texts:
             freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
             sample_wpm = wpm
-            if wpm == 20:
-                sample_wpm = self.gen.estimate_wpm_for_target_frames(
-                    text,
-                    target_frames=int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH),
-                    min_wpm=15, max_wpm=45
-                )
             
-            waveform, _, _, _ = generate_sample(
+            # generate_sample will handle text reconstruction/truncation
+            waveform, actual_text, _, _ = generate_sample(
                 text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
                 jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
                 qrm_prob=qrm_prob, impulse_prob=impulse_prob
             )
+            actual_texts.append(actual_text)
             waveforms.append(waveform)
             sample_wpms.append(sample_wpm)
             freqs.append(freq)
@@ -76,7 +73,7 @@ class PerformanceEvaluator:
             
         # 3. Decoding and CER Calculation in CPU loop
         cers = []
-        for i, text in enumerate(texts):
+        for i, text in enumerate(actual_texts):
             decoded, _ = decode_multi_task(ctc_batch[i], sig_batch[i], bound_probs_batch[i])
             cer = calculate_cer(text, decoded)
             cers.append(cer)
@@ -87,9 +84,40 @@ class PerformanceEvaluator:
                 
         return cers
 
-def generate_random_text(length: int = 6) -> str:
+def generate_random_text(wpm: int = 15) -> str:
+    """Generate random text that fits in 10s at given WPM with high density."""
+    gen = MorseGenerator()
+    # Target about 80% of 10s
+    max_chars = gen.estimate_max_chars_for_wpm(wpm, target_frames=800)
     chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=length)) + " "   
+    text = "".join(random.choices(chars, k=max_chars))
+    # Add some spaces
+    text_with_spaces = ""
+    for c in text:
+        text_with_spaces += c
+        if random.random() < 0.2:
+            text_with_spaces += " "
+    return text_with_spaces.strip() + " "
+
+def generate_packed_phrase(dataset: CWDataset, wpm: int = 15) -> str:
+    """Generate multiple phrases concatenated to fit in 10s."""
+    gen = MorseGenerator()
+    max_duration = 10.0
+    text = dataset.generate_phrase()
+    
+    for _ in range(3):
+        next_phrase = dataset.generate_phrase()
+        if gen.estimate_duration(text + " " + next_phrase, wpm) < max_duration - 1.0:
+            text += " " + next_phrase
+        else:
+            break
+    return text.strip() + " "
+
+def get_evaluation_texts(num_samples: int, dataset: CWDataset, wpm: int = 15) -> Tuple[List[str], List[str]]:
+    """Get two lists of texts: random and phrase based."""
+    random_texts = [generate_random_text(wpm=wpm) for _ in range(num_samples)]
+    phrase_texts = [generate_packed_phrase(dataset, wpm=wpm) for _ in range(num_samples)]
+    return random_texts, phrase_texts
 
 def main():
     parser = argparse.ArgumentParser()
@@ -114,19 +142,19 @@ def main():
     print(f"Settings: Fading={args.fading_speed}, MinFading={args.min_fading}, QRM={args.qrm_prob}, Impulse={args.impulse_prob}")
 
     for snr in tqdm(snrs):
-        # Random 6-char
-        random_texts = [generate_random_text(6) for _ in range(args.samples)]
+        random_texts, phrase_texts = get_evaluation_texts(args.samples, dataset, wpm=15)
+        
+        # Random high-density text
         random_cers = evaluator.evaluate_batch(
-            random_texts, snr, random_freq=args.random_freq,
+            random_texts, snr, wpm=15, random_freq=args.random_freq,
             fading_speed=args.fading_speed, min_fading=args.min_fading,
             qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
         )
         random_avg_cers.append(np.mean(random_cers))
 
-        # Standard Phrases
-        phrase_texts = [dataset.generate_phrase() for _ in range(args.samples)]
+        # Packed Phrases
         phrase_cers = evaluator.evaluate_batch(
-            phrase_texts, snr, random_freq=args.random_freq,
+            phrase_texts, snr, wpm=15, random_freq=args.random_freq,
             fading_speed=args.fading_speed, min_fading=args.min_fading,
             qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
         )
