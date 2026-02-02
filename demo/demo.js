@@ -22,8 +22,8 @@ let oscillator = null;
 let gainNode = null;
 let masterGainNode = null;
 let noiseNode = null;
-let filterNode = null;
-let outputFilterNode = null;
+let outputFilterNode1 = null;
+let outputFilterNode2 = null;
 let session = null;
 let isRunning = false;
 let streamInference = null; // StreamInference instance
@@ -56,6 +56,7 @@ const debugInfo = document.getElementById('debugInfo');
 const wpmSlider = document.getElementById('wpm');
 const freqSlider = document.getElementById('frequency');
 const snrSlider = document.getElementById('snr');
+const bwSlider = document.getElementById('bw');
 const jitterSlider = document.getElementById('jitter');
 const volumeSlider = document.getElementById('volume');
 
@@ -63,15 +64,27 @@ const volumeSlider = document.getElementById('volume');
 const updateSliders = () => {
     document.getElementById('wpmValue').textContent = wpmSlider.value;
     document.getElementById('freqValue').textContent = freqSlider.value;
+    document.getElementById('bwValue').textContent = bwSlider.value;
     document.getElementById('snrValue').textContent = snrSlider.value;
     document.getElementById('jitterValue').textContent = jitterSlider.value;
     document.getElementById('volumeValue').textContent = volumeSlider.value;
 };
-[wpmSlider, freqSlider, snrSlider, jitterSlider, volumeSlider].forEach(s => {
+[wpmSlider, freqSlider, bwSlider, snrSlider, jitterSlider, volumeSlider].forEach(s => {
     s.oninput = () => {
         updateSliders();
         if (s.id === 'volume' && masterGainNode) {
             masterGainNode.gain.setTargetAtTime(parseFloat(volumeSlider.value), audioContext.currentTime, 0.01);
+        }
+        if (s.id === 'bw' || s.id === 'frequency') {
+            if (outputFilterNode1 && outputFilterNode2) {
+                const f = parseFloat(freqSlider.value);
+                const bw = parseFloat(bwSlider.value);
+                const q = f / bw;
+                outputFilterNode1.frequency.setTargetAtTime(f, audioContext.currentTime, 0.01);
+                outputFilterNode1.Q.setTargetAtTime(q, audioContext.currentTime, 0.01);
+                outputFilterNode2.frequency.setTargetAtTime(f, audioContext.currentTime, 0.01);
+                outputFilterNode2.Q.setTargetAtTime(q, audioContext.currentTime, 0.01);
+            }
         }
     };
 });
@@ -141,10 +154,16 @@ function updateDebugInfo() {
     if (!session) return;
 
     const frameCount = streamInference ? streamInference.frameCount : 0;
+    const inferenceTime = streamInference ? streamInference.inferenceTime : 0;
+    const tensorTime = streamInference ? streamInference.tensorTime : 0;
+    // chunkSize is used to calculate per-frame normalization time
+    const chunkSize = streamInference ? streamInference._options.chunkSize : 1;
 
     debugInfo.innerHTML = `モデル: ${isRunning ? '動作中' : '読み込み完了'} (${useWebGPU ? 'webgpu' : 'wasm'})<br>` +
                          `処理フレーム数: ${frameCount}<br>` +
-                         `スキップ数: ${skipCount}`;
+                         `スキップ数: ${skipCount}<br>` +
+                         `推論時間: ${inferenceTime.toFixed(2)} ms<br>` +
+                         `正規化時間/フレーム: ${(tensorTime / chunkSize).toFixed(4)} ms`;
 }
 
 
@@ -432,7 +451,7 @@ startBtn.onclick = async () => {
             hopLength: HOP_LENGTH
         }
     });
-    morseNode.connect(audioContext.destination);
+    // morseNode.connect(audioContext.destination); // Do NOT connect to output directly (it passes through input)
     
     morseNode.port.onmessage = (e) => {
         if (!isRunning || !streamInference) return;
@@ -454,6 +473,7 @@ startBtn.onclick = async () => {
 
     // --- Sender Pipeline ---
     const freq = parseInt(freqSlider.value);
+    const bw = parseInt(bwSlider.value);
 
     // 1. Oscillator (Sine wave)
     oscillator = audioContext.createOscillator();
@@ -471,34 +491,34 @@ startBtn.onclick = async () => {
     // 3. Noise (White noise)
     noiseNode = createWhiteNoise(10, parseInt(snrSlider.value)); // snrSlider.value is SNR_2500
     
-    // 4. Bandpass Filter (Radio-like CW filter, 500Hz bandwidth for inference)
-    filterNode = audioContext.createBiquadFilter();
-    filterNode.type = 'bandpass';
-    filterNode.frequency.setValueAtTime(freq, audioContext.currentTime);
-    // Q factor for ~500Hz bandwidth at 700Hz: Q = center_freq / bandwidth
-    filterNode.Q.setValueAtTime(freq / 500, audioContext.currentTime);
+    // 4. Output Filter (BW bandwidth for human hearing)
+    // Cascaded Biquad for steeper rolloff (4th order approx)
+    outputFilterNode1 = audioContext.createBiquadFilter();
+    outputFilterNode1.type = 'bandpass';
+    outputFilterNode1.frequency.setValueAtTime(freq, audioContext.currentTime);
+    // Q factor: Q = center_freq / bandwidth
+    outputFilterNode1.Q.setValueAtTime(freq / bw, audioContext.currentTime);
 
-    // 4.5 Output Filter (300Hz bandwidth for human hearing)
-    outputFilterNode = audioContext.createBiquadFilter();
-    outputFilterNode.type = 'bandpass';
-    outputFilterNode.frequency.setValueAtTime(freq, audioContext.currentTime);
-    // Q factor for ~300Hz bandwidth at 700Hz: Q = center_freq / bandwidth
-    outputFilterNode.Q.setValueAtTime(freq / 300, audioContext.currentTime);
+    outputFilterNode2 = audioContext.createBiquadFilter();
+    outputFilterNode2.type = 'bandpass';
+    outputFilterNode2.frequency.setValueAtTime(freq, audioContext.currentTime);
+    outputFilterNode2.Q.setValueAtTime(freq / bw, audioContext.currentTime);
 
-    // Connect Sender: Osc -> Gain -> Filter
+    // Connect Sender: Osc -> Gain -> Master Gain
     oscillator.connect(gainNode);
-    gainNode.connect(filterNode);
-    // Connect Noise: Noise -> Filter
-    noiseNode.connect(filterNode);
+    gainNode.connect(masterGainNode);
+    // Connect Noise: Noise -> Master Gain
+    noiseNode.connect(masterGainNode);
 
-    // Filter output goes to Master Gain
-    filterNode.connect(masterGainNode);
-
-    // Master Gain output goes to Receiver (for inference) and Output Filter (for hearing)
+    // Master Gain output goes to Receiver (for inference) DIRECTLY (no filter)
+    // The model uses spectrogram extraction which acts as a filter.
     masterGainNode.connect(morseNode);
-    masterGainNode.connect(outputFilterNode);
+    
+    // Master Gain output also goes to Output Filter (for hearing)
+    masterGainNode.connect(outputFilterNode1);
+    outputFilterNode1.connect(outputFilterNode2);
     // Output Filter goes to audio destination (human hearing)
-    outputFilterNode.connect(audioContext.destination);
+    outputFilterNode2.connect(audioContext.destination);
 
     oscillator.start();
     noiseNode.start();
@@ -533,13 +553,13 @@ stopBtn.onclick = () => {
         try { noiseNode.stop(); noiseNode.disconnect(); } catch(e) {}
         noiseNode = null;
     }
-    if (filterNode) {
-        filterNode.disconnect();
-        filterNode = null;
+    if (outputFilterNode1) {
+        outputFilterNode1.disconnect();
+        outputFilterNode1 = null;
     }
-    if (outputFilterNode) {
-        outputFilterNode.disconnect();
-        outputFilterNode = null;
+    if (outputFilterNode2) {
+        outputFilterNode2.disconnect();
+        outputFilterNode2 = null;
     }
     if (morseNode) {
         morseNode.disconnect();
