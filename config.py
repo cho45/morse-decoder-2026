@@ -33,10 +33,10 @@ CLIPPING_PROB = 0.2     # クリッピングの発生確率
 
 # Model Architecture Parameters
 SUBSAMPLING_RATE = 2 # ConvSubsampling による時間方向の圧縮率
-D_MODEL = 256        # Transformer 内の隠れ層の次元数。表現力向上のため再増強。
+D_MODEL = 128        # Transformer 内の隠れ層の次元数。表現力向上のため再増強。
 N_HEAD = 4           # Multi-head Attention のヘッド数。
-NUM_LAYERS = 4       # Conformer ブロックの積層数。リズム抽出と言語処理の機能分担を促す。
-KERNEL_SIZE = 31     # Depthwise Convolution のカーネルサイズ。約600ms（1文字分）をカバー。
+NUM_LAYERS = 6       # Conformer ブロックの積層数。リズム抽出と言語処理の機能分担を促す。
+KERNEL_SIZE = 51     # Depthwise Convolution のカーネルサイズ。約1秒をカバーし、積分効果を高める。
 DROPOUT = 0.1        # ドロップアウト率
 
 # Streaming Parameters
@@ -80,6 +80,25 @@ PHRASE_TEMPLATES = [
     "{call1} DE {call2} GA",
     "{call1} DE {call2} GE",
     "{call1} DE {call2} CL",
+    "QRA QRA?",
+    "QRH QRH?",
+    "QRL QRL?",
+    "QRM QRM?",
+    "QRN QRN?",
+    "QRP QRP?",
+    "QRS QRS?",
+    "QRT QRT?",
+    "QRU QRU?",
+    "QRV QRV?",
+    "QRX QRX?",
+    "QRZ QRZ?",
+    "QSB QSB?",
+    "QSL QSL?",
+    "QSO QSO?",
+    "QSX QSX?",
+    "QSY QSY?",
+    "QTH QTH?",
+
 ]
 COMMON_WEATHER = ["FINE", "RAIN", "CLOUDY", "SNOW", "SUNNY", "HOT", "COLD"]
 

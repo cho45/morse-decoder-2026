@@ -6,11 +6,11 @@ import { DSP } from './dsp.js';
 
 // --- Constants (Sync with config.py / demo.js) ---
 export const N_BINS = 14;
-export const NUM_LAYERS = 4; // Check if this should be 6 based on recent config.py changes
-export const D_MODEL = 256;
+export const NUM_LAYERS = 6; // Sync with config.py
+export const D_MODEL = 128;
 export const N_HEAD = 4;
 export const D_K = D_MODEL / N_HEAD;
-export const KERNEL_SIZE = 31;
+export const KERNEL_SIZE = 51; // Sync with config.py
 
 export const N_FFT = 1024;
 export const HOP_LENGTH = 160;
@@ -203,7 +203,9 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
         signalLogits,
         boundaryLogits,
         nextStates,
-        numClasses
+        numClasses,
+        tensorTime,
+        sessionTime
     };
 }
 

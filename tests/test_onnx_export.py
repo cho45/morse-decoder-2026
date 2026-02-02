@@ -121,7 +121,7 @@ class TestONNXExportNoWarnings:
 
     def test_onnx_export_no_tracer_warnings(self):
         """ONNX export should produce no TracerWarnings."""
-        model = StreamingConformer(num_layers=4)
+        model = StreamingConformer(num_layers=config.NUM_LAYERS)
         model.eval()
 
         with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
@@ -152,7 +152,7 @@ class TestONNXOutputEquivalence:
     @pytest.fixture(scope="class")
     def model_and_session(self):
         """Create model and ONNX session once per test class."""
-        model = StreamingConformer(num_layers=4)
+        model = StreamingConformer(num_layers=config.NUM_LAYERS)
         model.eval()
 
         with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
@@ -323,7 +323,7 @@ class TestONNXStreamingEquivalence:
     @pytest.fixture(scope="class")
     def model_and_session(self):
         """Create model and ONNX session once per test class."""
-        model = StreamingConformer(num_layers=4)
+        model = StreamingConformer(num_layers=config.NUM_LAYERS)
         model.eval()
 
         with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
@@ -397,7 +397,7 @@ class TestONNXCacheStatesEquivalence:
 
     def test_onnx_cache_states_equivalence(self):
         """Cache states from ONNX must match PyTorch cache states."""
-        model = StreamingConformer(num_layers=4)
+        model = StreamingConformer(num_layers=config.NUM_LAYERS)
         model.eval()
 
         with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
@@ -489,7 +489,7 @@ class TestONNXCacheLimitBehavior:
 
     def test_onnx_cache_limit_behavior(self):
         """ONNX model must handle cache overflow correctly."""
-        model = StreamingConformer(num_layers=4)
+        model = StreamingConformer(num_layers=config.NUM_LAYERS)
         model.eval()
 
         with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
@@ -636,7 +636,7 @@ class TestRelPositionalEncodingONNX:
 
 def test_model_dynamo_compatible():
     """Verify torch.compile (Dynamo) works with the model."""
-    model = StreamingConformer(num_layers=4)
+    model = StreamingConformer(num_layers=config.NUM_LAYERS)
     model.eval()
     
     states = model.get_initial_states(1, device="cpu")

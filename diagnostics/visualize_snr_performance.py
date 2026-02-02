@@ -37,7 +37,7 @@ class PerformanceEvaluator:
 
     def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 15, random_freq: bool = False,
                        fading_speed: float = 0.0, min_fading: float = 1.0,
-                       qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
+                       qrm_prob: float = 0.0, impulse_prob: float = 0.0) -> List[float]:
         waveforms = []
         sample_wpms = []
         freqs = []
@@ -127,8 +127,8 @@ def main():
     parser.add_argument("--random-freq", action="store_true", help="Enable frequency randomization")
     parser.add_argument("--fading-speed", type=float, default=0.0)
     parser.add_argument("--min-fading", type=float, default=1.0)
-    parser.add_argument("--qrm-prob", type=float, default=0.1)
-    parser.add_argument("--impulse-prob", type=float, default=0.001)
+    parser.add_argument("--qrm-prob", type=float, default=0.0)
+    parser.add_argument("--impulse-prob", type=float, default=0.0)
     args = parser.parse_args()
 
     evaluator = PerformanceEvaluator(args.checkpoint)

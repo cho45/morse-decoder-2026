@@ -2,9 +2,14 @@
 モデルアーキテクチャの可視化
 StreamingConformer の構造を図示する
 """
+import os
+import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+
+# Add project root to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import config
 
 def draw_architecture():
@@ -85,68 +90,67 @@ def draw_architecture():
     draw_arrow(y_pos, y_pos - 0.4)
     y_pos -= 0.4
 
-    # Conformer Blocks (Represented as a single unit)
-    block_top = y_pos
-    
-    # Outer boundary for the block
-    block_height = 6.0
-    rect = FancyBboxPatch(
-        (x_center - box_width/2 - 0.5, y_pos - block_height), box_width + 1.0, block_height,
-        boxstyle="round,pad=0.2", edgecolor='gray', facecolor='none', linestyle='--', linewidth=2
+    # Conformer Blocks - Phase 1: Layers 1-4 (Acoustic Focus)
+    block_top_1 = y_pos
+    block_height_1 = 3.5
+    rect1 = FancyBboxPatch(
+        (x_center - box_width/2 - 0.5, y_pos - block_height_1), box_width + 1.0, block_height_1,
+        boxstyle="round,pad=0.2", edgecolor='gray', facecolor='#F5F5F5', linestyle='-', linewidth=2
     )
-    ax.add_patch(rect)
-    ax.text(x_center + box_width/2 + 0.8, y_pos - block_height/2, f'× {config.NUM_LAYERS} Layers',
-            ha='left', va='center', fontsize=14, weight='bold', color='red')
+    ax.add_patch(rect1)
+    ax.text(x_center + box_width/2 + 0.8, y_pos - block_height_1/2, 'Layers 1-4\n(Acoustic Focus)',
+            ha='left', va='center', fontsize=12, weight='bold', color='blue')
 
-    # Inside the block
-    y_pos -= 0.2
-    y_pos = draw_box(y_pos, 'LayerNorm', encoder_color, height=0.4, width=box_width-0.5)
-    y_pos = draw_box(y_pos, f'Feed-Forward 1 (Macaron)\nLinear({config.D_MODEL} → {config.D_MODEL*4}) + SiLU + Dropout\nLinear({config.D_MODEL*4} → {config.D_MODEL})', ff_color, height=1.0, width=box_width-0.5, fontsize=9)
-    ax.text(x_center + box_width/2 - 0.5, y_pos + 0.5, '×0.5 + residual', ha='right', va='center', fontsize=8, style='italic', color='gray')
-
-    y_pos = draw_box(y_pos, 'LayerNorm', encoder_color, height=0.4, width=box_width-0.5)
-    y_pos = draw_box(y_pos, f'Causal Multi-Head Self-Attention\n(heads={config.N_HEAD}, d_k={config.D_MODEL//config.N_HEAD}) with KV cache', attention_color, height=1.0, width=box_width-0.5, fontsize=9)
-    ax.text(x_center + box_width/2 - 0.5, y_pos + 0.5, '+ residual', ha='right', va='center', fontsize=8, style='italic', color='gray')
-
-    y_pos = draw_box(y_pos, f'Conformer Conv Module\nLayerNorm + Pointwise Conv + GLU\nCausal DepthwiseConv (k={config.KERNEL_SIZE})\nLayerNorm + SiLU + Pointwise Conv', conv_color, height=1.2, width=box_width-0.5, fontsize=9)
-    ax.text(x_center + box_width/2 - 0.5, y_pos + 0.6, '+ residual', ha='right', va='center', fontsize=8, style='italic', color='gray')
-
-    y_pos = draw_box(y_pos, 'LayerNorm', encoder_color, height=0.4, width=box_width-0.5)
-    y_pos = draw_box(y_pos, f'Feed-Forward 2\nLinear({config.D_MODEL} → {config.D_MODEL*4}) + SiLU + Dropout\nLinear({config.D_MODEL*4} → {config.D_MODEL})', ff_color, height=1.0, width=box_width-0.5, fontsize=9)
-    ax.text(x_center + box_width/2 - 0.5, y_pos + 0.5, '×0.5 + residual', ha='right', va='center', fontsize=8, style='italic', color='gray')
-
-    y_pos = draw_box(y_pos, 'LayerNorm', encoder_color, height=0.4, width=box_width-0.5)
+    y_pos -= 0.5
+    y_pos = draw_box(y_pos, 'Conformer Blocks (1-4)', encoder_color, height=0.8, width=box_width-0.5)
+    y_pos = draw_box(y_pos, 'Output of Layer 4', encoder_color, height=0.6, width=box_width-1.0)
     
-    y_pos = block_top - block_height
+    # Branching for Signal/Boundary Heads from Layer 4
+    branch_y_mid = y_pos
+    draw_arrow(branch_y_mid, branch_y_mid - 1.5, x=x_center - 3.5) # Signal Head
+    draw_arrow(branch_y_mid, branch_y_mid - 1.5, x=x_center + 3.5) # Boundary Head
+    
+    # Intermediate Heads
+    head_width = 2.5
+    draw_box(branch_y_mid - 1.5, f'Signal Head\n(Linear)', output_color, height=0.8, width=head_width, x=x_center - 3.5)
+    draw_box(branch_y_mid - 1.5, f'Boundary Head\n(Linear)', output_color, height=0.8, width=head_width, x=x_center + 3.5)
+    
+    y_pos = block_top_1 - block_height_1
     draw_arrow(y_pos, y_pos - 0.6)
     y_pos -= 0.6
 
-    # Final layers
-    y_pos = draw_box(y_pos, 'Dropout + LayerNorm', encoder_color)
-    
-    # Branching to 3 heads
-    branch_y = y_pos
-    draw_arrow(branch_y, branch_y - 0.6, x=x_center)      # To CTC Head
-    draw_arrow(branch_y, branch_y - 0.6, x=x_center-3)    # To Signal Head
-    draw_arrow(branch_y, branch_y - 0.6, x=x_center+3)    # To Boundary Head
+    # Conformer Blocks - Phase 2: Layers 5-6 (Semantic Focus)
+    block_top_2 = y_pos
+    block_height_2 = 2.5
+    rect2 = FancyBboxPatch(
+        (x_center - box_width/2 - 0.5, y_pos - block_height_2), box_width + 1.0, block_height_2,
+        boxstyle="round,pad=0.2", edgecolor='gray', facecolor='#FFF9E6', linestyle='-', linewidth=2
+    )
+    ax.add_patch(rect2)
+    ax.text(x_center + box_width/2 + 0.8, y_pos - block_height_2/2, 'Layers 5-6\n(Semantic Focus)',
+            ha='left', va='center', fontsize=12, weight='bold', color='green')
+
+    y_pos -= 0.5
+    y_pos = draw_box(y_pos, 'Conformer Blocks (5-6)', encoder_color, height=0.8, width=box_width-0.5)
+    y_pos = draw_box(y_pos, 'Final Dropout + LN', encoder_color, height=0.6, width=box_width-1.0)
+
+    y_pos = block_top_2 - block_height_2
+    draw_arrow(y_pos, y_pos - 0.6)
     y_pos -= 0.6
 
-    # 3 Heads
-    head_width = 2.5
-    draw_box(y_pos, f'Signal Head\nLinear({config.D_MODEL} → {config.NUM_SIGNAL_CLASSES})', output_color, height=0.8, width=head_width, x=x_center-3)
-    draw_box(y_pos, f'CTC Head\nLinear({config.D_MODEL} → {config.NUM_CLASSES})\n(incl. blank)', output_color, height=0.8, width=head_width, x=x_center)
-    draw_box(y_pos, f'Boundary Head\nLinear({config.D_MODEL} → 1)', output_color, height=0.8, width=head_width, x=x_center+3)
+    # Final CTC Head
+    draw_box(y_pos, f'CTC Head\n(Linear)', output_color, height=0.8, width=head_width, x=x_center)
     
+    # Output markers
     y_pos -= 0.8
-    draw_arrow(y_pos, y_pos - 0.5, x=x_center-3)
     draw_arrow(y_pos, y_pos - 0.5, x=x_center)
-    draw_arrow(y_pos, y_pos - 0.5, x=x_center+3)
-    y_pos -= 0.5
+    draw_box(y_pos - 0.5, 'CTC Logits', output_color, height=0.6, width=head_width, x=x_center)
 
-    # Outputs
-    draw_box(y_pos, 'Signal Logits', output_color, height=0.6, width=head_width, x=x_center-3)
-    draw_box(y_pos, 'CTC Logits', output_color, height=0.6, width=head_width, x=x_center)
-    draw_box(y_pos, 'Boundary Logits', output_color, height=0.6, width=head_width, x=x_center+3)
+    # Signal/Boundary outputs from Layer 4 branch
+    draw_arrow(branch_y_mid - 2.3, branch_y_mid - 2.8, x=x_center - 3.5)
+    draw_arrow(branch_y_mid - 2.3, branch_y_mid - 2.8, x=x_center + 3.5)
+    draw_box(branch_y_mid - 2.8, 'Signal Logits', output_color, height=0.6, width=head_width, x=x_center - 3.5)
+    draw_box(branch_y_mid - 2.8, 'Boundary Logits', output_color, height=0.6, width=head_width, x=x_center + 3.5)
 
     # 凡例を追加
     legend_y = 0.5

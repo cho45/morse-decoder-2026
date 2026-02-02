@@ -325,7 +325,7 @@ class Trainer:
         # 信号認識 (Sig Loss) の重みを 5.0 に落ち着かせ、CTC の重みを 2.0 に強化。
         # これにより、信号の物理構造を維持しつつ、文字識別能力の向上を図る。
         # 低 SNR 環境下でのアライメント崩壊を防ぐため、Illegal Spike Penalty は 0.5倍で維持。
-        total_loss = 10.0 * ctc_loss + 2.0 * sig_loss + 1.0 * bound_loss + (penalty_weight * 0.5) * illegal_spike_loss
+        total_loss = 30.0 * ctc_loss + 1.0 * sig_loss + 1.0 * bound_loss + (penalty_weight * 0.5) * illegal_spike_loss
         
         return total_loss, {'ctc': ctc_loss, 'sig': sig_loss, 'bound': bound_loss, 'penalty': illegal_spike_loss}
 
@@ -450,19 +450,7 @@ class Trainer:
             
             total_loss_accum += loss.item() * self.args.accumulation_steps
             
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * self.args.accumulation_steps:.4f} (CTC: {loss_dict['ctc'].item():.4f}, Sig: {loss_dict['sig'].item():.4f}, Bnd: {loss_dict['bound'].item():.4f}, Pnlty: {loss_dict['penalty'].item():.4f}) | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
-                
-                # Debug lengths and logits
-                with torch.no_grad():
-                    # logits: (B, T, C)
-                    blank_logits = logits[:, :, 0]
-                    char_logits = logits[:, :, 1:]
-                    max_char_logits, _ = char_logits.max(dim=-1)
-                    
-                    print(f"  Input Len (avg): {input_lengths.float().mean():.1f} | Target Len (avg): {target_lengths.float().mean():.1f}")
-                    print(f"  Logits Stats | Blank Mean: {blank_logits.mean():.4f}, Max: {blank_logits.max():.4f}")
-                    print(f"  Logits Stats | Chars Mean: {char_logits.mean():.4f}, Max: {max_char_logits.max():.4f}")
+            print(f"Epoch {epoch} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * self.args.accumulation_steps:.4f} (CTC: {loss_dict['ctc'].item():.4f}, Sig: {loss_dict['sig'].item():.4f}, Bnd: {loss_dict['bound'].item():.4f}, Pnlty: {loss_dict['penalty'].item():.4f}) | LR: {self.optimizer.param_groups[0]['lr']:.6f}")
 
         # Print epoch statistics
         if actual_wpms and actual_lens:

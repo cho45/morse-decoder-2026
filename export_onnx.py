@@ -18,16 +18,21 @@ class ONNXWrapper(nn.Module):
                 attn_k_0: torch.Tensor, attn_v_0: torch.Tensor, offset_0: torch.Tensor, conv_cache_0: torch.Tensor,
                 attn_k_1: torch.Tensor, attn_v_1: torch.Tensor, offset_1: torch.Tensor, conv_cache_1: torch.Tensor,
                 attn_k_2: torch.Tensor, attn_v_2: torch.Tensor, offset_2: torch.Tensor, conv_cache_2: torch.Tensor,
-                attn_k_3: torch.Tensor, attn_v_3: torch.Tensor, offset_3: torch.Tensor, conv_cache_3: torch.Tensor):
+                attn_k_3: torch.Tensor, attn_v_3: torch.Tensor, offset_3: torch.Tensor, conv_cache_3: torch.Tensor,
+                attn_k_4: torch.Tensor, attn_v_4: torch.Tensor, offset_4: torch.Tensor, conv_cache_4: torch.Tensor,
+                attn_k_5: torch.Tensor, attn_v_5: torch.Tensor, offset_5: torch.Tensor, conv_cache_5: torch.Tensor):
         """
         Flattened forward for torch.export compatibility.
         """
         # States are always provided as tensors to avoid specialization.
+        # Note: We use 6 layers as per config.NUM_LAYERS = 6
         layer_states = [
             ((attn_k_0, attn_v_0, offset_0), conv_cache_0),
             ((attn_k_1, attn_v_1, offset_1), conv_cache_1),
             ((attn_k_2, attn_v_2, offset_2), conv_cache_2),
             ((attn_k_3, attn_v_3, offset_3), conv_cache_3),
+            ((attn_k_4, attn_v_4, offset_4), conv_cache_4),
+            ((attn_k_5, attn_v_5, offset_5), conv_cache_5),
         ]
         
         states = (pcen_state, sub_cache, layer_states)

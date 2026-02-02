@@ -55,7 +55,7 @@ def plot_history(csv_path, output_path):
     ax1.plot(epochs, val_loss, label='Val Loss', marker='x', markersize=4, alpha=0.7)
     ax1.set_ylabel('Loss (CTC)')
     ax1.set_title('Training and Validation Loss')
-    ax1.legend(loc='upper right')
+    ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
     ax1.set_yscale('log')
 
@@ -79,7 +79,7 @@ def plot_history(csv_path, output_path):
     ax2.set_ylabel('Character Error Rate (CER)')
     ax2.set_xlabel('Epoch')
     ax2.set_title('Validation CER')
-    ax2.legend(loc='upper right')
+    ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
     ax2.set_ylim(0, min(2.0, max(0.5, max(val_cer) * 1.1 if val_cer else 1.0)))
 
@@ -111,7 +111,7 @@ def plot_history(csv_path, output_path):
 def main():
     parser = argparse.ArgumentParser(description="Visualize training logs (history.csv)")
     parser.add_argument("--csv", type=str, default="checkpoints/history.csv", help="Path to history.csv")
-    parser.add_argument("--output", type=str, default="diagnostics/training_curves.png", help="Output path for the plot")
+    parser.add_argument("--output", type=str, default="checkpoints/training_curves.png", help="Output path for the plot")
     args = parser.parse_args()
 
     plot_history(args.csv, args.output)

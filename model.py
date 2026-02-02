@@ -187,10 +187,11 @@ class ConformerBlock(nn.Module):
         return x, (new_attn_cache, new_conv_cache)
 
 class ConvSubsampling(nn.Module):
-    """Strictly Causal Convolutional Subsampling (2x downsampling)."""
+    """Strictly Causal Convolutional Subsampling (configurable downsampling)."""
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(2, 2), padding=(0, 1))
+        self.stride = config.SUBSAMPLING_RATE
+        self.conv = nn.Conv2d(1, out_channels, kernel_size=3, stride=(self.stride, 2), padding=(0, 1))
         f_out = (config.N_BINS + 2*1 - 3) // 2 + 1
         self.out_linear = nn.Linear(out_channels * f_out, out_channels)
         self.padding_t = 2
@@ -206,14 +207,14 @@ class ConvSubsampling(nn.Module):
         torch._check_is_size(l_in)
         torch._check(l_in >= 3)
         
-        n_out = (l_in - 3) // 2 + 1
+        n_out = (l_in - 3) // self.stride + 1
         
         # n_out >= 1 が保証されているため l_consumed >= 3 は常に成立
-        l_consumed = (n_out - 1) * 2 + 3
+        l_consumed = (n_out - 1) * self.stride + 3
         # Use narrow instead of slicing to avoid specialization in Dynamo
         x_valid = x.narrow(2, 0, l_consumed)
         
-        cache_start = n_out * 2
+        cache_start = n_out * self.stride
         cache_len = l_in - cache_start
         new_cache = x.narrow(2, cache_start, cache_len)
         
@@ -388,15 +389,26 @@ class StreamingConformer(nn.Module):
         x = x + pos_emb
         
         new_layer_states = []
+        intermediate_x = x # Fallback for shallow models
         for i, layer in enumerate(self.layers):
             # In streaming mode, layer_states is always a list of tuples.
             cache = layer_states[i]
             x, new_cache = layer(x, cache)
             new_layer_states.append(new_cache)
             
+            # Capture output of Layer 4 (index 3) for Signal/Boundary heads
+            # This separates acoustic feature extraction (Layers 1-4)
+            # from semantic decoding (Layers 5+)
+            if i == 3:
+                intermediate_x = x
+            
+        # Apply final dropout to intermediate features as well
+        # Note: ConformerBlock output is already LayerNormed
+        intermediate_x = self.final_dropout(intermediate_x)
+        
         x = self.final_dropout(self.final_ln(x))
-        signal_logits = self.signal_head(x)
-        boundary_logits = self.boundary_head(x)
+        signal_logits = self.signal_head(intermediate_x)
+        boundary_logits = self.boundary_head(intermediate_x)
         logits = self.ctc_head(x)
         
         return (logits, signal_logits, boundary_logits), (new_pcen_state, new_sub_cache, new_layer_states)

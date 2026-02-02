@@ -93,6 +93,10 @@ export class StreamInference extends EventTarget {
         this._ctcHistory = [];
         this._boundHistory = [];
 
+        // Performance metrics
+        this._lastTensorTime = 0;
+        this._lastSessionTime = 0;
+
         // Initialize
         this.reset();
     }
@@ -118,6 +122,10 @@ export class StreamInference extends EventTarget {
         this._sigHistory = [];
         this._ctcHistory = [];
         this._boundHistory = [];
+
+        // Reset metrics
+        this._lastTensorTime = 0;
+        this._lastSessionTime = 0;
     }
 
     /**
@@ -284,6 +292,22 @@ export class StreamInference extends EventTarget {
         return this._buffer.length;
     }
 
+    /**
+     * Last inference session time in ms.
+     * @returns {number}
+     */
+    get inferenceTime() {
+        return this._lastSessionTime;
+    }
+
+    /**
+     * Last tensor preparation (normalization) time in ms.
+     * @returns {number}
+     */
+    get tensorTime() {
+        return this._lastTensorTime;
+    }
+
     // --- Private Methods ---
 
     /**
@@ -321,9 +345,11 @@ export class StreamInference extends EventTarget {
                 return;
             }
 
-            // Update states
+            // Update states and metrics
             const oldStateValues = Object.values(this._states);
             this._states = result.nextStates;
+            this._lastTensorTime = result.tensorTime;
+            this._lastSessionTime = result.sessionTime;
 
             // Dispose old states (skip in WebGPU mode to avoid reallocation overhead)
             if (!this._options.useWebGPU) {
