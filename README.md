@@ -9,6 +9,12 @@
 *図2: ONNX エクスポートおよび INT8 量子化後の性能比較。*
 WSL (Ubuntu) 上での学習および推論、最終的には Web ブラウザ上での動作を目指しています。
 
+## デモ
+Web ブラウザ上で動作するリアルタイム・デモを公開しています。ONNX Runtime Web を使用し、すべての推論処理はクライアントサイドで行われます。
+
+- **[マイク入力デモ](https://cho45.github.io/morse-decoder-2026/demo-mic.html)**: PC のマイクやオーディオ入力からモールス信号をリアルタイムに復号します。広帯域ウォーターフォールからのピーク検出・自動追従機能を備えています。
+- **[信号合成デモ](https://cho45.github.io/morse-decoder-2026/demo.html)**: ブラウザ上でモールス信号とノイズを合成し、モデルの復号性能をテストできます。WPM、周波数、SNR、ジッターなどをリアルタイムに変更可能です。
+
 ## 特徴
 - **Streaming Conformer:** CTC 損失を用いたストリーミング対応の CNN + Transformer アーキテクチャ。
 - **周波数クロッピング:** 広帯域信号からターゲット信号を DSP で特定し、軽量モデルで効率的に復号。
@@ -65,10 +71,12 @@ docker run --rm --gpus all -v `pwd`:/workspace cw-decoder python3 train.py --sam
 
 ### 推論・デモ (JavaScript/ONNX Runtime)
 - `demo/inference.js`: Node.js/ブラウザ共用の推論コアロジック。
+- `demo/stream-inference.js`: ストリーミング推論用のステート管理・バッファリングロジック。
 - `demo/dsp.js` / `demo/data_gen.js`: JS 版の信号処理・データ生成モジュール。
 - `demo/evaluate_snr.js`: Node.js 上での精度評価スクリプト。
-- `demo/demo.js`: ブラウザデモ用フロントエンド。
+- `demo/demo.js` / `demo/demo-mic.js`: ブラウザデモ用フロントエンド（信号合成版 / マイク入力版）。
 - `demo/audio-processor.js`: Web Audio API 用の信号処理ワークレット。
+- `demo/visualization.js`: 信号・スペクトログラム・推論結果の可視化ロジック。
 
 ## SNR の定義
 本プロジェクトにおける SNR (Signal-to-Noise Ratio) は、サンプリングレートに依存しない不変な指標として、**基準帯域幅 2500Hz (SSB 相当) における SNR** と定義されています。
@@ -165,4 +173,5 @@ make performance_onnx
     ```
 
 ### 6. ブラウザでの動作確認
-最後に `demo/demo.html` をブラウザで開き、実際のリアルタイム復号動作を確認します。
+ローカルで開発を行う場合は、`demo/demo.html` または `demo/demo-mic.html` をブラウザで開き、実際のリアルタイム復号動作を確認します。
+（※マイク入力を使用する場合は、HTTPS 環境または localhost である必要があります）
