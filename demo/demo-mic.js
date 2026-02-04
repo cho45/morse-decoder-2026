@@ -355,7 +355,14 @@ micBtn.onclick = async () => {
     exportBtn.disabled = true;
     await initAudio();
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: { ideal: 2, min: 1 },
+                echoCancellation: { exact: false },
+                noiseSuppression: { exact: false },
+                autoGainControl: { exact: false },
+            }
+        });
         const source = audioContext.createMediaStreamSource(stream);
         setupProcessing(source);
 

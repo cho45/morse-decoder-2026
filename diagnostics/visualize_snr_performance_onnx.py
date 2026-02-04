@@ -274,11 +274,12 @@ def main():
             if not os.path.exists(model_path):
                 print(f"Warning: Model not found at {model_path}. Skipping.")
                 continue
-                
+            
+            is_quantized = "quantized" in model_path.lower()
             evaluator = ONNXPerformanceEvaluator(model_path, executor)
             
             avg_cers = []
-            print(f"Evaluating model: {label}")
+            print(f"Evaluating model: {label} (Quantized: {is_quantized})")
             
             dataset = CWDataset()
             for snr in tqdm(snrs):
@@ -295,7 +296,12 @@ def main():
                 avg_cers.append(avg_cer)
                 print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
 
-            plt.plot(snrs, avg_cers, marker='o', label=f'{label} (Avg CER)')
+            if is_quantized:
+                # int8: Green dashed line
+                plt.plot(snrs, avg_cers, marker='s', linestyle='--', color='C2', label=f'{label} (ONNX int8)')
+            else:
+                # fp32: Blue solid line
+                plt.plot(snrs, avg_cers, marker='o', linestyle='-', color='C0', label=f'{label} (ONNX fp32)')
 
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.3, label='CER 10%')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.3, label='CER 5%')
