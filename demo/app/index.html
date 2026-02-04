@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CW Decoder PWA</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.min.js"></script>
+    <style>
+        [v-cloak] { display: none; }
+    </style>
+</head>
+<body>
+    <div id="app" v-cloak>
+        <!-- Setup Screen -->
+        <div v-if="state.view === 'setup'" class="screen setup-screen">
+            <h1>CW Decoder</h1>
+            
+            <div class="card">
+                <h2>受信設定</h2>
+                
+                <div class="control-group">
+                    <label>ターゲット周波数 (Hz)</label>
+                    <div class="freq-input">
+                        <button @click="adjustFreq(-50)">-50</button>
+                        <button @click="adjustFreq(-10)">-10</button>
+                        <input type="number" v-model.number="settings.targetFreq" step="10">
+                        <button @click="adjustFreq(10)">+10</button>
+                        <button @click="adjustFreq(50)">+50</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" v-model="settings.autoTrack"> 自動追従 (Auto Track)
+                    </label>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="primary" @click="startMic" :disabled="state.isLoading">
+                    <span v-if="state.isLoading">準備中...</span>
+                    <span v-else>マイクで開始</span>
+                </button>
+                <button class="secondary" @click="startDemo" :disabled="state.isLoading">
+                    <span v-if="state.isLoading">準備中...</span>
+                    <span v-else>デモモード開始</span>
+                </button>
+            </div>
+
+            <div class="card system-settings" style="margin-top: 30px; border: 1px solid #444; background: transparent;">
+                <h2 style="font-size: 16px; color: #888; border-bottom: 1px solid #444;">システム設定</h2>
+                
+                <div class="control-group">
+                    <label>ボリューム (サイドトーン/デモ音)</label>
+                    <input type="range" v-model.number="settings.volume" min="0" max="1" step="0.01">
+                </div>
+
+                <div class="control-group">
+                    <label>モデル選択</label>
+                    <select v-model="settings.modelPath">
+                        <option value="../cw_decoder_quantized.onnx">軽量 (INT8)</option>
+                        <option value="../cw_decoder.onnx">標準 (FP32)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <button class="secondary small" @click="clearCache" style="font-size: 14px; padding: 8px;">キャッシュ削除 (更新用)</button>
+                </div>
+            </div>
+            
+            <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+        </div>
+
+        <!-- Main Spectrogram Screen -->
+        <div v-else class="screen main-screen">
+            <!-- Overlay Info -->
+            <div class="overlay-info">
+                <div class="status-bar">
+                    <span class="freq-display">{{ Math.round(state.trackedFreq) }} Hz</span>
+                    <button class="icon-btn" @click="toggleSettings">⚙️</button>
+                    <button class="icon-btn stop-btn" @click="stop">■</button>
+                </div>
+            </div>
+
+            <!-- Wide-band Spectrogram -->
+            <canvas ref="waterfallCanvas" class="waterfall-canvas"></canvas>
+
+            <!-- Decoded Text (Above Focus View) -->
+            <div class="decoded-text-container" ref="textContainer">
+                <div class="decoded-text-content">{{ state.decodedText }}</div>
+            </div>
+
+            <!-- Focus View (Model Input) -->
+            <div class="focus-view">
+                <canvas ref="inputCanvas" class="input-canvas"></canvas>
+                <canvas ref="inputOverlayCanvas" class="input-overlay-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js')
+                .then(reg => console.log('SW registered', reg))
+                .catch(err => console.error('SW registration failed', err));
+        }
+    </script>
+</body>
+</html>

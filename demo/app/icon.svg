@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#1a1a1a"/>
+  <path d="M50 256 L100 256 L125 100 L175 412 L225 256 L275 256 L300 150 L350 362 L400 256 L462 256" stroke="#007bff" stroke-width="20" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="256" y="450" font-family="monospace" font-size="60" fill="#fff" text-anchor="middle" font-weight="bold">CW DECODER</text>
+</svg>

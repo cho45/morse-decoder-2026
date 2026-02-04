@@ -1,0 +1,16 @@
+{
+  "name": "CW Decoder",
+  "short_name": "CW Decoder",
+  "description": "Real-time CW (Morse Code) Decoder using Deep Learning",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#007bff",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
