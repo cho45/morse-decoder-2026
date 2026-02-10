@@ -41,7 +41,7 @@ def test_wpm_auto_adjust():
     timing = gen.generate_timing(long_text, wpm=wpm)
     duration = sum(t[1] for t in timing)
     print(f"Duration at {wpm} WPM: {duration:.2f}s")
-    assert duration < 10.0
+    assert duration <= 10.0 + 1e-6
 
 if __name__ == "__main__":
     test_curriculum_order()
