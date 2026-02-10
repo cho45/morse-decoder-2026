@@ -48,7 +48,7 @@ for ps in config.PROSIGNS:
 
 class CurriculumPhase:
     def __init__(self, name, chars, focus_chars=None, min_snr_2500=100.0, max_snr_2500=100.0, min_wpm=20, max_wpm=20,
-                 jitter=0.0, weight_var=0.0, phrase_prob=0.0, focus_prob=0.5,
+                 jitter=0.0, weight_var=0.0, phrase_prob=0.0, focus_prob=0.5, gap_prob=0.8,
                  fading_speed=(0.0, 0.0), min_fading=1.0,
                  drift_prob=0.0, qrn_prob=0.0, qrm_prob=0.1, impulse_prob=0.001,
                  agc_prob=0.0, multipath_prob=0.0, clipping_prob=0.0, min_gain_db=0.0,
@@ -64,6 +64,7 @@ class CurriculumPhase:
         self.weight_var = weight_var
         self.phrase_prob = phrase_prob
         self.focus_prob = focus_prob
+        self.gap_prob = gap_prob
         self.fading_speed = fading_speed
         self.min_fading = min_fading
         self.drift_prob = drift_prob
@@ -93,6 +94,7 @@ class CurriculumManager:
                 min_snr_2500=0.0, max_snr_2500=20.0,
                 min_wpm=15, max_wpm=25,
                 min_gain_db=-20,
+                gap_prob=0.8, 
                 focus_prob=0.7, # High focus on new chars
                 penalty_weight=3.0 # Disciplined but not crushing
             ))
@@ -103,72 +105,72 @@ class CurriculumManager:
         # Slight Variations A
         self.phases.append(CurriculumPhase(
             name="Slight_Var_A", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=30,
-            jitter=0.015, weight_var=0.025, phrase_prob=0.3, min_gain_db=-30,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=30,
+            jitter=0.015, weight_var=0.025, phrase_prob=0.3, gap_prob=0.8, min_gain_db=-30,
             penalty_weight=3.0
         ))
 
         # Slight Variations B
         self.phases.append(CurriculumPhase(
             name="Slight_Var_B", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=30,
-            jitter=0.03, weight_var=0.05, phrase_prob=0.3, min_gain_db=-30,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=30,
+            jitter=0.03, weight_var=0.05, phrase_prob=0.3, gap_prob=0.8, min_gain_db=-30,
             penalty_weight=4.0
         ))
 
         # Practical 1 (Fading Only)
         self.phases.append(CurriculumPhase(
             name="Practical_1", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=35,
-            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, phrase_prob=0.5, min_gain_db=-40,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=35,
+            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, phrase_prob=0.5, gap_prob=0.8, min_gain_db=-40,
             penalty_weight=3.0
         ))
 
         # Practical 1 + Drift
         self.phases.append(CurriculumPhase(
             name="Practical_1_Drift", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=35,
-            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, drift_prob=0.2, phrase_prob=0.5, min_gain_db=-40,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=35,
+            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, drift_prob=0.2, phrase_prob=0.5, gap_prob=0.8, min_gain_db=-40,
             penalty_weight=3.0
         ))
 
         # Practical 1 + Drift + AGC
         self.phases.append(CurriculumPhase(
             name="Practical_1_AGC", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=35,
-            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, drift_prob=0.2, agc_prob=0.2, phrase_prob=0.5, min_gain_db=-40,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=35,
+            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.4, drift_prob=0.2, agc_prob=0.2, phrase_prob=0.5, gap_prob=0.8, min_gain_db=-40,
             penalty_weight=3.0
         ))
 
         # Practical 2 (SNR Reduction Stage 1)
         self.phases.append(CurriculumPhase(
             name="Practical_2", chars=max_chars,
-            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.5, drift_prob=0.3, agc_prob=0.2, phrase_prob=0.5, min_gain_db=-50.0,
+            min_snr_2500=0.0, max_snr_2500=20.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.5, drift_prob=0.3, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, min_gain_db=-50.0,
             penalty_weight=1.0
         ))
 
         # Practical 3 (SNR Reduction Stage 2)
         self.phases.append(CurriculumPhase(
             name="Practical_3", chars=max_chars,
-            min_snr_2500=-3.0, max_snr_2500=10.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.6, drift_prob=0.3, agc_prob=0.2, phrase_prob=0.5, min_gain_db=-60.0,
+            min_snr_2500=-3.0, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.1), min_fading=0.6, drift_prob=0.3, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, min_gain_db=-60.0,
             penalty_weight=0.5
         ))
 
         # Negative SNR 1
         self.phases.append(CurriculumPhase(
             name="Negative_1", chars=max_chars,
-            min_snr_2500=-5.0, max_snr_2500=11.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.05), min_fading=0.7, drift_prob=0.2, agc_prob=0.2, phrase_prob=0.5, qrn_prob=0.2, min_gain_db=-60.0,
+            min_snr_2500=-5.0, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.05), min_fading=0.7, drift_prob=0.2, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, qrn_prob=0.2, min_gain_db=-60.0,
             penalty_weight=0.3
         ))
 
         # Negative SNR 2 (Deeper Noise)
         self.phases.append(CurriculumPhase(
             name="Negative_2", chars=max_chars,
-            min_snr_2500=-10.0, max_snr_2500=5.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.8, drift_prob=0.1, agc_prob=0.2, phrase_prob=0.5, qrn_prob=0.3, clipping_prob=0.2, min_gain_db=-60.0,
+            min_snr_2500=-10.0, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.8, drift_prob=0.1, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, qrn_prob=0.3, clipping_prob=0.2, min_gain_db=-60.0,
             penalty_weight=0.2
         ))
 
@@ -176,15 +178,8 @@ class CurriculumManager:
         # 限界値の定義: SNR_2500 = -18 dB において、ビン内 SNR は +1.0 dB となり、信号がノイズをわずかに上回る物理的な検知限界点となります。
         self.phases.append(CurriculumPhase(
             name="Extreme", chars=max_chars,
-            min_snr_2500=-17, max_snr_2500=0.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.9, drift_prob=0.1, agc_prob=0.2, phrase_prob=0.5, qrn_prob=0.3, clipping_prob=0.2, min_gain_db=-60.0,
-            penalty_weight=0.1
-        ))
-
-        self.phases.append(CurriculumPhase(
-            name="Extreme", chars=max_chars,
-            min_snr_2500=-17, max_snr_2500=-10.0, min_wpm=15, max_wpm=40,
-            jitter=0.03, fading_speed=(0.0, 0.0), min_fading=1.0, drift_prob=0.0, agc_prob=0.0, phrase_prob=0.5, qrn_prob=0.1, clipping_prob=0.1, min_gain_db=-60.0,
+            min_snr_2500=-18, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.9, drift_prob=0.1, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, qrn_prob=0.3, clipping_prob=0.2, min_gain_db=-60.0,
             penalty_weight=0.1
         ))
 

@@ -42,7 +42,13 @@ DROPOUT = 0.1        # ドロップアウト率
 # Streaming Parameters
 MAX_CACHE_LEN = 1000  # ストリーミング推論時の過去キャッシュの最大フレーム数 (約20秒分)
 LOOKAHEAD_FRAMES = 20 # 未来の信号をどれだけ参照するか (20フレーム = 200ms) - 積分時間の延長
-TARGET_FRAMES = 1000  # 学習時のターゲットフレーム数 (約10秒)
+
+# Training Parameters
+# 注意: バッチ学習時、(TRAIN_DURATION * SAMPLE_RATE / HOP_LENGTH / SUBSAMPLING_RATE) が 
+# MAX_CACHE_LEN (1000) を超えると、Attentionの計算で自分自身の過去を参照できなくなり 
+# NaN が発生します。19.0s は約950フレームとなり、制限内に収まります。
+TRAIN_DURATION = 19.0  # 学習データの標準的な長さ (秒)
+TARGET_FRAMES = int(TRAIN_DURATION * SAMPLE_RATE / HOP_LENGTH) # 1000
 
 # Phrase Generation Parameters
 PHRASE_TEMPLATES = [
@@ -103,8 +109,17 @@ PHRASE_TEMPLATES = [
 COMMON_WEATHER = ["FINE", "RAIN", "CLOUDY", "SNOW", "SUNNY", "HOT", "COLD"]
 
 # Signal Task Parameters
-# 0: Background/Padding/Space, 1: Dit, 2: Dah, 3: Inter-word space
+# 0: 背景/パディング/文字内空白, 1: 短点 (Dit), 2: 長点 (Dah), 3: 単語間空白 (Inter-word space)
+SIG_ID_BLANK = 0
+SIG_ID_DIT = 1
+SIG_ID_DAH = 2
+SIG_ID_WORD_SPACE = 3
 NUM_SIGNAL_CLASSES = 4
+
+# 内部タイミング生成用 ID (学習ターゲットラベル 0-3 と衝突しないように負数を採用)
+# これらはラベル生成時に SIG_ID_BLANK (0) または SIG_ID_WORD_SPACE (3) にマッピングされる
+INTERNAL_ID_INTRA_GAP = -1  # 文字内の要素間ギャップ (1 unit)
+INTERNAL_ID_INTER_CHAR = -2 # 文字間ギャップ (3 units)
 
 # Vocabulary
 # ID 0 は CTC の 'blank' トークンとして予約されているため、文字 ID は 1 から開始する

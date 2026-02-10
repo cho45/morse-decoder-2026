@@ -238,31 +238,51 @@ class ConvSubsampling(nn.Module):
         x_out = x_out.transpose(1, 2).contiguous().view(b, t, c * f)
         return self.out_linear(x_out), new_cache
 
-def _pcen_ema_loop(x: torch.Tensor, state: torch.Tensor, s: torch.Tensor):
-    """Vectorized EMA calculation for Dynamo compatibility."""
+def _pcen_ema_loop(x: torch.Tensor, state: torch.Tensor, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Log-space cumulative sum implementation for numerical stability and Dynamo compatibility.
+    Computes EMA: E_t = (1-s)*E_{t-1} + s*x_t
+    """
     T = x.size(1)
     if T == 0:
-        return torch.zeros_like(x), state
+        return x, state
 
-    # EMA: E_t = (1-s)E_{t-1} + s*x_t
-    # Vectorized form: E_t = (1-s)^t * E_0 + sum_{j=1}^t s * x_j * (1-s)^{t-j}
-    
+    # 1. Prepare constants in log space
     one_minus_s = 1.0 - s
-    log_one_minus_s = torch.log(one_minus_s)
+    log_one_minus_s = torch.log(one_minus_s) # (1, 1, F)
+    log_s = torch.log(s) # (1, 1, F)
+
+    # 2. Time indices: (1, T, 1)
+    t_indices = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T, 1)
     
-    # steps shape: (1, T, 1)
-    steps = torch.arange(T, device=x.device, dtype=x.dtype).view(1, -1, 1)
-    # log_powers shape: (1, T, F)
-    log_powers = steps * log_one_minus_s
+    # 3. Initial state contribution: (1-s)^t * E_0
+    # log(E_state) = log(E_0) + t * log(1-s)
+    # Add epsilon to state to avoid log(0)
+    log_state = torch.log(state + 1e-20)
+    log_term_state = log_state + t_indices * log_one_minus_s
+    E_state = torch.exp(log_term_state)
+
+    # 4. Input contribution: sum_{j=1}^t s * x_j * (1-s)^(t-j)
+    # log(term_j) = log(s) + log(x_j) - j*log(1-s)
+    # Add epsilon to x to avoid log(0)
+    log_x = torch.log(x + 1e-20) # (B, T, F)
     
-    # initial state contribution
-    E_state = state * torch.exp(log_powers + log_one_minus_s)
+    # Inner term for cumsum
+    # Numerical stability: Guard against exp(88.7) overflow for long sequences (T=1000)
+    # by clamping the exponent to a safe range.
+    log_inner = (log_s + log_x - t_indices * log_one_minus_s).clamp(max=80.0)
     
-    # x contribution: s * exp(log_powers) * cumsum(x * exp(-log_powers))
-    # This is mathematically equivalent to the recursive EMA formula.
-    E_x = s * torch.exp(log_powers) * torch.cumsum(x * torch.exp(-log_powers), dim=1)
+    # Log-Cumsum-Exp along time dimension
+    log_cumsum = torch.logcumsumexp(log_inner, dim=1)
     
+    # Add t*log(1-s) to get the final log(E_x)
+    log_E_x = log_cumsum + t_indices * log_one_minus_s
+    E_x = torch.exp(log_E_x)
+    
+    # Total E
     E = E_state + E_x
+    
+    # New state is the last time step
     new_state = E[:, -1:, :]
     
     return E, new_state
@@ -292,7 +312,7 @@ class PCEN(nn.Module):
             new_state: Updated EMA state (B, 1, F)
         """
         # Ensure parameters are correctly shaped for broadcasting (1, 1, F)
-        s = torch.exp(self.log_s).view(1, 1, -1)
+        s = torch.exp(self.log_s).view(1, 1, -1).clamp(max=0.999)
         alpha = torch.exp(self.log_alpha).view(1, 1, -1)
         delta = torch.exp(self.log_delta).view(1, 1, -1)
         r = torch.exp(self.log_r).view(1, 1, -1)
@@ -306,8 +326,11 @@ class PCEN(nn.Module):
         E, new_state = _pcen_ema_loop(x, curr_state, s)
         
         # PCEN formula: y = (x / (eps + E)^alpha + delta)^r - delta^r
-        # Numerical stability: Ensure E is not too small
-        y = (x / (self.eps + E).pow(alpha) + delta).pow(r) - delta.pow(r)
+        # Numerical stability: Use log-space power calculation to avoid underflow to 0.0.
+        # gain = (E + eps)^-alpha = exp(-alpha * log(E + eps))
+        # Clamp exponent to 80.0 to prevent inf (exp(88.7) limit).
+        gain = torch.exp((-alpha * torch.log(E + self.eps)).clamp(max=80.0))
+        y = (x * gain + delta).pow(r) - delta.pow(r)
             
         return y, new_state
 
@@ -368,7 +391,7 @@ class StreamingConformer(nn.Module):
         pcen_state, sub_cache, layer_states = states
         
         # 1. PCEN Normalization
-        x = x * self.input_scale
+        x = x * F.softplus(self.input_scale)
         x, new_pcen_state = self.pcen(x, pcen_state)
         
         # 2. Subsampling

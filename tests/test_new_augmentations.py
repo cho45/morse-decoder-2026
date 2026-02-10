@@ -28,9 +28,14 @@ def test_agc_effect():
 
 def test_drift_generation():
     gen = data_gen.MorseGenerator()
-    timing = [(1, 0.1), (3, 0.1), (2, 0.3)] # Dit, space, Dah
+    sample_rate = config.SAMPLE_RATE
+    timing = [
+        (1, int(0.1 * sample_rate)), 
+        (3, int(0.1 * sample_rate)), 
+        (2, int(0.3 * sample_rate))
+    ] # Dit, space, Dah (samples)
     # With drift
-    waveform_drift = gen.generate_waveform(timing, frequency=700, drift_hz=50)
+    waveform_drift, _, _ = gen.generate_waveform(timing, frequency=700, drift_hz=50)
     assert len(waveform_drift) > 0
 
 def test_dataset_integration():

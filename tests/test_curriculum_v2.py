@@ -15,33 +15,32 @@ def test_curriculum_order():
     for c in "EAWJ":
         assert c in p1.chars
 
-def test_fixed_duration_10s():
+def test_fixed_duration_target():
     dataset = CWDataset(num_samples=5, min_wpm=20, max_wpm=20)
     waveform, label, wpm, signal_labels, boundary_labels, is_phrase = dataset[0]
     
-    # サンプルレート 16000 で 10秒なら 160000 サンプル
-    expected_samples = 10 * config.SAMPLE_RATE
+    # config.TRAIN_DURATION に一致するか確認
+    expected_samples = int(config.TRAIN_DURATION * config.SAMPLE_RATE)
     assert waveform.shape[0] == expected_samples
     print(f"Waveform shape: {waveform.shape}")
 
 def test_wpm_auto_adjust():
-    # 非常に長いテキストを生成して WPM が上がるか確認する
-    # CWDataset の内部ロジックをシミュレート
+    # 長いテキストを生成して WPM が上がるか確認する
     gen = MorseGenerator()
-    # 10秒に収まりにくい長いテキスト
     long_text = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG"
     
-    # 10秒 (160000 samples) に収まる WPM を推定
-    target_frames = int(10.0 * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH)
+    # 指定した時間 (TRAIN_DURATION) に収まる WPM を推定
+    target_frames = int(config.TRAIN_DURATION * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH)
     wpm = gen.estimate_wpm_for_target_frames(long_text, target_frames=target_frames, min_wpm=10, max_wpm=50)
     
     print(f"Estimated WPM for long text: {wpm}")
-    assert wpm > 10 # 初期値より上がっているはず
+    assert wpm > 10 
 
     timing = gen.generate_timing(long_text, wpm=wpm)
-    duration = sum(t[1] for t in timing)
-    print(f"Duration at {wpm} WPM: {duration:.2f}s")
-    assert duration <= 10.0 + 1e-6
+    total_samples = sum(t[1] for t in timing)
+    expected_samples = int(config.TRAIN_DURATION * config.SAMPLE_RATE)
+    print(f"Total samples at {wpm} WPM: {total_samples}")
+    assert total_samples <= expected_samples
 
 if __name__ == "__main__":
     test_curriculum_order()

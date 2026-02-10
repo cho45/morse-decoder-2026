@@ -149,28 +149,10 @@ class TestONNXExportNoWarnings:
 class TestONNXOutputEquivalence:
     """Test that ONNX model outputs match PyTorch outputs."""
 
-    @pytest.fixture(scope="class")
-    def model_and_session(self):
-        """Create model and ONNX session once per test class."""
-        model = StreamingConformer(num_layers=config.NUM_LAYERS)
-        model.eval()
-
-        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
-            onnx_path = f.name
-
-        try:
-            wrapper, input_names, output_names = export_model_to_onnx(model, onnx_path)
-            session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-
-            yield model, wrapper, session, input_names, output_names
-        finally:
-            if os.path.exists(onnx_path):
-                os.unlink(onnx_path)
-
     @pytest.mark.parametrize("seq_len", [10, 20, 30, 40])
-    def test_onnx_equivalence_single_batch(self, model_and_session, seq_len):
+    def test_onnx_equivalence_single_batch(self, shared_onnx_model, seq_len):
         """ONNX model output must match PyTorch within 1e-4."""
-        model, wrapper, session, input_names, output_names = model_and_session
+        model, wrapper, session, input_names, output_names = shared_onnx_model
     
         batch_size = 1
         # Use positive inputs for PCEN
@@ -320,28 +302,11 @@ class TestONNXComponentEquivalence:
 class TestONNXStreamingEquivalence:
     """Test streaming inference equivalence between PyTorch and ONNX."""
 
-    @pytest.fixture(scope="class")
-    def model_and_session(self):
-        """Create model and ONNX session once per test class."""
-        model = StreamingConformer(num_layers=config.NUM_LAYERS)
-        model.eval()
-
-        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
-            onnx_path = f.name
-
-        try:
-            wrapper, input_names, output_names = export_model_to_onnx(model, onnx_path)
-            session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-
-            yield model, wrapper, session, len(model.layers), output_names
-        finally:
-            if os.path.exists(onnx_path):
-                os.unlink(onnx_path)
-
     @pytest.mark.parametrize("chunk_size", [4, 8, 12, 16])
-    def test_onnx_streaming_equivalence(self, model_and_session, chunk_size):
+    def test_onnx_streaming_equivalence(self, shared_onnx_model, chunk_size):
         """ONNX streaming with cache must match PyTorch streaming."""
-        model, wrapper, session, num_layers, output_names = model_and_session
+        model, wrapper, session, input_names, output_names = shared_onnx_model
+        num_layers = len(model.layers)
 
         batch_size = 1
         total_seq_len = 200
@@ -395,166 +360,142 @@ class TestONNXStreamingEquivalence:
 class TestONNXCacheStatesEquivalence:
     """Test that cache states from ONNX match PyTorch."""
 
-    def test_onnx_cache_states_equivalence(self):
+    def test_onnx_cache_states_equivalence(self, shared_onnx_model):
         """Cache states from ONNX must match PyTorch cache states."""
-        model = StreamingConformer(num_layers=config.NUM_LAYERS)
-        model.eval()
+        model, wrapper, session, input_names, output_names = shared_onnx_model
 
-        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
-            onnx_path = f.name
+        batch_size = 1
+        chunk_size = 12
+        num_chunks = 5
 
-        try:
-            wrapper, input_names, output_names = export_model_to_onnx(model, onnx_path)
-            session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+        pt_pcen_state, pt_sub_cache, pt_layer_states_flat = create_initial_states(batch_size, len(model.layers))
+        ort_pcen_state, ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
-            batch_size = 1
-            chunk_size = 12
-            num_chunks = 5
+        for chunk_idx in range(num_chunks):
+            # Use positive inputs for PCEN
+            x_chunk = torch.rand(batch_size, chunk_size, config.N_BINS)
 
-            pt_pcen_state, pt_sub_cache, pt_layer_states_flat = create_initial_states(batch_size, len(model.layers))
-            ort_pcen_state, ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
+            # PyTorch
+            with torch.no_grad():
+                pt_outputs = wrapper(x_chunk, pt_pcen_state, pt_sub_cache, *pt_layer_states_flat)
 
-            for chunk_idx in range(num_chunks):
-                # Use positive inputs for PCEN
-                x_chunk = torch.rand(batch_size, chunk_size, config.N_BINS)
+            # ONNX
+            ort_inputs = {
+                'x': to_numpy(x_chunk),
+                'pcen_state': to_numpy(ort_pcen_state),
+                'sub_cache': to_numpy(ort_sub_cache)
+            }
+            for i in range(len(model.layers)):
+                ort_inputs[f'attn_k_{i}'] = to_numpy(ort_layer_states_flat[i*4])
+                ort_inputs[f'attn_v_{i}'] = to_numpy(ort_layer_states_flat[i*4+1])
+                ort_inputs[f'offset_{i}'] = to_numpy(ort_layer_states_flat[i*4+2])
+                ort_inputs[f'conv_cache_{i}'] = to_numpy(ort_layer_states_flat[i*4+3])
 
-                # PyTorch
-                with torch.no_grad():
-                    pt_outputs = wrapper(x_chunk, pt_pcen_state, pt_sub_cache, *pt_layer_states_flat)
+            ort_outputs = session.run(None, ort_inputs)
 
-                # ONNX
-                ort_inputs = {
-                    'x': to_numpy(x_chunk),
-                    'pcen_state': to_numpy(ort_pcen_state),
-                    'sub_cache': to_numpy(ort_sub_cache)
-                }
-                for i in range(len(model.layers)):
-                    ort_inputs[f'attn_k_{i}'] = to_numpy(ort_layer_states_flat[i*4])
-                    ort_inputs[f'attn_v_{i}'] = to_numpy(ort_layer_states_flat[i*4+1])
-                    ort_inputs[f'offset_{i}'] = to_numpy(ort_layer_states_flat[i*4+2])
-                    ort_inputs[f'conv_cache_{i}'] = to_numpy(ort_layer_states_flat[i*4+3])
+            # Compare cache states
+            # new_pcen_state
+            pt_pcen_np = to_numpy(pt_outputs[3])
+            ort_pcen_np = ort_outputs[3]
+            diff_pcen = np.abs(pt_pcen_np - ort_pcen_np).max()
+            assert diff_pcen < 1e-4, f"Chunk {chunk_idx}, pcen_state max diff: {diff_pcen:.6e}"
 
-                ort_outputs = session.run(None, ort_inputs)
+            # new_sub_cache
+            pt_sub_np = to_numpy(pt_outputs[4])
+            ort_sub_np = ort_outputs[4]
+            diff = np.abs(pt_sub_np - ort_sub_np).max()
+            assert diff < 1e-4, f"Chunk {chunk_idx}, sub_cache max diff: {diff:.6e}"
 
-                # Compare cache states
-                # new_pcen_state
-                pt_pcen_np = to_numpy(pt_outputs[3])
-                ort_pcen_np = ort_outputs[3]
-                diff_pcen = np.abs(pt_pcen_np - ort_pcen_np).max()
-                assert diff_pcen < 1e-4, f"Chunk {chunk_idx}, pcen_state max diff: {diff_pcen:.6e}"
+            # Layer states
+            for layer_idx in range(len(model.layers)):
+                base_pt = 5 + layer_idx * 4
+                base_ort = 5 + layer_idx * 4
 
-                # new_sub_cache
-                pt_sub_np = to_numpy(pt_outputs[4])
-                ort_sub_np = ort_outputs[4]
-                diff = np.abs(pt_sub_np - ort_sub_np).max()
-                assert diff < 1e-4, f"Chunk {chunk_idx}, sub_cache max diff: {diff:.6e}"
+                # attn_k
+                diff_k = np.abs(to_numpy(pt_outputs[base_pt]) - ort_outputs[base_ort]).max()
+                assert diff_k < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} attn_k max diff: {diff_k:.6e}"
 
-                # Layer states
-                for layer_idx in range(len(model.layers)):
-                    base_pt = 5 + layer_idx * 4
-                    base_ort = 5 + layer_idx * 4
+                # attn_v
+                diff_v = np.abs(to_numpy(pt_outputs[base_pt+1]) - ort_outputs[base_ort+1]).max()
+                assert diff_v < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} attn_v max diff: {diff_v:.6e}"
 
-                    # attn_k
-                    diff_k = np.abs(to_numpy(pt_outputs[base_pt]) - ort_outputs[base_ort]).max()
-                    assert diff_k < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} attn_k max diff: {diff_k:.6e}"
+                # offset
+                diff_offset = np.abs(to_numpy(pt_outputs[base_pt+2]) - ort_outputs[base_ort+2]).max()
+                assert diff_offset < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} offset max diff: {diff_offset:.6e}"
 
-                    # attn_v
-                    diff_v = np.abs(to_numpy(pt_outputs[base_pt+1]) - ort_outputs[base_ort+1]).max()
-                    assert diff_v < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} attn_v max diff: {diff_v:.6e}"
+                # conv_cache
+                diff_conv = np.abs(to_numpy(pt_outputs[base_pt+3]) - ort_outputs[base_ort+3]).max()
+                assert diff_conv < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} conv_cache max diff: {diff_conv:.6e}"
 
-                    # offset
-                    diff_offset = np.abs(to_numpy(pt_outputs[base_pt+2]) - ort_outputs[base_ort+2]).max()
-                    assert diff_offset < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} offset max diff: {diff_offset:.6e}"
+            # Update states
+            pt_pcen_state = pt_outputs[3]
+            pt_sub_cache = pt_outputs[4]
+            pt_layer_states_flat = list(pt_outputs[5:])
 
-                    # conv_cache
-                    diff_conv = np.abs(to_numpy(pt_outputs[base_pt+3]) - ort_outputs[base_ort+3]).max()
-                    assert diff_conv < 1e-4, f"Chunk {chunk_idx}, layer {layer_idx} conv_cache max diff: {diff_conv:.6e}"
-
-                # Update states
-                pt_pcen_state = pt_outputs[3]
-                pt_sub_cache = pt_outputs[4]
-                pt_layer_states_flat = list(pt_outputs[5:])
-
-                ort_pcen_state = torch.from_numpy(ort_outputs[3])
-                ort_sub_cache = torch.from_numpy(ort_outputs[4])
-                ort_layer_states_flat = [torch.from_numpy(o) for o in ort_outputs[5:]]
-
-        finally:
-            if os.path.exists(onnx_path):
-                os.unlink(onnx_path)
+            ort_pcen_state = torch.from_numpy(ort_outputs[3])
+            ort_sub_cache = torch.from_numpy(ort_outputs[4])
+            ort_layer_states_flat = [torch.from_numpy(o) for o in ort_outputs[5:]]
 
 
 class TestONNXCacheLimitBehavior:
     """Test ONNX model behavior when cache exceeds MAX_CACHE_LEN."""
 
-    def test_onnx_cache_limit_behavior(self):
+    def test_onnx_cache_limit_behavior(self, shared_onnx_model):
         """ONNX model must handle cache overflow correctly."""
-        model = StreamingConformer(num_layers=config.NUM_LAYERS)
-        model.eval()
+        model, wrapper, session, input_names, output_names = shared_onnx_model
 
-        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
-            onnx_path = f.name
+        batch_size = 1
+        chunk_size = 16
+        # Process enough chunks to exceed MAX_CACHE_LEN
+        num_chunks = (config.MAX_CACHE_LEN // chunk_size) + 5
 
-        try:
-            wrapper, input_names, output_names = export_model_to_onnx(model, onnx_path)
-            session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+        pt_pcen_state, pt_sub_cache, pt_layer_states_flat = create_initial_states(batch_size, len(model.layers))
+        ort_pcen_state, ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
 
-            batch_size = 1
-            chunk_size = 16
-            # Process enough chunks to exceed MAX_CACHE_LEN
-            num_chunks = (config.MAX_CACHE_LEN // chunk_size) + 5
+        for chunk_idx in range(num_chunks):
+            # Use positive inputs for PCEN
+            x_chunk = torch.rand(batch_size, chunk_size, config.N_BINS)
 
-            pt_pcen_state, pt_sub_cache, pt_layer_states_flat = create_initial_states(batch_size, len(model.layers))
-            ort_pcen_state, ort_sub_cache, ort_layer_states_flat = create_initial_states(batch_size, len(model.layers))
+            # PyTorch
+            with torch.no_grad():
+                pt_outputs = wrapper(x_chunk, pt_pcen_state, pt_sub_cache, *pt_layer_states_flat)
 
-            for chunk_idx in range(num_chunks):
-                # Use positive inputs for PCEN
-                x_chunk = torch.rand(batch_size, chunk_size, config.N_BINS)
+            # ONNX
+            ort_inputs = {
+                'x': to_numpy(x_chunk),
+                'pcen_state': to_numpy(ort_pcen_state),
+                'sub_cache': to_numpy(ort_sub_cache)
+            }
+            for i in range(len(model.layers)):
+                ort_inputs[f'attn_k_{i}'] = to_numpy(ort_layer_states_flat[i*4])
+                ort_inputs[f'attn_v_{i}'] = to_numpy(ort_layer_states_flat[i*4+1])
+                ort_inputs[f'offset_{i}'] = to_numpy(ort_layer_states_flat[i*4+2])
+                ort_inputs[f'conv_cache_{i}'] = to_numpy(ort_layer_states_flat[i*4+3])
 
-                # PyTorch
-                with torch.no_grad():
-                    pt_outputs = wrapper(x_chunk, pt_pcen_state, pt_sub_cache, *pt_layer_states_flat)
+            ort_outputs = session.run(None, ort_inputs)
 
-                # ONNX
-                ort_inputs = {
-                    'x': to_numpy(x_chunk),
-                    'pcen_state': to_numpy(ort_pcen_state),
-                    'sub_cache': to_numpy(ort_sub_cache)
-                }
-                for i in range(len(model.layers)):
-                    ort_inputs[f'attn_k_{i}'] = to_numpy(ort_layer_states_flat[i*4])
-                    ort_inputs[f'attn_v_{i}'] = to_numpy(ort_layer_states_flat[i*4+1])
-                    ort_inputs[f'offset_{i}'] = to_numpy(ort_layer_states_flat[i*4+2])
-                    ort_inputs[f'conv_cache_{i}'] = to_numpy(ort_layer_states_flat[i*4+3])
+            # Verify cache size doesn't exceed MAX_CACHE_LEN
+            for layer_idx in range(len(model.layers)):
+                base_ort = 5 + layer_idx * 4
+                k_cache = ort_outputs[base_ort]
+                assert k_cache.shape[2] <= config.MAX_CACHE_LEN, \
+                    f"Chunk {chunk_idx}, layer {layer_idx} cache size {k_cache.shape[2]} exceeds {config.MAX_CACHE_LEN}"
 
-                ort_outputs = session.run(None, ort_inputs)
+            # Compare outputs
+            for i in range(3):
+                pt_out = to_numpy(pt_outputs[i])
+                ort_out = ort_outputs[i]
+                diff = np.abs(pt_out - ort_out).max()
+                assert diff < 1e-4, f"Chunk {chunk_idx}, output {output_names[i]} max diff: {diff:.6e}"
 
-                # Verify cache size doesn't exceed MAX_CACHE_LEN
-                for layer_idx in range(len(model.layers)):
-                    base_ort = 5 + layer_idx * 4
-                    k_cache = ort_outputs[base_ort]
-                    assert k_cache.shape[2] <= config.MAX_CACHE_LEN, \
-                        f"Chunk {chunk_idx}, layer {layer_idx} cache size {k_cache.shape[2]} exceeds {config.MAX_CACHE_LEN}"
+            # Update states
+            pt_pcen_state = pt_outputs[3]
+            pt_sub_cache = pt_outputs[4]
+            pt_layer_states_flat = list(pt_outputs[5:])
 
-                # Compare outputs
-                for i in range(3):
-                    pt_out = to_numpy(pt_outputs[i])
-                    ort_out = ort_outputs[i]
-                    diff = np.abs(pt_out - ort_out).max()
-                    assert diff < 1e-4, f"Chunk {chunk_idx}, output {output_names[i]} max diff: {diff:.6e}"
-
-                # Update states
-                pt_pcen_state = pt_outputs[3]
-                pt_sub_cache = pt_outputs[4]
-                pt_layer_states_flat = list(pt_outputs[5:])
-
-                ort_pcen_state = torch.from_numpy(ort_outputs[3])
-                ort_sub_cache = torch.from_numpy(ort_outputs[4])
-                ort_layer_states_flat = [torch.from_numpy(o) for o in ort_outputs[5:]]
-
-        finally:
-            if os.path.exists(onnx_path):
-                os.unlink(onnx_path)
+            ort_pcen_state = torch.from_numpy(ort_outputs[3])
+            ort_sub_cache = torch.from_numpy(ort_outputs[4])
+            ort_layer_states_flat = [torch.from_numpy(o) for o in ort_outputs[5:]]
 
 
 class TestRelPositionalEncodingONNX:

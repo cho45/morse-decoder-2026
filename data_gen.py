@@ -13,6 +13,10 @@ import string
 from typing import List, Tuple, Dict, Optional
 from torch.utils.data import Dataset
 import config
+from config import (
+    SIG_ID_BLANK, SIG_ID_DIT, SIG_ID_DAH, SIG_ID_WORD_SPACE,
+    INTERNAL_ID_INTRA_GAP, INTERNAL_ID_INTER_CHAR
+)
 
 # Morse Code Definition
 MORSE_DICT = {
@@ -156,6 +160,11 @@ class MorseEncoder:
                 total_units += 3
         return total_units
 
+    def tokens_to_text(self, tokens: List[str]) -> str:
+        """トークンリストをテキストに結合（逆変換）"""
+        text = "".join(tokens)
+        return text
+
 
 class TimingGenerator:
     """トークンからタイミングシーケンスの生成と推定"""
@@ -183,78 +192,92 @@ class TimingGenerator:
                 return False, None
         return False, None
     
-    def _morse_code_to_timing(self, morse_code: str, dot_len: float,
-                           weight: float, jitter: float) -> List[Tuple[int, float]]:
-        """モールスコードをタイミングに変換（内部使用）"""
+    def _morse_code_to_timing(self, morse_code: str, dot_samples: int,
+                           weight: float, jitter: float) -> List[Tuple[int, int]]:
+        """モールスコードをタイミング（サンプル数）に変換（内部使用）"""
         timing = []
         for k, symbol in enumerate(morse_code):
             if symbol == '.':
-                duration = dot_len * weight
-                timing.append((1, duration))  # Dit
+                num_samples = int(round(dot_samples * weight))
+                timing.append((SIG_ID_DIT, num_samples))  # 短点
             elif symbol == '-':
-                duration = dot_len * 3 * weight
-                timing.append((2, duration))  # Dah
+                num_samples = int(round(dot_samples * 3 * weight))
+                timing.append((SIG_ID_DAH, num_samples))  # 長点
             elif symbol == ' ':
                 continue  # Inter-char space は外で処理
             
             if jitter > 0:
-                timing[-1] = (timing[-1][0], timing[-1][1] * (1 + random.uniform(-jitter, jitter)))
+                # 整数サンプル数に対して jitter を適用
+                jittered_samples = int(round(timing[-1][1] * (1 + random.uniform(-jitter, jitter))))
+                timing[-1] = (timing[-1][0], jittered_samples)
             
             if k < len(morse_code) - 1 and morse_code[k+1] != ' ':
-                timing.append((3, dot_len))  # Intra-char space
+                # 文字内の要素間ギャップ (1 unit)
+                timing.append((INTERNAL_ID_INTRA_GAP, dot_samples))
         
         return timing
     
     def generate_timing(self, text: str, wpm: int = 20,
                         farnsworth_wpm: int = None, jitter: float = 0.0,
                         weight: float = 1.0, pre_silence: float = None,
-                        max_duration: float = config.TARGET_FRAMES * config.HOP_LENGTH / config.SAMPLE_RATE) -> List[Tuple[int, float]]:
+                        max_duration: float = config.TRAIN_DURATION) -> List[Tuple[int, int]]:
         """
-        テキストからタイミングシーケンスを生成
-        内部処理: Text → Tokens → (MorseEncoderで) Morse Codes → Timing
+        テキストからタイミングシーケンスを生成（サンプル数ベース）
         Classes: 1: Dit, 2: Dah, 3: Intra-char space, 4: Inter-char space, 5: Inter-word space
-        特殊トークン <GAP:duration> は (0, duration) として扱われる
-        
-        Args:
-            pre_silence: 指定された場合、timing の先頭に (0, pre_silence) を追加
-            max_duration: サンプルの最大秒数。これを超える場合は打ち切り、足りない場合は post_silence で埋める
         """
         if farnsworth_wpm is None:
             farnsworth_wpm = wpm
         
-        dot_len = 1.2 / wpm
-        char_space_len = (3 * 1.2 / farnsworth_wpm)
-        word_space_len = (7 * 1.2 / farnsworth_wpm)
+        # Calculate samples per unit
+        dot_samples = int(round((1.2 / wpm) * self.sample_rate))
+        char_space_samples = int(round((3 * 1.2 / farnsworth_wpm) * self.sample_rate))
+        word_space_samples = int(round((7 * 1.2 / farnsworth_wpm) * self.sample_rate))
+        
+        target_total_samples = None
+        if max_duration is not None:
+            target_total_samples = int(round(max_duration * self.sample_rate))
         
         timing = []
-        current_duration = 0.0
+        current_samples = 0
         
-        # pre_silence が指定された場合、timing の先頭に追加
+        # Calculate pre-silence samples
         if pre_silence is not None:
-            timing.append((0, pre_silence))
-            current_duration += pre_silence
+            pre_samples = int(round(pre_silence * self.sample_rate))
+            # 既に max_duration を超えていないかチェック
+            if target_total_samples is not None and pre_samples > target_total_samples:
+                pre_samples = target_total_samples
+            
+            if pre_samples > 0:
+                timing.append((SIG_ID_BLANK, pre_samples))
+                current_samples += pre_samples
 
         words_raw = text.split(' ')
         
         for i, word_raw in enumerate(words_raw):
-            if current_duration >= max_duration:
+            if target_total_samples is not None and current_samples >= target_total_samples:
                 break
                 
-            # i < len(words_raw) - 1 check handles the case where text ends with a space
             if not word_raw and i < len(words_raw) - 1:
                 continue
             tokens = self.encoder.text_to_tokens(word_raw)
             
+            word_completed = False
             for j, char in enumerate(tokens):
-                if current_duration >= max_duration:
+                if target_total_samples is not None and current_samples >= target_total_samples:
                     break
                     
                 # Check for special GAP token
                 is_gap, gap_duration = self._parse_gap_token(char)
                 if is_gap:
-                    duration = min(gap_duration, max_duration - current_duration)
-                    timing.append((0, duration))
-                    current_duration += duration
+                    gap_samples = int(round(gap_duration * self.sample_rate))
+                    if target_total_samples is not None:
+                        num_samples = min(gap_samples, target_total_samples - current_samples)
+                    else:
+                        num_samples = gap_samples
+                        
+                    if num_samples > 0:
+                        timing.append((SIG_ID_BLANK, num_samples))
+                        current_samples += num_samples
                     continue
                 
                 # Regular token
@@ -262,33 +285,47 @@ class TimingGenerator:
                 if not code:
                     continue
                 
-                # Generate timing for this token
-                token_timing = self._morse_code_to_timing(code, dot_len, weight, jitter)
+                # Generate timing for this token (all ints)
+                token_timing = self._morse_code_to_timing(code, dot_samples, weight, jitter)
                 
-                # トークン全体が max_duration に収まるかチェック
-                token_duration = sum(t[1] for t in token_timing)
-                if current_duration + token_duration > max_duration:
+                # トークン全体と、それに続く必須スペースが target_total_samples に収まるかチェック
+                token_samples = sum(t[1] for t in token_timing)
+                
+                needed_space = 0
+                if j < len(tokens) - 1:
+                    needed_space = char_space_samples
+                elif i < len(words_raw) - 1:
+                    needed_space = word_space_samples
+                
+                if target_total_samples is not None and current_samples + token_samples + needed_space > target_total_samples:
+                    # これ以上文字（と必須スペース）を追加できないため、終了。
                     break
                 
                 timing.extend(token_timing)
-                current_duration += token_duration
+                current_samples += token_samples
                 
                 # Add inter-char space after token (only if not last token in word)
                 if j < len(tokens) - 1:
-                    duration = min(char_space_len, max_duration - current_duration)
-                    timing.append((4, duration))
-                    current_duration += duration
+                    timing.append((INTERNAL_ID_INTER_CHAR, char_space_samples))
+                    current_samples += char_space_samples
+            else:
+                # Word completed successfully (no break)
+                word_completed = True
+                # Add inter-word space after word (only if not last word)
+                if i < len(words_raw) - 1:
+                    timing.append((SIG_ID_WORD_SPACE, word_space_samples))
+                    current_samples += word_space_samples
             
-            # Add inter-word space after word (only if not last word)
-            if i < len(words_raw) - 1 and current_duration < max_duration:
-                duration = min(word_space_len, max_duration - current_duration)
-                timing.append((5, duration))
-                current_duration += duration
+            # If word was not completed (inner loop broke), stop everything
+            if not word_completed:
+                break
         
-        # 指定された max_duration に達するまで post_silence で埋める
-        post_silence = max(0.0, max_duration - current_duration)
-        if post_silence > 1e-4: # 0.1ms 以上の差がある場合のみ追加
-            timing.append((0, post_silence))
+        # 最後に padding (post_silence) を追加して正確に target_total_samples に合わせる
+        if target_total_samples is not None and current_samples < target_total_samples:
+            padding = target_total_samples - current_samples
+            if padding > 0:
+                timing.append((SIG_ID_BLANK, padding))
+                current_samples += padding
             
         return timing
     
@@ -297,9 +334,19 @@ class TimingGenerator:
                                        min_wpm: int = 10, max_wpm: int = 45) -> int:
         """ターゲットフレーム数に収めるためのWPMを推定"""
         total_units = self.encoder.count_units_in_tokens(tokens)
-        target_sec = target_frames * config.HOP_LENGTH / self.sample_rate
         
-        if target_sec <= 0: return max_wpm
+        # GAP トークンの固定時間を合計
+        gap_total_sec = 0.0
+        for t in tokens:
+            is_gap, duration = self._parse_gap_token(t)
+            if is_gap:
+                gap_total_sec += duration
+        
+        target_sec = (target_frames * config.HOP_LENGTH / self.sample_rate) - gap_total_sec
+        
+        # 符号のために使える時間が極端に少ない場合は、安全のために最大WPMを返す
+        if target_sec <= 0.1: return max_wpm
+        
         needed_wpm = (1.2 * total_units) / target_sec
         
         return int(np.clip(needed_wpm, min_wpm, max_wpm))
@@ -317,11 +364,16 @@ class TimingGenerator:
         return max(1, max_tokens)
     
     def estimate_duration(self, tokens: List[str], wpm: int,
-                          weight: float = 1.0) -> float:
-        """トークンの持続時間を推定（秒）"""
-        dot_len = 1.2 / wpm
-        total_units = self.encoder.count_units_in_tokens(tokens, weight)
-        return total_units * dot_len
+                          farnsworth_wpm: int = None, weight: float = 1.0) -> float:
+        """
+        トークンの持続時間を推定（秒）
+        generate_timing を使用して正確な長さを計算する。
+        """
+        text = self.encoder.tokens_to_text(tokens)
+        timing = self.generate_timing(text, wpm=wpm, farnsworth_wpm=farnsworth_wpm,
+                                      weight=weight, max_duration=None)
+        total_samples = sum(t[1] for t in timing)
+        return total_samples / self.sample_rate
 
 
 class WaveformGenerator:
@@ -330,24 +382,22 @@ class WaveformGenerator:
     def __init__(self, sample_rate: int = config.SAMPLE_RATE):
         self.sample_rate = sample_rate
     
-    def generate_waveform(self, timing: List[Tuple[int, float]],
+    def generate_waveform(self, timing: List[Tuple[int, int]],
                           frequency: float = 700.0, waveform_type: str = 'sine',
-                          rise_time: float = 0.005, drift_hz: float = 0.0) -> Tuple[np.ndarray, List[Tuple[int, float]]]:
+                          rise_time: float = 0.005, drift_hz: float = 0.0) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         """
         タイミングシーケンスを音声波形に変換
         """
-        total_duration = sum(t[1] for t in timing)
-        total_samples = int(total_duration * self.sample_rate)
+        total_samples = sum(t[1] for t in timing)
         waveform = np.zeros(total_samples)
         phase = 0.0
         current_sample = 0
         
-        for class_id, duration in timing:
-            num_samples = int(duration * self.sample_rate)
+        for class_id, num_samples in timing:
             if current_sample >= total_samples:
                 break
             
-            if class_id in [1, 2]:
+            if class_id in [SIG_ID_DIT, SIG_ID_DAH]:
                 # 信号生成
                 end_sample = min(current_sample + num_samples, total_samples)
                 actual_num = end_sample - current_sample
@@ -421,89 +471,66 @@ class LabelGenerator:
     def __init__(self, sample_rate: int = config.SAMPLE_RATE):
         self.sample_rate = sample_rate
     
-    def generate_signal_frames(self, timing: List[Tuple[int, float]],
+    def generate_signal_frames(self, timing: List[Tuple[int, int]],
                               num_frames: int) -> np.ndarray:
         """
         タイミングからシグナルフレームを生成
-        各フレームの中心サンプルがtimingのどの期間に含まれるかを判定
-        timing の先頭に (0, pre_silence) が含まれていることを想定。
-        
-        Returns: 0: Background, 1: Dit, 2: Dah, 3: Inter-word space
+        Returns: SIG_ID_BLANK, SIG_ID_DIT, SIG_ID_DAH, SIG_ID_WORD_SPACE
         """
-        signal_frames = np.zeros(num_frames, dtype=np.int64)
+        signal_frames = np.full(num_frames, SIG_ID_BLANK, dtype=np.int64)
         
         for i in range(num_frames):
             center_sample = i * config.HOP_LENGTH + config.N_FFT // 2
             time_ptr = 0
-            for class_id, duration in timing:
-                duration_samples = int(duration * self.sample_rate)
-                if time_ptr <= center_sample < time_ptr + duration_samples:
-                    # Simplify classes:
-                    # Original: 1: Dit, 2: Dah, 3: Intra, 4: Inter-char, 5: Inter-word
-                    # New: 1: Dit, 2: Dah, 0: Space, 3: Inter-word
-                    if class_id in [1, 2]:
+            for class_id, num_samples in timing:
+                if time_ptr <= center_sample < time_ptr + num_samples:
+                    if class_id in [SIG_ID_DIT, SIG_ID_DAH]:
                         signal_frames[i] = class_id
-                    elif class_id == 5:
-                        signal_frames[i] = 3
+                    elif class_id == SIG_ID_WORD_SPACE:
+                        signal_frames[i] = SIG_ID_WORD_SPACE
                     else:
-                        signal_frames[i] = 0
+                        # INTERNAL_ID_INTRA_GAP や INTER_CHAR は 0 (BACKGROUND) に集約
+                        signal_frames[i] = SIG_ID_BLANK
                     break
-                time_ptr += duration_samples
+                time_ptr += num_samples
                 if time_ptr > center_sample:
                     break
         
         return signal_frames
     
-    def generate_boundary_frames(self, timing: List[Tuple[int, float]],
+    def generate_boundary_frames(self, timing: List[Tuple[int, int]],
                                  num_frames: int,
-                                 dot_len_sec: float) -> np.ndarray:
+                                 dot_samples: int) -> np.ndarray:
         """
         タイミングからバウンダリフレームを生成
-        文字間空白または単語間空白が完了した瞬間のフレームに1.0を立てる
-        timing の先頭に (0, pre_silence) が含まれていることを想定。
-        
-        Args:
-            timing: (クラスID, 持続時間) のシーケンス
-            num_frames: 生成するフレーム数
-            dot_len_sec: WPMに基づくドットの持続時間（秒）
-        
-        Returns:
-            boundary_frames: 各フレームの境界フラグ（0.0 or 1.0）
+        文字間空白 (INTERNAL_ID_INTER_CHAR) または単語間空白 (SIG_ID_WORD_SPACE) が完了した瞬間のフレームに1.0を立てる
         """
         boundary_frames = np.zeros(num_frames, dtype=np.float32)
         
-        # 境界（Boundary）の定義:
-        # 文字間空白(3ユニット)または単語間空白(7ユニット)が完了した瞬間のフレーム。
-        # つまり、次の文字が開始される直前。
-        
-        # 境界ラベルを確実に立てるためのロジック
         time_ptr = 0
-        for class_id, duration in timing:
-            duration_samples = int(duration * self.sample_rate)
-            if class_id == 4:  # Inter-char space (文字の終了)
-                # 空白の終了時点（＝次の要素の開始直前）を特定
-                trigger_sample = time_ptr + duration_samples
-                trigger_frame = trigger_sample // config.HOP_LENGTH
+        for class_id, num_samples in timing:
+            if class_id == INTERNAL_ID_INTER_CHAR:  # 文字の終了 (空白の完了時)
+                trigger_sample = time_ptr + num_samples
+                trigger_frame = int(trigger_sample // config.HOP_LENGTH)
                 for offset in range(5):
                     if 0 <= trigger_frame + offset < num_frames:
                         boundary_frames[trigger_frame + offset] = 1.0
-            elif class_id == 5:  # Inter-word space (単語間空白 = 前の文字の終了 + スペース文字の終了)
-                # 1. 前の文字の終了境界 (空白開始から 3ユニット後)
-                # 単語間空白(7ユニット)のうち、最初の3ユニットを文字間空白、残り4ユニットをスペース文字分とみなす
-                char_end_trigger = time_ptr + int(3 * dot_len_sec * self.sample_rate)
-                char_end_frame = char_end_trigger // config.HOP_LENGTH
+            elif class_id == SIG_ID_WORD_SPACE:  # 単語間空白 (前の文字の終了 + スペース文字の終了)
+                # 1. 前の文字の終了境界 (空白開始から 3ユニット分)
+                char_end_trigger = time_ptr + int(3 * dot_samples)
+                char_end_frame = int(char_end_trigger // config.HOP_LENGTH)
                 for offset in range(5):
                     if 0 <= char_end_frame + offset < num_frames:
                         boundary_frames[char_end_frame + offset] = 1.0
                 
                 # 2. スペース文字自体の終了境界 (空白の終了時点)
-                space_end_trigger = time_ptr + duration_samples
-                space_end_frame = space_end_trigger // config.HOP_LENGTH
+                space_end_trigger = time_ptr + num_samples
+                space_end_frame = int(space_end_trigger // config.HOP_LENGTH)
                 for offset in range(5):
                     if 0 <= space_end_frame + offset < num_frames:
                         boundary_frames[space_end_frame + offset] = 1.0
             
-            time_ptr += duration_samples
+            time_ptr += num_samples
         
         return boundary_frames
 
@@ -864,7 +891,7 @@ class MorseGenerator:
     def generate_timing(self, text: str, wpm: int = 20,
                        farnsworth_wpm: int = None, jitter: float = 0.0,
                        weight: float = 1.0, pre_silence: float = None,
-                       max_duration: float = config.TARGET_FRAMES * config.HOP_LENGTH / config.SAMPLE_RATE) -> List[Tuple[int, float]]:
+                       max_duration: float = config.TRAIN_DURATION) -> List[Tuple[int, int]]:
         return self.timing_gen.generate_timing(text, wpm, farnsworth_wpm, jitter, weight, pre_silence, max_duration)
     
     def estimate_wpm_for_target_frames(self, text: str,
@@ -877,43 +904,41 @@ class MorseGenerator:
                                    target_frames: int = config.TARGET_FRAMES) -> int:
         return self.timing_gen.estimate_max_tokens_for_wpm(wpm, target_frames)
     
-    def estimate_duration(self, text: str, wpm: int, weight: float = 1.0) -> float:
+    def estimate_duration(self, text: str, wpm: int, farnsworth_wpm: int = None, weight: float = 1.0) -> float:
         tokens = self.encoder.text_to_tokens(text)
-        return self.timing_gen.estimate_duration(tokens, wpm, weight)
+        return self.timing_gen.estimate_duration(tokens, wpm, farnsworth_wpm, weight)
     
-    def reconstruct_text_from_timing(self, timing: List[Tuple[int, float]]) -> str:
+    def reconstruct_text_from_timing(self, timing: List[Tuple[int, int]]) -> str:
         """
-        タイミングシーケンスからテキストを復元する（デコード）。
-        切り捨てが発生した場合に、有効なテキストのみを抽出するために使用。
+        タイミングシーケンス（サンプル数）からテキストを復元する。
         """
         inverse_morse = {v: k for k, v in MORSE_DICT.items()}
         res = ""
         current_code = ""
         
         for class_id, _ in timing:
-            if class_id == 1:
+            if class_id == SIG_ID_DIT:
                 current_code += "."
-            elif class_id == 2:
+            elif class_id == SIG_ID_DAH:
                 current_code += "-"
-            elif class_id in [4, 5]: # 文字の区切りまたは単語の区切り
+            elif class_id in [INTERNAL_ID_INTER_CHAR, SIG_ID_WORD_SPACE]: # 文字の区切りまたは単語の区切り
                 if current_code:
                     res += inverse_morse.get(current_code, "")
                     current_code = ""
-                if class_id == 5:
+                if class_id == SIG_ID_WORD_SPACE:
                     if not res.endswith(" "):
                         res += " "
-            elif class_id == 0: # Silence または GAP
+            elif class_id == SIG_ID_BLANK: # Silence または GAP
                 if current_code:
                     res += inverse_morse.get(current_code, "")
                     current_code = ""
         
-        # 最後に残ったコードがあれば処理（通常は 4 か 5 で終わるはずだが念のため）
         if current_code:
             res += inverse_morse.get(current_code, "")
             
         return res
 
-    def generate_waveform(self, timing: List[Tuple[int, float]],
+    def generate_waveform(self, timing: List[Tuple[int, int]],
                           frequency: float = 700.0, waveform_type: str = 'sine',
                           rise_time: float = 0.005, wpm: int = 20,
                           drift_hz: float = 0.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -928,8 +953,10 @@ class MorseGenerator:
         
         # Generate labels
         signal_frames = self.label_gen.generate_signal_frames(timing, num_frames)
-        dot_len_sec = 1.2 / wpm
-        boundary_frames = self.label_gen.generate_boundary_frames(timing, num_frames, dot_len_sec)
+        
+        # WPM based dot samples for boundary logic
+        dot_samples = int(round((1.2 / wpm) * self.sample_rate))
+        boundary_frames = self.label_gen.generate_boundary_frames(timing, num_frames, dot_samples)
         
         return waveform, signal_frames, boundary_frames
 
@@ -948,7 +975,7 @@ def generate_sample(text: str, wpm: int = 20, sample_rate: int = config.SAMPLE_R
                     agc_enabled: bool = False,
                     multipath_delay: float = 0.0,
                     clipping_threshold: float = 1.0,
-                    max_duration: float = 10.0,
+                    max_duration: float = config.TRAIN_DURATION,
                     snr_2500: float = 10.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
 
     gen = MorseGenerator(sample_rate=sample_rate)
@@ -1035,7 +1062,7 @@ class CWDataset(Dataset):
     def __init__(self, num_samples: int = 1000, min_wpm: int = 15, max_wpm: int = 40,
                  min_snr_2500: float = 10.0, max_snr_2500: float = 30.0,
                  jitter_max: float = 0.1, weight_var: float = 0.2,
-                 allowed_chars: str = None, min_len: int = 5, max_len: int = 10,
+                 allowed_chars: str = None, min_len: int = 10,
                  focus_chars: str = None, focus_prob: float = 0.5,
                  fading_speed_min: float = 0.1, fading_speed_max: float = 0.1,
                  min_fading: float = 0.1,
@@ -1045,6 +1072,7 @@ class CWDataset(Dataset):
                  tx_lowpass_prob: float = 0.8,
                  rise_time_max: float = 0.025,
                  min_gain_db: float = 0.0,
+                 gap_prob: float = 0.0,
                  drift_prob: float = 0.0,
                  qrn_prob: float = 0.0,
                  qrm_prob: float = 0.1,
@@ -1061,10 +1089,10 @@ class CWDataset(Dataset):
         self.jitter_max = jitter_max
         self.weight_var = weight_var
         self.min_len = min_len
-        self.max_len = max_len
         self.fading_speed_min = fading_speed_min
         self.fading_speed_max = fading_speed_max
         self.min_fading = min_fading
+        self.gap_prob = gap_prob
         # config.CHARS includes prosigns now
         self.all_chars = config.CHARS
         self.chars = allowed_chars if allowed_chars else self.all_chars
@@ -1099,83 +1127,148 @@ class CWDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        max_duration = 10.0
+        max_duration = config.TRAIN_DURATION
+        # Filling Rate: 0.7 〜 1.0 の割合でバッファを埋める
+        filling_rate = random.uniform(0.7, 1.0)
+        target_duration = max_duration * filling_rate
+
         is_phrase = random.random() < self.phrase_prob
         
         for attempt in range(5):  # Retry if text is too long for WPM limits
             if is_phrase:
-                text = self.generate_phrase()
-                # Strictly limit phrase length to max_len tokens (including space)
+                # 目標時間を埋めるまでフレーズを連結
+                current_text = ""
+                while True:
+                    new_phrase = self.generate_phrase()
+                    # 連結した場合の長さを推定 (max_wpm で収まるかチェック)
+                    test_text = current_text + (" " if current_text else "") + new_phrase
+                    # 推定時間は GAP を考慮しないため、少し余裕を持つ
+                    if self.morse_gen.estimate_duration(test_text, wpm=self.max_wpm) > target_duration * 1.1:
+                        break
+                    current_text = test_text
+                    
+                    # フレーズ間に GAP を挿入する判定
+                    if self.gap_prob > 0 and random.random() < self.gap_prob:
+                        gap_sec = random.uniform(1.0, 3.0)
+                        current_text += f" <GAP:{gap_sec:.1f}>"
+                        # GAP を入れた直後は流石に次はフレーズを入れるか、あるいは終了判定へ
+                        if self.morse_gen.estimate_duration(current_text, wpm=self.max_wpm) > target_duration:
+                            break
+                
+                text = current_text if current_text else self.generate_phrase()
+
+                # WPMを決めて文字数を制限する
+                # フレーズの場合は、target_duration に収まるような WPM を逆算する (Adaptive)
+                # ただし、filling_rate が低い場合でも極端に遅くならないよう min_wpm は守る
+                wpm = self.morse_gen.estimate_wpm_for_target_frames(
+                    text, 
+                    target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH),
+                    min_wpm=self.min_wpm, 
+                    max_wpm=self.max_wpm
+                )
+                
+                # 推定された WPM でもはみ出す場合は切り捨てる（特にフレーズが長すぎる場合）
+                # ここでは正確な長さ計算よりも、単に長すぎる場合の後方カットを行う
+                max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(wpm, target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH))
                 phrase_tokens = self.morse_gen.text_to_morse_tokens(text)
-                if len(phrase_tokens) > self.max_len - 1:
-                    text = "".join(phrase_tokens[:self.max_len - 1])
+                if len(phrase_tokens) > max_allowed_len:
+                     # GAP トークンを保護しつつ切り捨て
+                    text = "".join(phrase_tokens[:max_allowed_len])
                 
-                # Adaptive WPM for phrases to fit in 10s
-                wpm = self.morse_gen.estimate_wpm_for_target_frames(text, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH), min_wpm=self.min_wpm, max_wpm=self.max_wpm)
-                
-                # Verify if it fits
+                # Verify if it fits (物理時間の再確認)
                 timing = self.morse_gen.generate_timing(text, wpm=wpm)
-                if sum(t[1] for t in timing) < max_duration - 0.2:
+                total_time_sec = sum(t[1] for t in timing) / config.SAMPLE_RATE
+                
+                # max_duration を超えていなければ OK
+                # filling_rate による target_duration はあくまで目安（短くてもOK）だが、長すぎて溢れるのはNG
+                if total_time_sec <= max_duration:
                     break
                 else:
+                    # 溢れた場合はリトライ（attemptが進む）
                     if wpm >= self.max_wpm and attempt < 4:
                         continue
                     break
             else:
-                # Decide WPM first to constrain length
-                wpm = random.randint(self.min_wpm, self.max_wpm)
+                # ランダム生成: WPM を先に決定 (正規分布中心)
+                wpm_center = 20
+                wpm_sigma = (self.max_wpm - self.min_wpm) / 4
+                wpm = int(random.gauss(wpm_center, wpm_sigma))
+                wpm = max(self.min_wpm, min(self.max_wpm, wpm))
 
-                # Generate random text
-                max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(wpm, target_frames=int(max_duration * 0.9 * config.SAMPLE_RATE / config.HOP_LENGTH))
-                # Target length must respect BOTH self.max_len and physical 10s limit
-                # Leave 1 token room for the mandatory trailing space
-                target_limit = min(self.max_len - 1, max_allowed_len - 1)
-                length = random.randint(self.min_len, max(self.min_len, target_limit))
+                # 指定 WPM と target_duration で入る文字数を計算
+                max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(
+                    wpm, 
+                    target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH)
+                )
                 
-                # Randomly choose from available tokens (chars + prosigns)
-                valid_tokens = self.morse_gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else self.chars
-                valid_tokens = [t for t in valid_tokens if t != ' ']
+                # ランダム文字列生成
+                # target_limit は filling_rate に従った文字数
+                target_limit = max(self.min_len, max_allowed_len - 1)
                 
+                # Focus chars (50% chance if specified)
+                valid_chars = self.chars
                 if self.focus_chars and random.random() < self.focus_prob:
-                    focus_tokens = self.morse_gen.text_to_morse_tokens(self.focus_chars)
-                    focus_valid = [t for t in focus_tokens if t != ' ' and t in valid_tokens]
-                    if focus_valid:
-                        k_focus = max(1, length // 2)
-                        k_other = length - k_focus
-                        if len(focus_valid) > 1 and k_focus >= len(focus_valid):
-                            tokens = random.sample(focus_valid, len(focus_valid))
-                            tokens += random.choices(focus_valid, k=k_focus - len(focus_valid))
-                        else:
-                            tokens = random.choices(focus_valid, k=k_focus)
-                        tokens += random.choices(valid_tokens, k=k_other)
-                        random.shuffle(tokens)
-                    else:
-                        tokens = random.choices(valid_tokens, k=length)
+                     valid_chars = self.focus_chars
+                
+                # Correctly tokenize the valid_chars if it's a string, otherwise use as list
+                if isinstance(valid_chars, str):
+                    valid_tokens = self.morse_gen.text_to_morse_tokens(valid_chars)
+                else:
+                    valid_tokens = list(valid_chars)
+                
+                valid_tokens = [t for t in valid_tokens if t != ' '] # Exclude spaces from random pool
+                
+                length = random.randint(self.min_len, target_limit)
+
+                # Prioritize numbers or focus chars if needed (basic logic kept)
+                # But here we simply choose from valid_tokens
+                if self.focus_chars and valid_chars == self.focus_chars:
+                    # If focusing, force at least some focus chars
+                    num_focus = length // 2
+                    num_others = length - num_focus
+                    
+                    # Convert to token list correctly (handling Prosigns like <NJ>)
+                    focus_list = self.morse_gen.text_to_morse_tokens(self.focus_chars) if isinstance(self.focus_chars, str) else list(self.focus_chars)
+                    focus_list = [t for t in focus_list if t != ' ']
+                    
+                    chars_list = self.morse_gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else list(self.chars)
+                    chars_list = [t for t in chars_list if t != ' ']
+
+                    tokens = random.choices(focus_list, k=num_focus)
+                    tokens += random.choices(chars_list, k=num_others)
+                    random.shuffle(tokens)
                 else:
                     tokens = random.choices(valid_tokens, k=length)
                 
+                # ランダムに 0〜1 箇所の GAP を挿入 (1.0秒以上)
+                if self.gap_prob > 0 and random.random() < self.gap_prob:
+                    gap_sec = random.uniform(1.0, 5.0)
+                    gap_token = f"<GAP:{gap_sec:.1f}>"
+                    # トークンリストの任意の位置（0〜末尾）に挿入
+                    pos = random.randint(0, len(tokens))
+                    tokens.insert(pos, gap_token)
+
                 # Join them, ensuring the final token count (including spaces) does not exceed target_limit
                 text = ""
                 token_count = 0
                 for t in tokens:
+                    # GAP トークンは文字数制限 (target_limit) にカウントせず、そのまま追加する
+                    if t.startswith("<GAP:"):
+                        text += t
+                        continue
+                    
                     if token_count >= target_limit: break
                     text += t
                     token_count += 1
                     if token_count < target_limit and random.random() < 0.4:
                         text += " "
                         token_count += 1
-                
-                # Ensure trailing space
-                if not text.endswith(" "):
-                    text += " "
-                
-                if not text.strip(): text = "CQ "
-                
-                # Verify if it fits
-                timing = self.morse_gen.generate_timing(text, wpm=wpm)
-                if sum(t[1] for t in timing) < max_duration - 0.2:
-                    break
-        snr = random.uniform(self.min_snr_2500, self.max_snr_2500)
+        # カリキュラム設定に基づいて SNR を決定
+        # 指定された [min, max] の範囲に 90% のサンプルが収まるような正規分布を使用する。
+        # 正規分布の 90% 信頼区間は mu +/- 1.645 * sigma である。
+        mu = (self.min_snr_2500 + self.max_snr_2500) / 2
+        sigma = (self.max_snr_2500 - self.min_snr_2500) / (2 * 1.645)
+        snr = random.normalvariate(mu, max(sigma, 1e-6))
         
         # Determine jitter and weight based on curriculum settings
         jitter = random.uniform(0, self.jitter_max)

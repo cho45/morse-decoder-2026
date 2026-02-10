@@ -348,6 +348,7 @@ class Trainer:
         self.train_dataset.fading_speed_min = p.fading_speed[0]
         self.train_dataset.fading_speed_max = p.fading_speed[1]
         self.train_dataset.min_fading = p.min_fading
+        self.train_dataset.gap_prob = p.gap_prob
         self.train_dataset.drift_prob = p.drift_prob
         self.train_dataset.qrn_prob = p.qrn_prob
         self.train_dataset.qrm_prob = p.qrm_prob
@@ -356,10 +357,6 @@ class Trainer:
         self.train_dataset.multipath_prob = p.multipath_prob
         self.train_dataset.clipping_prob = p.clipping_prob
         self.train_dataset.min_gain_db = p.min_gain_db
-        
-        # VRAM Safe length limits (10s fixed buffer handles most cases, but we keep text length reasonable)
-        self.train_dataset.min_len = 5
-        self.train_dataset.max_len = 15 if p.phrase_prob > 0 else 10
         
         # focus_chars は curriculum phase から取得する
         self.train_dataset.focus_chars = p.focus_chars
@@ -390,7 +387,6 @@ class Trainer:
         self.val_dataset.clipping_prob = getattr(self.train_dataset, 'clipping_prob', 0.0)
         self.val_dataset.chars = self.train_dataset.chars
         self.val_dataset.min_len = self.train_dataset.min_len
-        self.val_dataset.max_len = self.train_dataset.max_len
         self.val_dataset.focus_chars = self.train_dataset.focus_chars
         self.val_dataset.focus_prob = self.train_dataset.focus_prob
         self.val_dataset.phrase_prob = self.train_dataset.phrase_prob
@@ -430,12 +426,21 @@ class Trainer:
             # Forward
             states = self.model.get_initial_states(mels.size(0), mels.device)
             (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
+            
+            if torch.isnan(logits).any():
+                print("Warning: Logits contain NaN!")
+                continue
+
             input_lengths = torch.clamp(input_lengths, max=logits.size(1))
             
             loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
             
             if torch.isinf(loss) or torch.isnan(loss):
                 print(f"Warning: Loss is {loss}, skipping batch")
+                print(f"Input lengths: {input_lengths.min().item()} - {input_lengths.max().item()}")
+                print(f"Target lengths: {target_lengths.min().item()} - {target_lengths.max().item()}")
+                print(f"Logits shape: {logits.shape}")
+                print(f"Targets shape: {targets.shape}")
                 continue
                 
             # 累積ステップ数で正規化
@@ -622,6 +627,9 @@ class Trainer:
             ])
 
 def main():
+    # benchmark 機能をオフにする（入力サイズが可変の場合などの不安定さを避けるため）
+    torch.backends.cudnn.benchmark = False
+    
     parser = argparse.ArgumentParser(description="Train Streaming Conformer for CW")
     parser.add_argument("--samples-per-epoch", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=10)

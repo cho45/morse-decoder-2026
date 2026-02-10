@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from data_gen import generate_sample, CWDataset
 import config
+from config import SIG_ID_BLANK, SIG_ID_DIT, SIG_ID_DAH, SIG_ID_WORD_SPACE
 
 def test_generate_sample_with_signal_labels():
     text = "K" # -.-
@@ -40,10 +41,10 @@ def test_signal_labels_alignment():
     text = "T" # -
     waveform, label, signal_labels, boundary_labels = generate_sample(text, wpm=10, snr_2500=100)
     
-    # Check if we have 2s (Dah) in the signal_labels for 'T'
-    assert torch.any(signal_labels == 2)
+    # Check if we have SIG_ID_DAH (Dah) in the signal_labels for 'T'
+    assert torch.any(signal_labels == SIG_ID_DAH)
     
-    # The beginning and end (pre/post silence) should be 0
+    # The beginning and end (pre/post silence) should be SIG_ID_BLANK
     # pre_silence is at least 100ms (10 frames)
-    assert torch.all(signal_labels[:5] == 0)
-    assert torch.all(signal_labels[-5:] == 0)
+    assert torch.all(signal_labels[:5] == SIG_ID_BLANK)
+    assert torch.all(signal_labels[-5:] == SIG_ID_BLANK)

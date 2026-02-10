@@ -7,7 +7,7 @@ import config
 
 def test_low_wpm_limit():
     # Test for very low WPM
-    dataset = CWDataset(num_samples=100, min_wpm=10, max_wpm=10, min_len=5, max_len=20)
+    dataset = CWDataset(num_samples=100, min_wpm=10, max_wpm=10, min_len=5)
     
     print(f"Testing with WPM=10, TARGET_FRAMES={config.TARGET_FRAMES}")
     
@@ -22,26 +22,25 @@ def test_low_wpm_limit():
         max_frames = max(max_frames, num_frames)
         total_samples += 1
         
-        # Check if frames are within reasonable limit (allowing some buffer for silence/padding)
-        # TARGET_FRAMES=1000 is about 10 seconds.
+        # config.TARGET_FRAMES is about config.TRAIN_DURATION seconds.
         # MorseGenerator.generate_waveform adds pre_silence(0.1-0.5) and post_silence(0.55).
-        # So it should be around 1000 + 100 frames.
+        # So it should be around TARGET_FRAMES + 100 frames.
         assert num_frames < config.TARGET_FRAMES + 200, f"Frame length {num_frames} exceeds limit for WPM {wpm}"
         
         # At 10 WPM, 1 unit = 1.2/10 = 0.12s.
         # PARIS standard (50 units) = 6s.
-        # 10 seconds allows about 1.6 words = 8-10 chars.
-        # We count tokens (chars + prosigns) because prosigns are long in string length.
+        # config.TRAIN_DURATION allows about (DURATION / 6) words.
+        # For 19s, it's about 3 words = 15-20 tokens.
         gen = MorseGenerator()
         tokens = gen.text_to_morse_tokens(label)
-        assert len(tokens) <= 15, f"Token count {len(tokens)} too long for 10 WPM (Text: '{label}')"
+        assert len(tokens) <= 25, f"Token count {len(tokens)} too long for 10 WPM (Text: '{label}')"
 
     print(f"Max frames observed: {max_frames}")
     print("Low WPM limit test passed!")
 
 def test_high_wpm_limit():
     # Test for high WPM
-    dataset = CWDataset(num_samples=100, min_wpm=40, max_wpm=40, min_len=5, max_len=20)
+    dataset = CWDataset(num_samples=100, min_wpm=40, max_wpm=40, min_len=5)
     
     print(f"\nTesting with WPM=40, TARGET_FRAMES={config.TARGET_FRAMES}")
     
@@ -51,7 +50,6 @@ def test_high_wpm_limit():
         print(f"Sample {i}: WPM={wpm}, Length={len(label)}, Frames={num_frames}, Text='{label}'")
         
         # At 40 WPM, we should be able to fit more characters
-        # (Actually max_len is 20, so it will be capped by max_len)
         assert num_frames < config.TARGET_FRAMES + 200
 
     print("High WPM limit test passed!")

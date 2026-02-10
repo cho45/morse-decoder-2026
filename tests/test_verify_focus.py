@@ -17,7 +17,6 @@ def test_verify_focus_logic():
         num_samples=num_samples,
         allowed_chars=all_chars,
         min_len=10,
-        max_len=10,
         focus_chars=focus_chars,
         focus_prob=1.0
     )
