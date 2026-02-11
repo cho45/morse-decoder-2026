@@ -29,6 +29,8 @@ class Trainer:
     def __init__(self, args):
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_amp = self.device.type == 'cuda'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
         
         # Pre-compute Spectrogram transform using config
         self.spec_transform = torchaudio.transforms.Spectrogram(
@@ -423,34 +425,42 @@ class Trainer:
             targets = targets.to(self.device)
             target_lengths = target_lengths.to(self.device)
             
-            # Forward
-            states = self.model.get_initial_states(mels.size(0), mels.device)
-            (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
-            
-            if torch.isnan(logits).any():
-                print("Warning: Logits contain NaN!")
-                continue
-
-            input_lengths = torch.clamp(input_lengths, max=logits.size(1))
-            
-            loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
-            
-            if torch.isinf(loss) or torch.isnan(loss):
-                print(f"Warning: Loss is {loss}, skipping batch")
-                print(f"Input lengths: {input_lengths.min().item()} - {input_lengths.max().item()}")
-                print(f"Target lengths: {target_lengths.min().item()} - {target_lengths.max().item()}")
-                print(f"Logits shape: {logits.shape}")
-                print(f"Targets shape: {targets.shape}")
-                continue
+            # Forward with AMP
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                states = self.model.get_initial_states(mels.size(0), mels.device)
+                (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
                 
-            # 累積ステップ数で正規化
-            loss = loss / self.args.accumulation_steps
-            loss.backward()
+                if torch.isnan(logits).any():
+                    print("Warning: Logits contain NaN!")
+                    continue
+
+                input_lengths = torch.clamp(input_lengths, max=logits.size(1))
+                
+                loss, loss_dict = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets, penalty_weight=p.penalty_weight)
+                
+                if torch.isinf(loss) or torch.isnan(loss):
+                    print(f"Warning: Loss is {loss}, skipping batch")
+                    print(f"Input lengths: {input_lengths.min().item()} - {input_lengths.max().item()}")
+                    print(f"Target lengths: {target_lengths.min().item()} - {target_lengths.max().item()}")
+                    print(f"Logits shape: {logits.shape}")
+                    print(f"Targets shape: {targets.shape}")
+                    continue
+                    
+                # 累積ステップ数で正規化
+                loss = loss / self.args.accumulation_steps
+
+            # Scale loss and backward
+            self.scaler.scale(loss).backward()
             
             # 指定ステップごとに更新
             if (batch_idx + 1) % self.args.accumulation_steps == 0:
+                # Unscale before clipping
+                self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.optimizer.step()
+                
+                # Step and Update scaler
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
                 self.optimizer.zero_grad()
             
             total_loss_accum += loss.item() * self.args.accumulation_steps
@@ -493,13 +503,15 @@ class Trainer:
         
         with torch.no_grad():
             for waveforms, targets, lengths, target_lengths, texts, wpms, signal_targets, boundary_targets, is_phrases in dataloader:
-                mels, input_lengths = self.compute_mels_and_lengths(waveforms, lengths)
-                targets = targets.to(self.device)
-                target_lengths = target_lengths.to(self.device)
+                with torch.amp.autocast('cuda', enabled=self.use_amp):
+                    mels, input_lengths = self.compute_mels_and_lengths(waveforms, lengths)
+                    targets = targets.to(self.device)
+                    target_lengths = target_lengths.to(self.device)
+                    
+                    states = self.model.get_initial_states(mels.size(0), mels.device)
+                    (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
+                    loss, _ = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets)
                 
-                states = self.model.get_initial_states(mels.size(0), mels.device)
-                (logits, signal_logits, boundary_logits), _ = self.model(mels, states)
-                loss, _ = self.compute_loss(logits, signal_logits, boundary_logits, targets, target_lengths, input_lengths, signal_targets, boundary_targets)
                 total_loss += loss.item()
                 
                 sig_preds = signal_logits.argmax(dim=2)
@@ -600,6 +612,7 @@ class Trainer:
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'scaler_state_dict': self.scaler.state_dict(),
             'loss': val_loss,
             'cer': val_cer,
             'curriculum_phase': self.current_phase,
@@ -725,6 +738,11 @@ def main():
                     # Override learning rate with the one from command line
                     for param_group in trainer.optimizer.param_groups:
                         param_group['lr'] = args.lr
+                    
+                    if 'scaler_state_dict' in checkpoint:
+                        trainer.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                        print("Loaded scaler state dict")
+                        
                     print(f"Loaded full checkpoint '{resume_path}' (epoch {checkpoint['epoch']}) and set LR to {args.lr}")
                 except ValueError as e:
                     print(f"Loaded model from '{resume_path}' (epoch {checkpoint['epoch']}), but failed to load optimizer state: {e}")
