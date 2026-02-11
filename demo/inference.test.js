@@ -184,7 +184,7 @@ describe('Inference Logic', () => {
         // Pure silence can cause numerical instability in PCEN or Log operations in the model/preprocessing.
         // Training data always has some noise.
         const simulator = new HFChannelSimulator(SAMPLE_RATE);
-        paddedWaveform = simulator.applyNoise(paddedWaveform, 40.0); // 40dB SNR (Very clean but not silent)
+        paddedWaveform = simulator.applyNoise(paddedWaveform, 20.0); // 20dB SNR (Very clean but not silent)
 
 
         const specFrames = computeSpecFrames(paddedWaveform);
