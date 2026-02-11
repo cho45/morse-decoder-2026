@@ -54,7 +54,7 @@ performance_wpms:
 		exit 1; \
 	fi
 	@echo "Using checkpoint: $(CHECKPOINT)"
-	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_wpms.py --checkpoint $(CHECKPOINT) --samples 50 --wpms 15 25 35 --output diagnostics/visualize_snr_performance_wpms.png
+	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_wpms.py --checkpoint $(CHECKPOINT) --samples 50 --output diagnostics/visualize_snr_performance_wpms.png
 analyze-char-errors:
 	$(DOCKER_RUN) python3 -u diagnostics/analyze_char_errors.py --samples 500 --snr "6,-6,-12"
 
@@ -74,3 +74,6 @@ update-all-diagnostics:
 	make performance_wpms
 	make analyze-char-errors
 
+
+verify-streaming:
+	$(DOCKER_RUN) python3 -u diagnostics/verify_streaming_scenario.py
