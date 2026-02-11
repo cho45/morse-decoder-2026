@@ -5,50 +5,24 @@ import matplotlib.pyplot as plt
 import argparse
 import os
 import sys
-import random
-import string
 import onnxruntime as ort
-import concurrent.futures
 import multiprocessing
 import signal
 from tqdm import tqdm
 from typing import List, Tuple, Dict
+from torch.utils.data import DataLoader
+from collections import defaultdict
 
 # Add parent directory to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-from data_gen import generate_sample, CWDataset, MorseGenerator
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
-from diagnostics.visualize_snr_performance import get_evaluation_texts
-
-
-def worker_init():
-    """Initialize worker process."""
-    # Prevent workers from using multiple threads for torch operations
-    # which can cause contention with the parent process and other workers.
-    torch.set_num_threads(1)
-
-def generate_sample_wrapper(args):
-    """Wrapper for parallel generation."""
-    text, snr_2500, wpm, random_freq, fading_speed, min_fading, qrm_prob, impulse_prob = args
-    
-    freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if random_freq else 700.0
-    
-    # Fixed WPM 15 for evaluation stability
-    sample_wpm = wpm
-
-    # generate_sample will handle text reconstruction/truncation
-    waveform, actual_text, _, _ = generate_sample(
-        text=text, wpm=sample_wpm, snr_2500=snr_2500, frequency=freq,
-        jitter=0.0, weight=1.0, fading_speed=fading_speed, min_fading=min_fading,
-        qrm_prob=qrm_prob, impulse_prob=impulse_prob
-    )
-    
-    return waveform.numpy(), actual_text
+from diagnostics.snr_eval_utils import SyntheticMorseDataset
+from data_gen import CWDataset
 
 class ONNXPerformanceEvaluator:
-    def __init__(self, model_path: str, executor: concurrent.futures.ProcessPoolExecutor):
+    def __init__(self, model_path: str):
         print(f"Loading ONNX model from {model_path}")
         # Dynamic quantization (INT8) often hangs or is unsupported on CUDAExecutionProvider.
         # Use CPU for quantized models, and CUDA for others if available.
@@ -69,23 +43,6 @@ class ONNXPerformanceEvaluator:
         while f"attn_k_{self.num_layers}" in input_names:
             self.num_layers += 1
         print(f"Detected {self.num_layers} layers in ONNX model")
-
-        self.spec_transform = torchaudio.transforms.Spectrogram(
-            n_fft=config.N_FFT,
-            hop_length=config.HOP_LENGTH,
-            power=2.0,
-            center=False
-        )
-        self.f_bin_start = int(round(config.F_MIN * config.N_FFT / config.SAMPLE_RATE))
-        self.f_bin_end = self.f_bin_start + config.N_BINS
-        self.gen = MorseGenerator()
-        self.executor = executor
-
-    def preprocess(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Standardized preprocessing matching inference_utils.py."""
-        # inference_utils.preprocess_waveform already handles padding and cropping
-        device = torch.device("cpu")
-        return preprocess_waveform(waveform, device)
 
     def init_states(self, batch_size: int = 1, n_bins: int = 16):
         d_k = config.D_MODEL // config.N_HEAD
@@ -178,56 +135,33 @@ class ONNXPerformanceEvaluator:
         
         return torch.from_numpy(full_logits), torch.from_numpy(full_signal_logits), torch.from_numpy(full_boundary_logits)
 
-    def evaluate_batch(self, texts: List[str], snr_2500: float, wpm: int = 20, random_freq: bool = False,
-                       fading_speed: float = 0.0, min_fading: float = 1.0,
-                       qrm_prob: float = 0.1, impulse_prob: float = 0.001) -> List[float]:
+    def evaluate_dataloader(self, dataloader: DataLoader) -> Dict[float, List[float]]:
+        # Map SNR -> List of CERs
+        results = defaultdict(list)
         
-        args_list = [
-            (text, snr_2500, wpm, random_freq, fading_speed, min_fading, qrm_prob, impulse_prob)
-            for text in texts
-        ]
-        
-        # Parallel generation using persistent executor
-        results = list(self.executor.map(generate_sample_wrapper, args_list))
+        for waveforms, actual_texts, wpms, freqs, snrs in tqdm(dataloader, desc="Evaluating"):
+            # Preprocess on CPU for ONNX
+            mels = preprocess_waveform(waveforms, torch.device("cpu"))
             
-        waveforms = []
-        target_texts = []
-        for wf, txt in results:
-            waveforms.append(torch.from_numpy(wf))
-            target_texts.append(txt)
+            logits, signal_logits, boundary_logits = self.run_inference(mels)
             
-        # Stack into batch
-        batch_waveform = torch.stack(waveforms)
-        
-        # Preprocess batch
-        mels = self.preprocess(batch_waveform)
-        
-        # Run inference on batch
-        # If the batch is very large, you might want to split it here,
-        # but for 30-100 samples, a single batch is usually faster on GPU.
-        logits, signal_logits, boundary_logits = self.run_inference(mels)
-        
-        # Move to CPU for decoding logic which is non-vectorized anyway
-        logits = logits.cpu()
-        signal_logits = signal_logits.cpu()
-        boundary_logits = boundary_logits.cpu()
+            bound_probs_batch = torch.sigmoid(boundary_logits).squeeze(-1)
 
-        # Decode and calculate CER
-        cers = []
-        bound_probs_batch = torch.sigmoid(boundary_logits).squeeze(-1)
-        
-        # CER calculation is CPU bound and string-heavy, so we just loop
-        for i in range(len(texts)):
-            # Unified Decoding
-            decoded, _ = decode_multi_task(logits[i], signal_logits[i], bound_probs_batch[i])
-            cer = calculate_cer(target_texts[i], decoded)
-            cers.append(cer)
-            
-        return cers
+            for i, text in enumerate(actual_texts):
+                decoded, _ = decode_multi_task(
+                    logits[i], 
+                    signal_logits[i], 
+                    bound_probs_batch[i]
+                )
+                cer = calculate_cer(text, decoded)
+                
+                snr_val = float(snrs[i].item())
+                results[snr_val].append(cer)
+                    
+        return results
 
 def main():
     # Use 'spawn' instead of 'fork' to avoid deadlocks with torch/CUDA in subprocesses.
-    # This must be called before any multiprocessing-related code.
     try:
         multiprocessing.set_start_method('spawn', force=True)
     except RuntimeError:
@@ -243,6 +177,8 @@ def main():
     parser.add_argument("--min-fading", type=float, default=1.0)
     parser.add_argument("--qrm-prob", type=float, default=0.1)
     parser.add_argument("--impulse-prob", type=float, default=0.001)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of data loading workers")
     args = parser.parse_args()
 
     if args.labels and len(args.labels) != len(args.models):
@@ -251,57 +187,67 @@ def main():
 
     labels = args.labels if args.labels else [os.path.basename(m) for m in args.models]
     snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
+    dataset_source = CWDataset()
 
-    
     plt.figure(figsize=(12, 8))
-    
-    # Create a single executor for the entire run
-    with concurrent.futures.ProcessPoolExecutor(
-        max_workers=multiprocessing.cpu_count(),
-        initializer=worker_init
-    ) as executor:
-        
-        # Setup signal handler for clean exit
-        def signal_handler(sig, frame):
-            print("\nInterrupt received, shutting down...")
-            executor.shutdown(wait=False, cancel_futures=True)
-            sys.exit(0)
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
 
-        for model_path, label in zip(args.models, labels):
-            if not os.path.exists(model_path):
-                print(f"Warning: Model not found at {model_path}. Skipping.")
-                continue
-            
-            is_quantized = "quantized" in model_path.lower()
-            evaluator = ONNXPerformanceEvaluator(model_path, executor)
-            
-            avg_cers = []
-            print(f"Evaluating model: {label} (Quantized: {is_quantized})")
-            
-            dataset = CWDataset()
-            for snr in tqdm(snrs):
-                # Mixed high-density text and phrases using centralized logic
-                random_texts, phrase_texts = get_evaluation_texts(args.samples // 2, dataset, wpm=15)
-                texts = random_texts + phrase_texts
-                
-                cers = evaluator.evaluate_batch(
-                    texts, snr, wpm=15, random_freq=args.random_freq,
-                    fading_speed=args.fading_speed, min_fading=args.min_fading,
-                    qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
-                )
-                avg_cer = np.mean(cers)
-                avg_cers.append(avg_cer)
-                print(f"  SNR: {snr:3d}dB | Avg CER: {avg_cer:.4f}")
+    for model_path, label in zip(args.models, labels):
+        if not os.path.exists(model_path):
+            print(f"Warning: Model not found at {model_path}. Skipping.")
+            continue
+        
+        is_quantized = "quantized" in model_path.lower()
+        evaluator = ONNXPerformanceEvaluator(model_path)
+        
+        print(f"Evaluating model: {label} (Quantized: {is_quantized})")
+        
+        # Standardize on just one mixed dataset or run both separately as in main script?
+        # The main script separates them. Let's do a meaningful mix or just one type.
+        # Original script did: "Mixed high-density text and phrases"
+        # Let's create a single dataset that mixes 50/50 manually or stick to one for simplicity?
+        # Better: Run both and average, or just pick 'phrase' which is more realistic.
+        # Let's align with the main script and do average of both if possible, or just phrase.
+        # For simplicity and consistence with previous ONNX script, let's just do one pass with mixed data?
+        # No, SyntheticMorseDataset takes a type. Let's just use 'random' and 'phrase' sequentially and average.
+        
+        # 1. Random High Density
+        random_dataset = SyntheticMorseDataset(
+            samples_per_snr=args.samples // 2, snrs=snrs, dataset=dataset_source, wpm=15,
+            random_freq=args.random_freq, type='random',
+            fading_speed=args.fading_speed, min_fading=args.min_fading,
+            qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
+        )
+        random_loader = DataLoader(
+            random_dataset, batch_size=args.batch_size, 
+            num_workers=args.workers, shuffle=False, drop_last=False
+        )
+        random_results = evaluator.evaluate_dataloader(random_loader)
+        
+        # 2. Packed Phrases
+        phrase_dataset = SyntheticMorseDataset(
+            samples_per_snr=args.samples // 2, snrs=snrs, dataset=dataset_source, wpm=15,
+            random_freq=args.random_freq, type='phrase',
+            fading_speed=args.fading_speed, min_fading=args.min_fading,
+            qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
+        )
+        phrase_loader = DataLoader(
+            phrase_dataset, batch_size=args.batch_size,
+            num_workers=args.workers, shuffle=False, drop_last=False
+        )
+        phrase_results = evaluator.evaluate_dataloader(phrase_loader)
+        
+        # Combine results
+        combined_avg_cers = []
+        for snr in snrs:
+            all_cers = random_results[snr] + phrase_results[snr]
+            combined_avg_cers.append(np.mean(all_cers))
 
-            if is_quantized:
-                # int8: Green dashed line
-                plt.plot(snrs, avg_cers, marker='s', linestyle='--', color='C2', label=f'{label} (ONNX int8)')
-            else:
-                # fp32: Blue solid line
-                plt.plot(snrs, avg_cers, marker='o', linestyle='-', color='C0', label=f'{label} (ONNX fp32)')
+        if is_quantized:
+            # int8: Green dashed line
+            plt.plot(snrs, combined_avg_cers, marker='s', linestyle='--', color='C2', label=f'{label} (ONNX int8)')
+        else:
+            # fp32: Blue solid line
+            plt.plot(snrs, combined_avg_cers, marker='o', linestyle='-', color='C0', label=f'{label} (ONNX fp32)')
 
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.3, label='CER 10%')
     plt.axhline(y=0.05, color='green', linestyle='--', alpha=0.3, label='CER 5%')
@@ -314,6 +260,7 @@ def main():
     plt.gca().invert_yaxis()
     plt.ylabel("Character Error Rate (CER) - Top is better")
     
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     plt.savefig(args.output)
     print(f"Plot saved to {args.output}")
 

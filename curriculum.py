@@ -183,6 +183,12 @@ class CurriculumManager:
             penalty_weight=0.1
         ))
 
+        self.phases.append(CurriculumPhase(
+            name="Extreme", chars=max_chars,
+            min_snr_2500=-17, max_snr_2500=-5.0, min_wpm=10, max_wpm=40,
+            jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.95, drift_prob=0.0, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, qrn_prob=0.1, clipping_prob=0.1, min_gain_db=-60.0,
+            penalty_weight=0.1
+        ))
     def get_phase(self, phase_idx):
         idx = max(0, min(phase_idx - 1, len(self.phases) - 1))
         return self.phases[idx]

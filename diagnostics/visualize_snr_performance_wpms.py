@@ -18,59 +18,7 @@ from model import StreamingConformer
 from data_gen import generate_sample, CWDataset, MorseGenerator
 from inference_utils import preprocess_waveform, decode_multi_task, calculate_cer
 import config
-
-class SyntheticMorseDataset(Dataset):
-    def __init__(self, samples_per_snr: int, snrs: List[float], dataset: CWDataset, wpm: int = 15,
-                 random_freq: bool = False,
-                 fading_speed: float = 0.0, min_fading: float = 1.0,
-                 qrm_prob: float = 0.0, impulse_prob: float = 0.0):
-        self.samples_per_snr = samples_per_snr
-        self.snrs = snrs
-        self.total_samples = samples_per_snr * len(snrs)
-        self.dataset = dataset
-        self.wpm = wpm
-        self.random_freq = random_freq
-        self.fading_speed = fading_speed
-        self.min_fading = min_fading
-        self.qrm_prob = qrm_prob
-        self.impulse_prob = impulse_prob
-        self.gen = MorseGenerator()
-
-    def __len__(self):
-        return self.total_samples
-
-    def __getitem__(self, idx):
-        # Determine which SNR this sample belongs to
-        snr_idx = idx // self.samples_per_snr
-        current_snr = self.snrs[snr_idx]
-        
-        # Always generate random text
-        text = self._generate_random_text()
-        
-        freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if self.random_freq else 700.0
-        
-        # generate_sample handles truncation/padding
-        waveform, actual_text, _, _ = generate_sample(
-            text=text, wpm=self.wpm, snr_2500=current_snr, frequency=freq,
-            jitter=0.0, weight=1.0, fading_speed=self.fading_speed, min_fading=self.min_fading,
-            qrm_prob=self.qrm_prob, impulse_prob=self.impulse_prob
-        )
-        
-        return waveform, actual_text, self.wpm, freq, current_snr
-
-    def _generate_random_text(self) -> str:
-        """Generate random text that fits in 10s at given WPM with high density."""
-        # Target about 80% of 10s
-        max_chars = self.gen.estimate_max_chars_for_wpm(self.wpm, target_frames=800)
-        chars = string.ascii_uppercase + string.digits
-        text = "".join(random.choices(chars, k=max_chars))
-        # Add some spaces
-        text_with_spaces = ""
-        for c in text:
-            text_with_spaces += c
-            if random.random() < 0.2:
-                text_with_spaces += " "
-        return text_with_spaces.strip() + " "
+from diagnostics.snr_eval_utils import SyntheticMorseDataset
 
 class PerformanceEvaluator:
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
@@ -127,7 +75,7 @@ def main():
     parser.add_argument("--impulse-prob", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of data loading workers")
-    parser.add_argument("--wpms", type=int, nargs='+', default=[15, 25, 35], help="List of WPMs to test")
+    parser.add_argument("--wpms", type=int, nargs='+', default=[10, 20, 30, 40], help="List of WPMs to test")
     args = parser.parse_args()
 
     evaluator = PerformanceEvaluator(args.checkpoint)
@@ -146,7 +94,7 @@ def main():
         print(f"\nRunning Evaluation for {wpm} WPM...")
         dataset = SyntheticMorseDataset(
             samples_per_snr=args.samples, snrs=snrs, dataset=dataset_source, wpm=wpm,
-            random_freq=args.random_freq,
+            random_freq=args.random_freq, type='random', # Default to random in this script
             fading_speed=args.fading_speed, min_fading=args.min_fading,
             qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
         )

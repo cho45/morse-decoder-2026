@@ -23,7 +23,7 @@ export const SUBSAMPLING_RATE = 2;
 export const CHARS = [" ", "!", "\"", "$", "&", "'", "(", ")", "+", ",", "-", ".", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "=", "?", "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_", "<NJ>", "<DDD>", "<SK>", "<KA>", "<SOS>", "<VE>", "<HH>", "<AA>"];
 export const ID_TO_CHAR = {};
 CHARS.forEach((char, i) => { ID_TO_CHAR[i + 1] = char; });
-console.log("Vocabulary initialized:", CHARS.length, "chars");
+// console.log("Vocabulary initialized:", CHARS.length, "chars");
 
 // --- Utilities ---
 
@@ -248,7 +248,7 @@ export async function runFullInference(session, specFrames, ort) {
         const chunk = specFrames.subarray(i * N_BINS, end * N_BINS);
 
         const result = await runChunkInference(session, chunk, states, ort);
-        
+
         allLogits.push(result.logits);
         allSignalLogits.push(result.signalLogits);
         states = result.nextStates;
@@ -285,7 +285,7 @@ export async function runFullInference(session, specFrames, ort) {
  */
 export function decodeFull(allLogits, allSignalLogits, numClasses) {
     const T = allLogits.length / numClasses;
-    
+
     // 1. CTC Greedy Decoding (Find peaks and their positions)
     const decodedIndices = [];
     const decodedPositions = [];
