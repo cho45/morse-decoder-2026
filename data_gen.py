@@ -977,10 +977,14 @@ def generate_sample(text: str, wpm: int = 20, sample_rate: int = config.SAMPLE_R
                     multipath_delay: float = 0.0,
                     clipping_threshold: float = 1.0,
                     max_duration: float = config.TRAIN_DURATION,
-                    snr_2500: float = 10.0) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
+                    snr_2500: float = 10.0,
+                    gen: MorseGenerator = None,
+                    sim: HFChannelSimulator = None) -> Tuple[torch.Tensor, str, torch.Tensor, torch.Tensor]:
 
-    gen = MorseGenerator(sample_rate=sample_rate)
-    sim = HFChannelSimulator(sample_rate=sample_rate)
+    if gen is None:
+        gen = MorseGenerator(sample_rate=sample_rate)
+    if sim is None:
+        sim = HFChannelSimulator(sample_rate=sample_rate)
     
     # Human artifacts are now controlled by arguments
     
@@ -1308,7 +1312,9 @@ class CWDataset(Dataset):
             impulse_prob=self.impulse_prob,
             agc_enabled=agc_enabled,
             multipath_delay=multipath_delay,
-            clipping_threshold=clipping_threshold
+            clipping_threshold=clipping_threshold,
+            gen=self.morse_gen,
+            sim=self.channel_sim
         )
         # Return wpm as well so the trainer can use it for adaptive space reconstruction
         return waveform, label, wpm, signal_labels, boundary_labels, is_phrase

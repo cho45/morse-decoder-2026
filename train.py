@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.multiprocessing
 import torchaudio
 from torch.utils.data import DataLoader
 import numpy as np
@@ -401,7 +402,15 @@ class Trainer:
         actual_wpms = []
         actual_lens = []
 
-        dataloader = DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=self.collate_fn)
+        dataloader = DataLoader(
+            self.train_dataset, 
+            batch_size=self.args.batch_size, 
+            shuffle=True, 
+            collate_fn=self.collate_fn,
+            num_workers=self.args.num_workers,
+            pin_memory=True,
+            persistent_workers=self.args.num_workers > 0
+        )
         for batch_idx, (waveforms, targets, lengths, target_lengths, _, wpms, signal_targets, boundary_targets, _) in enumerate(dataloader):
             actual_wpms.extend(wpms.tolist())
             actual_lens.extend(target_lengths.tolist())
@@ -495,7 +504,15 @@ class Trainer:
         total_dist_random = 0
         total_len_random = 0
         
-        dataloader = DataLoader(self.val_dataset, batch_size=self.args.batch_size, shuffle=False, collate_fn=self.collate_fn)
+        dataloader = DataLoader(
+            self.val_dataset, 
+            batch_size=self.args.batch_size, 
+            shuffle=False, 
+            collate_fn=self.collate_fn,
+            num_workers=self.args.num_workers,
+            pin_memory=True,
+            persistent_workers=self.args.num_workers > 0
+        )
         
         last_ref = ""
         last_hyp = ""
@@ -642,6 +659,8 @@ class Trainer:
 def main():
     # benchmark 機能をオフにする（入力サイズが可変の場合などの不安定さを避けるため）
     torch.backends.cudnn.benchmark = False
+    # Avoid SHM allocation errors in Docker
+    # torch.multiprocessing.set_sharing_strategy('file_system')
     
     parser = argparse.ArgumentParser(description="Train Streaming Conformer for CW")
     parser.add_argument("--samples-per-epoch", type=int, default=1000)
@@ -660,6 +679,7 @@ def main():
     parser.add_argument("--curriculum-phase", type=int, default=0, help="Force specific curriculum phase (1, 2, 3). 0 for auto.")
     parser.add_argument("--freeze-encoder", action="store_true", help="Freeze encoder parameters")
     parser.add_argument("--reset-ctc-head", action="store_true", help="Reset CTC head weights and bias")
+    parser.add_argument("--num-workers", type=int, default=8, help="Number of data loading workers")
     
     args = parser.parse_args()
     
