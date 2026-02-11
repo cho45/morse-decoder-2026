@@ -48,6 +48,13 @@ performance_pt_streaming:
 	@echo "Using checkpoint: $(CHECKPOINT)"
 	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_pt_streaming.py --checkpoint $(CHECKPOINT) --samples 50 --output diagnostics/visualize_snr_performance_pt_streaming.png
 
+performance_wpms:
+	@if [ -z "$(CHECKPOINT)" ]; then \
+		echo "Error: No checkpoint found in checkpoints/"; \
+		exit 1; \
+	fi
+	@echo "Using checkpoint: $(CHECKPOINT)"
+	$(DOCKER_RUN) python3 diagnostics/visualize_snr_performance_wpms.py --checkpoint $(CHECKPOINT) --samples 50 --wpms 15 25 35 --output diagnostics/visualize_snr_performance_wpms.png
 analyze-char-errors:
 	$(DOCKER_RUN) python3 -u diagnostics/analyze_char_errors.py --samples 500 --snr "6,-6,-12"
 
@@ -64,5 +71,6 @@ update-all-diagnostics:
 	make performance
 	make performance_onnx
 	make performance_pt_streaming
+	make performance_wpms
 	make analyze-char-errors
 

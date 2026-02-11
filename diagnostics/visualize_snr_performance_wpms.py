@@ -21,7 +21,7 @@ import config
 
 class SyntheticMorseDataset(Dataset):
     def __init__(self, samples_per_snr: int, snrs: List[float], dataset: CWDataset, wpm: int = 15,
-                 random_freq: bool = False, type: str = 'random',
+                 random_freq: bool = False,
                  fading_speed: float = 0.0, min_fading: float = 1.0,
                  qrm_prob: float = 0.0, impulse_prob: float = 0.0):
         self.samples_per_snr = samples_per_snr
@@ -30,7 +30,6 @@ class SyntheticMorseDataset(Dataset):
         self.dataset = dataset
         self.wpm = wpm
         self.random_freq = random_freq
-        self.type = type
         self.fading_speed = fading_speed
         self.min_fading = min_fading
         self.qrm_prob = qrm_prob
@@ -45,10 +44,8 @@ class SyntheticMorseDataset(Dataset):
         snr_idx = idx // self.samples_per_snr
         current_snr = self.snrs[snr_idx]
         
-        if self.type == 'random':
-            text = self._generate_random_text()
-        else:
-            text = self._generate_packed_phrase()
+        # Always generate random text
+        text = self._generate_random_text()
         
         freq = random.uniform(config.MIN_FREQ, config.MAX_FREQ) if self.random_freq else 700.0
         
@@ -75,19 +72,6 @@ class SyntheticMorseDataset(Dataset):
                 text_with_spaces += " "
         return text_with_spaces.strip() + " "
 
-    def _generate_packed_phrase(self) -> str:
-        """Generate multiple phrases concatenated to fit in 10s."""
-        max_duration = 10.0
-        text = self.dataset.generate_phrase()
-        
-        for _ in range(3):
-            next_phrase = self.dataset.generate_phrase()
-            if self.gen.estimate_duration(text + " " + next_phrase, self.wpm) < max_duration - 1.0:
-                text += " " + next_phrase
-            else:
-                break
-        return text.strip() + " "
-
 class PerformanceEvaluator:
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -110,7 +94,7 @@ class PerformanceEvaluator:
         results = defaultdict(list)
         
         with torch.no_grad():
-            for waveforms, actual_texts, wpms, freqs, snrs in tqdm(dataloader, desc="Evaluating"):
+            for waveforms, actual_texts, wpms, freqs, snrs in tqdm(dataloader, desc="Evaluating", leave=False):
                 waveforms = waveforms.to(self.device)
                 mels = preprocess_waveform(waveforms, self.device)
                 
@@ -134,8 +118,8 @@ class PerformanceEvaluator:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--samples", type=int, default=50, help="Samples per SNR point")
-    parser.add_argument("--output", type=str, default="diagnostics/visualize_snr_performance.png")
+    parser.add_argument("--samples", type=int, default=50, help="Samples per SNR point per WPM")
+    parser.add_argument("--output", type=str, default="diagnostics/visualize_snr_performance_wpms.png")
     parser.add_argument("--random-freq", action="store_true", help="Enable frequency randomization")
     parser.add_argument("--fading-speed", type=float, default=0.0)
     parser.add_argument("--min-fading", type=float, default=1.0)
@@ -143,55 +127,60 @@ def main():
     parser.add_argument("--impulse-prob", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of data loading workers")
+    parser.add_argument("--wpms", type=int, nargs='+', default=[15, 25, 35], help="List of WPMs to test")
     args = parser.parse_args()
 
     evaluator = PerformanceEvaluator(args.checkpoint)
-    dataset_source = CWDataset() # For phrase generation
+    dataset_source = CWDataset() # For initialization needed by SyntheticMorseDataset
     snrs = np.arange(config.EVAL_SNR_MIN, config.EVAL_SNR_MAX, config.EVAL_SNR_STEP)
     
-    print(f"Starting evaluation with {args.samples} samples per SNR point...")
-    print(f"Settings: Fading={args.fading_speed}, MinFading={args.min_fading}, QRM={args.qrm_prob}, Impulse={args.impulse_prob}")
-    print(f"Parallel data loading with {args.workers} workers, batch size {args.batch_size}")
-    print(f"Target SNRs: {snrs}")
+    # Store aggregated results for plotting
+    all_results = {}
 
-    # 1. Random High Density
-    print("\nRunning Random High Density Evaluation...")
-    random_dataset = SyntheticMorseDataset(
-        samples_per_snr=args.samples, snrs=snrs, dataset=dataset_source, wpm=15,
-        random_freq=args.random_freq, type='random',
-        fading_speed=args.fading_speed, min_fading=args.min_fading,
-        qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
-    )
-    random_loader = DataLoader(
-        random_dataset, batch_size=args.batch_size, 
-        num_workers=args.workers, shuffle=False, drop_last=False
-    )
+    print(f"Starting evaluation with {args.samples} samples per SNR point per WPM...")
+    print(f"Settings: Fading={args.fading_speed}, MinFading={args.min_fading}, QRM={args.qrm_prob}, Impulse={args.impulse_prob}")
+    print(f"Target WPMs: {args.wpms}")
+    print(f"Parallel data loading with {args.workers} workers, batch size {args.batch_size}")
     
-    random_results = evaluator.evaluate_dataloader(random_loader)
-    
-    # Calculate means properly sorted by SNR
-    random_avg_cers = [np.mean(random_results[snr]) for snr in snrs]
-    
-    # 2. Packed Phrases
-    print("\nRunning Packed Phrases Evaluation...")
-    phrase_dataset = SyntheticMorseDataset(
-        samples_per_snr=args.samples, snrs=snrs, dataset=dataset_source, wpm=15,
-        random_freq=args.random_freq, type='phrase',
-        fading_speed=args.fading_speed, min_fading=args.min_fading,
-        qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
-    )
-    phrase_loader = DataLoader(
-        phrase_dataset, batch_size=args.batch_size,
-        num_workers=args.workers, shuffle=False, drop_last=False
-    )
-    
-    phrase_results = evaluator.evaluate_dataloader(phrase_loader)
-    phrase_avg_cers = [np.mean(phrase_results[snr]) for snr in snrs]
+    for wpm in args.wpms:
+        print(f"\nRunning Evaluation for {wpm} WPM...")
+        dataset = SyntheticMorseDataset(
+            samples_per_snr=args.samples, snrs=snrs, dataset=dataset_source, wpm=wpm,
+            random_freq=args.random_freq,
+            fading_speed=args.fading_speed, min_fading=args.min_fading,
+            qrm_prob=args.qrm_prob, impulse_prob=args.impulse_prob
+        )
+        loader = DataLoader(
+            dataset, batch_size=args.batch_size, 
+            num_workers=args.workers, shuffle=False, drop_last=False
+        )
+        
+        results = evaluator.evaluate_dataloader(loader)
+        
+        # Calculate means properly sorted by SNR
+        avg_cers = []
+        for snr in snrs:
+            # Finding the closest key in results or exact match
+            vals = results.get(float(snr), [])
+            if not vals:
+                # Try finding closest key if direct access fails (floating point issues)
+                keys = list(results.keys())
+                if keys:
+                    closest_key = min(keys, key=lambda x: abs(x - snr))
+                    if abs(closest_key - snr) < 1e-5:
+                        vals = results[closest_key]
+                
+            avg_cers.append(np.mean(vals) if vals else 0.0)
+            
+        all_results[wpm] = avg_cers
 
     # Plotting
     plt.figure(figsize=(12, 8))
-    plt.plot(snrs, random_avg_cers, marker='o', label='Random 6-char (Avg CER)')
-    plt.plot(snrs, phrase_avg_cers, marker='s', label='Standard Phrases (Avg CER)')
+    
+    markers = ['o', 's', '^', 'D', 'v', '<', '>']
+    for i, wpm in enumerate(args.wpms):
+        marker = markers[i % len(markers)]
+        plt.plot(snrs, all_results[wpm], marker=marker, label=f'{wpm} WPM (Avg CER)')
     
     plt.axhline(y=0.5, color='yellow', linestyle='-.', alpha=0.5, label='CER 50% (Physical Limit)')
     plt.axhline(y=0.1, color='red', linestyle='--', alpha=0.5, label='CER 10% (Usable)')
@@ -199,7 +188,7 @@ def main():
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.xlabel("SNR (in 2500Hz BW) [dB]")
     plt.ylabel("Character Error Rate (CER)")
-    plt.title(f"Model Robustness: SNR_2500 vs CER\nCheckpoint: {os.path.basename(args.checkpoint)}")
+    plt.title(f"Model Robustness: SNR vs CER (Multiple WPM)\nCheckpoint: {os.path.basename(args.checkpoint)}")
     plt.legend()
     plt.ylim(-0.05, 1.05)
     plt.gca().invert_yaxis() # Better is up

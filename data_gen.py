@@ -10,6 +10,7 @@ import scipy.signal
 import scipy.io.wavfile
 import random
 import string
+import math
 from typing import List, Tuple, Dict, Optional
 from torch.utils.data import Dataset
 import config
@@ -1132,137 +1133,122 @@ class CWDataset(Dataset):
         filling_rate = random.uniform(0.7, 1.0)
         target_duration = max_duration * filling_rate
 
+        # 1. WPM を決定 (20 中心の正規分布と 1/w 傾斜分布の積をサンプリング)
+        # 固定長波形において WPM に比例して増える CTC イベントの学習頻度を、分布の積によって均一化する。
+        # これにより、GPU効率の良い固定長学習を維持しつつ、統計的には「同一文字列長（波形長可変）」で学習するのと同等の効果を得る。
+        # 補正の強さを制御するパラメータ (1.0 で完全補正)
+        wpm_slope_power = 0.8
+        
+        wpm_range = np.arange(self.min_wpm, self.max_wpm + 1)
+        if len(wpm_range) == 1:
+            wpm = int(wpm_range[0])
+        else:
+            sigma_wpm = max((self.max_wpm - self.min_wpm) / 3.29, 1e-6)
+            def cdf(x):
+                return 0.5 * (1 + math.erf((x - 20) / (sigma_wpm * 1.41421356))) # 1.414... is sqrt(2)
+            
+            # 正規分布 (両端に裾を集約することでクリップを表現)
+            normal_dist = np.array([
+                cdf(w + 0.5) if i == 0 else 
+                1.0 - cdf(w - 0.5) if i == len(wpm_range) - 1 else 
+                cdf(w + 0.5) - cdf(w - 0.5) 
+                for i, w in enumerate(wpm_range)
+            ])
+            
+            # 学習機会均一化のための 1/w 傾斜分布 (20 WPM を基準としてスケーリング)
+            slope_dist = (20.0 / wpm_range) ** wpm_slope_power
+            
+            # 積をとって最終的なサンプリング重みを算出
+            final_dist = normal_dist * slope_dist
+            wpm = int(random.choices(wpm_range, weights=final_dist)[0])
+
         is_phrase = random.random() < self.phrase_prob
         
-        for attempt in range(5):  # Retry if text is too long for WPM limits
-            if is_phrase:
-                # 目標時間を埋めるまでフレーズを連結
-                current_text = ""
-                while True:
-                    new_phrase = self.generate_phrase()
-                    # 連結した場合の長さを推定 (max_wpm で収まるかチェック)
-                    test_text = current_text + (" " if current_text else "") + new_phrase
-                    # 推定時間は GAP を考慮しないため、少し余裕を持つ
-                    if self.morse_gen.estimate_duration(test_text, wpm=self.max_wpm) > target_duration * 1.1:
-                        break
-                    current_text = test_text
-                    
-                    # フレーズ間に GAP を挿入する判定
-                    if self.gap_prob > 0 and random.random() < self.gap_prob:
-                        gap_sec = random.uniform(1.0, 3.0)
-                        current_text += f" <GAP:{gap_sec:.1f}>"
-                        # GAP を入れた直後は流石に次はフレーズを入れるか、あるいは終了判定へ
-                        if self.morse_gen.estimate_duration(current_text, wpm=self.max_wpm) > target_duration:
-                            break
+        if is_phrase:
+            # 最初のフレーズを生成
+            text = self.generate_phrase()
+            
+            # 目標時間を超えない範囲で、GAP を挟んでフレーズを連結
+            while True:
+                gap_sec = random.uniform(1.0, 3.0)
+                gap_token = f"<GAP:{gap_sec:.1f}>"
+                next_phrase = self.generate_phrase()
                 
-                text = current_text if current_text else self.generate_phrase()
-
-                # WPMを決めて文字数を制限する
-                # フレーズの場合は、target_duration に収まるような WPM を逆算する (Adaptive)
-                # ただし、filling_rate が低い場合でも極端に遅くならないよう min_wpm は守る
-                wpm = self.morse_gen.estimate_wpm_for_target_frames(
-                    text, 
-                    target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH),
-                    min_wpm=self.min_wpm, 
-                    max_wpm=self.max_wpm
-                )
-                
-                # 推定された WPM でもはみ出す場合は切り捨てる（特にフレーズが長すぎる場合）
-                # ここでは正確な長さ計算よりも、単に長すぎる場合の後方カットを行う
-                max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(wpm, target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH))
-                phrase_tokens = self.morse_gen.text_to_morse_tokens(text)
-                if len(phrase_tokens) > max_allowed_len:
-                     # GAP トークンを保護しつつ切り捨て
-                    text = "".join(phrase_tokens[:max_allowed_len])
-                
-                # Verify if it fits (物理時間の再確認)
-                timing = self.morse_gen.generate_timing(text, wpm=wpm)
-                total_time_sec = sum(t[1] for t in timing) / config.SAMPLE_RATE
-                
-                # max_duration を超えていなければ OK
-                # filling_rate による target_duration はあくまで目安（短くてもOK）だが、長すぎて溢れるのはNG
-                if total_time_sec <= max_duration:
+                # 連結した場合の持続時間を推定
+                if self.morse_gen.estimate_duration(text + gap_token + next_phrase, wpm=wpm) > target_duration:
                     break
-                else:
-                    # 溢れた場合はリトライ（attemptが進む）
-                    if wpm >= self.max_wpm and attempt < 4:
-                        continue
-                    break
+                
+                text += gap_token + next_phrase
+        else:
+            # ランダム生成: 指定 WPM と target_duration で入る文字数を計算
+            max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(
+                wpm, 
+                target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH)
+            )
+            
+            # ランダム文字列生成
+            # target_limit は filling_rate に従った文字数
+            target_limit = max(self.min_len, max_allowed_len - 1)
+            
+            # Focus chars (50% chance if specified)
+            valid_chars = self.chars
+            if self.focus_chars and random.random() < self.focus_prob:
+                 valid_chars = self.focus_chars
+            
+            # Correctly tokenize the valid_chars if it's a string, otherwise use as list
+            if isinstance(valid_chars, str):
+                valid_tokens = self.morse_gen.text_to_morse_tokens(valid_chars)
             else:
-                # ランダム生成: WPM を先に決定 (正規分布中心)
-                wpm_center = 20
-                wpm_sigma = (self.max_wpm - self.min_wpm) / 4
-                wpm = int(random.gauss(wpm_center, wpm_sigma))
-                wpm = max(self.min_wpm, min(self.max_wpm, wpm))
+                valid_tokens = list(valid_chars)
+            
+            valid_tokens = [t for t in valid_tokens if t != ' '] # Exclude spaces from random pool
+            
+            length = random.randint(self.min_len, target_limit)
 
-                # 指定 WPM と target_duration で入る文字数を計算
-                max_allowed_len = self.morse_gen.estimate_max_chars_for_wpm(
-                    wpm, 
-                    target_frames=int(target_duration * config.SAMPLE_RATE / config.HOP_LENGTH)
-                )
+            # Prioritize numbers or focus chars if needed (basic logic kept)
+            # But here we simply choose from valid_tokens
+            if self.focus_chars and valid_chars == self.focus_chars:
+                # If focusing, force at least some focus chars
+                num_focus = length // 2
+                num_others = length - num_focus
                 
-                # ランダム文字列生成
-                # target_limit は filling_rate に従った文字数
-                target_limit = max(self.min_len, max_allowed_len - 1)
+                # Convert to token list correctly (handling Prosigns like <NJ>)
+                focus_list = self.morse_gen.text_to_morse_tokens(self.focus_chars) if isinstance(self.focus_chars, str) else list(self.focus_chars)
+                focus_list = [t for t in focus_list if t != ' ']
                 
-                # Focus chars (50% chance if specified)
-                valid_chars = self.chars
-                if self.focus_chars and random.random() < self.focus_prob:
-                     valid_chars = self.focus_chars
-                
-                # Correctly tokenize the valid_chars if it's a string, otherwise use as list
-                if isinstance(valid_chars, str):
-                    valid_tokens = self.morse_gen.text_to_morse_tokens(valid_chars)
-                else:
-                    valid_tokens = list(valid_chars)
-                
-                valid_tokens = [t for t in valid_tokens if t != ' '] # Exclude spaces from random pool
-                
-                length = random.randint(self.min_len, target_limit)
+                chars_list = self.morse_gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else list(self.chars)
+                chars_list = [t for t in chars_list if t != ' ']
 
-                # Prioritize numbers or focus chars if needed (basic logic kept)
-                # But here we simply choose from valid_tokens
-                if self.focus_chars and valid_chars == self.focus_chars:
-                    # If focusing, force at least some focus chars
-                    num_focus = length // 2
-                    num_others = length - num_focus
-                    
-                    # Convert to token list correctly (handling Prosigns like <NJ>)
-                    focus_list = self.morse_gen.text_to_morse_tokens(self.focus_chars) if isinstance(self.focus_chars, str) else list(self.focus_chars)
-                    focus_list = [t for t in focus_list if t != ' ']
-                    
-                    chars_list = self.morse_gen.text_to_morse_tokens(self.chars) if isinstance(self.chars, str) else list(self.chars)
-                    chars_list = [t for t in chars_list if t != ' ']
+                tokens = random.choices(focus_list, k=num_focus)
+                tokens += random.choices(chars_list, k=num_others)
+                random.shuffle(tokens)
+            else:
+                tokens = random.choices(valid_tokens, k=length)
+            
+            # ランダムに 0〜1 箇所の GAP を挿入 (1.0秒以上)
+            if self.gap_prob > 0 and random.random() < self.gap_prob:
+                gap_sec = random.uniform(1.0, 5.0)
+                gap_token = f"<GAP:{gap_sec:.1f}>"
+                # トークンリストの任意の位置（0〜末尾）に挿入
+                pos = random.randint(0, len(tokens))
+                tokens.insert(pos, gap_token)
 
-                    tokens = random.choices(focus_list, k=num_focus)
-                    tokens += random.choices(chars_list, k=num_others)
-                    random.shuffle(tokens)
-                else:
-                    tokens = random.choices(valid_tokens, k=length)
-                
-                # ランダムに 0〜1 箇所の GAP を挿入 (1.0秒以上)
-                if self.gap_prob > 0 and random.random() < self.gap_prob:
-                    gap_sec = random.uniform(1.0, 5.0)
-                    gap_token = f"<GAP:{gap_sec:.1f}>"
-                    # トークンリストの任意の位置（0〜末尾）に挿入
-                    pos = random.randint(0, len(tokens))
-                    tokens.insert(pos, gap_token)
-
-                # Join them, ensuring the final token count (including spaces) does not exceed target_limit
-                text = ""
-                token_count = 0
-                for t in tokens:
-                    # GAP トークンは文字数制限 (target_limit) にカウントせず、そのまま追加する
-                    if t.startswith("<GAP:"):
-                        text += t
-                        continue
-                    
-                    if token_count >= target_limit: break
+            # Join them, ensuring the final token count (including spaces) does not exceed target_limit
+            text = ""
+            token_count = 0
+            for t in tokens:
+                # GAP トークンは文字数制限 (target_limit) にカウントせず、そのまま追加する
+                if t.startswith("<GAP:"):
                     text += t
+                    continue
+                
+                if token_count >= target_limit: break
+                text += t
+                token_count += 1
+                if token_count < target_limit and random.random() < 0.4:
+                    text += " "
                     token_count += 1
-                    if token_count < target_limit and random.random() < 0.4:
-                        text += " "
-                        token_count += 1
+
         # カリキュラム設定に基づいて SNR を決定
         # 指定された [min, max] の範囲に 90% のサンプルが収まるような正規分布を使用する。
         # 正規分布の 90% 信頼区間は mu +/- 1.645 * sigma である。
