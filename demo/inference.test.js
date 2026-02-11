@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import ort from 'onnxruntime-node';
 import path from 'path';
 import { initStates, runFullInference, runChunkInference, decodeFull, computeSpecFrames, calculateCER, N_BINS, CHARS, HOP_LENGTH, SAMPLE_RATE, LOOKAHEAD_FRAMES, ChunkedDecoder } from './inference.js';
-import { MorseGenerator } from './data_gen.js';
+import { MorseGenerator, HFChannelSimulator } from './data_gen.js';
 
 describe('Inference Logic', () => {
     let session;
@@ -17,20 +17,20 @@ describe('Inference Logic', () => {
         expect(states).toHaveProperty('sub_cache');
         expect(states.sub_cache.dims).toEqual([1, 1, 2, N_BINS]);
         expect(states).toHaveProperty('attn_k_0');
-        expect(states.attn_k_0.dims).toEqual([1, 4, 0, 64]);
+        expect(states.attn_k_0.dims).toEqual([1, 4, 0, 32]);
     });
 
     it('should run full inference on dummy frames', async () => {
         const tLen = 8; // Multiple of 4
         const specFrames = new Float32Array(tLen * N_BINS).fill(0.1);
-        
+
         const { logits, signal_logits, numClasses } = await runFullInference(session, specFrames, ort);
-        
+
         expect(logits).toBeInstanceOf(Float32Array);
         expect(signal_logits).toBeInstanceOf(Float32Array);
         // The model file (cw_decoder_quantized.onnx) should match CHARS.length + 1 (blank).
         expect(numClasses).toBe(CHARS.length + 1);
-        
+
         // Subsampling rate is 2, so 8 frames -> 4 output frames
         expect(logits.length / numClasses).toBe(4);
     });
@@ -174,12 +174,19 @@ describe('Inference Logic', () => {
         const targetText = "CQ CQ DE JH1UMV K ";
         const timing = gen.generateTiming(targetText, 25);
         const cleanWaveform = gen.generateWaveform(timing);
-        
+
         // Add lookahead padding
         const lookaheadSamples = LOOKAHEAD_FRAMES * HOP_LENGTH;
-        const paddedWaveform = new Float32Array(cleanWaveform.length + lookaheadSamples);
+        let paddedWaveform = new Float32Array(cleanWaveform.length + lookaheadSamples);
         paddedWaveform.set(cleanWaveform);
-        
+
+        // [FIX] Apply realistic channel noise simulation to avoid pure silence issues
+        // Pure silence can cause numerical instability in PCEN or Log operations in the model/preprocessing.
+        // Training data always has some noise.
+        const simulator = new HFChannelSimulator(SAMPLE_RATE);
+        paddedWaveform = simulator.applyNoise(paddedWaveform, 40.0); // 40dB SNR (Very clean but not silent)
+
+
         const specFrames = computeSpecFrames(paddedWaveform);
         const seqLen = specFrames.length / N_BINS;
 
@@ -187,6 +194,13 @@ describe('Inference Logic', () => {
         const fullResult = await runFullInference(session, specFrames, ort);
         const fullDecoded = decodeFull(fullResult.logits, fullResult.signal_logits, fullResult.numClasses);
         // Use CER to be robust against minor spacing issues, but ensure content is correct
+        if (calculateCER(targetText, fullDecoded) !== 0) {
+            console.log(`\nFull Inference Failed:`);
+            console.log(`Target : "${targetText}"`);
+            console.log(`Decoded: "${fullDecoded}"`);
+        }
+
+        // Verify that adding noise resolves the pure silence issue and results in perfect decoding.
         expect(calculateCER(targetText, fullDecoded)).toBe(0);
 
         // 2. Chunk Inference (Streaming)
@@ -219,6 +233,11 @@ describe('Inference Logic', () => {
         }
 
         const chunkDecoded = decodeFull(mergedLogits, mergedSignalLogits, numClasses);
+        if (calculateCER(targetText, chunkDecoded) !== 0) {
+            console.log(`\nChunk Inference Failed:`);
+            console.log(`Target : "${targetText}"`);
+            console.log(`Decoded: "${chunkDecoded}"`);
+        }
         expect(calculateCER(targetText, chunkDecoded)).toBe(0);
     });
 

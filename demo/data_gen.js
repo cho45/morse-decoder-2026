@@ -197,7 +197,7 @@ export class MorseGenerator {
 
         let currentSample = Math.floor(preSilence * this.sampleRate);
         for (const { classId, duration } of timing) {
-            const numSamples = Math.floor(duration * this.sampleRate);
+            const numSamples = Math.round(duration * this.sampleRate);
             const isOn = (classId === 1 || classId === 2);
 
             if (isOn) {
@@ -247,13 +247,13 @@ export class HFChannelSimulator {
 
         // C/N0 (dB-Hz) calculation
         const cn0_db_hz = snr_2500 + 10 * Math.log10(SNR_REF_BW);
-        
+
         // Noise power density N0 (Watts/Hz)
         const n0 = markPower / Math.pow(10, cn0_db_hz / 10);
-        
+
         // Total noise power in the full bandwidth (Fs/2)
         const noisePower = n0 * (this.sampleRate / 2);
-        
+
         const sigma = Math.sqrt(noisePower);
         const noise = DSP.generateGaussianNoise(waveform.length, sigma);
 
