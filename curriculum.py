@@ -178,7 +178,7 @@ class CurriculumManager:
         # 限界値の定義: SNR_2500 = -18 dB において、ビン内 SNR は +1.0 dB となり、信号がノイズをわずかに上回る物理的な検知限界点となります。
         self.phases.append(CurriculumPhase(
             name="Extreme", chars=max_chars,
-            min_snr_2500=-18, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
+            min_snr_2500=-15, max_snr_2500=10.0, min_wpm=10, max_wpm=40,
             jitter=0.03, fading_speed=(0.0, 0.02), min_fading=0.9, drift_prob=0.1, agc_prob=0.0, phrase_prob=0.5, gap_prob=0.8, qrn_prob=0.3, clipping_prob=0.2, min_gain_db=-60.0,
             penalty_weight=0.1
         ))
