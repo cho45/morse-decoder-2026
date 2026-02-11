@@ -34,7 +34,7 @@ def verify_scenario():
     text = "CQ CQ DE JH1UMV K <GAP:3.0> CQ CQ DE JH1UMV K <GAP:1.0>"
     
     wpms = [10, 15, 20, 30, 40][::-1]
-    snrs = [-14, -12, -10, -5, 10, 40]
+    snrs = [-14, -12, -10, -5, 10, 40][::-1]
 
     print(f"Scenario: '{text}'")
     print(f"Sample Rate: {sample_rate} Hz")

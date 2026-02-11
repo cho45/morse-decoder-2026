@@ -22,7 +22,8 @@ from diagnostics.snr_eval_utils import SyntheticMorseDataset
 from data_gen import CWDataset
 
 class ONNXPerformanceEvaluator:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, chunk_size: int = 40):
+        self.chunk_size = chunk_size
         print(f"Loading ONNX model from {model_path}")
         # Dynamic quantization (INT8) often hangs or is unsupported on CUDAExecutionProvider.
         # Use CPU for quantized models, and CUDA for others if available.
@@ -61,7 +62,7 @@ class ONNXPerformanceEvaluator:
         """Run streaming inference on full mels by chunking."""
         batch_size = mels.size(0)
         seq_len = mels.size(1)
-        chunk_size = 40 # Standard chunk size for this model (multiple of 4)
+        chunk_size = self.chunk_size # Standard chunk size for this model (multiple of 4)
         
         # Get expected input dimension from model
         n_bins = self.session.get_inputs()[0].shape[2]
@@ -139,7 +140,7 @@ class ONNXPerformanceEvaluator:
         # Map SNR -> List of CERs
         results = defaultdict(list)
         
-        for waveforms, actual_texts, wpms, freqs, snrs in tqdm(dataloader, desc="Evaluating"):
+        for waveforms, actual_texts, wpms, freqs, snrs in tqdm(dataloader, desc="Evaluating", smoothing=0.1):
             # Preprocess on CPU for ONNX
             mels = preprocess_waveform(waveforms, torch.device("cpu"))
             
@@ -179,6 +180,7 @@ def main():
     parser.add_argument("--impulse-prob", type=float, default=0.001)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of data loading workers")
+    parser.add_argument("--chunk-size", type=int, default=500, help="Streaming chunk size (frames). Larger = faster.")
     args = parser.parse_args()
 
     if args.labels and len(args.labels) != len(args.models):
@@ -197,7 +199,7 @@ def main():
             continue
         
         is_quantized = "quantized" in model_path.lower()
-        evaluator = ONNXPerformanceEvaluator(model_path)
+        evaluator = ONNXPerformanceEvaluator(model_path, chunk_size=args.chunk_size)
         
         print(f"Evaluating model: {label} (Quantized: {is_quantized})")
         
@@ -219,7 +221,10 @@ def main():
         )
         random_loader = DataLoader(
             random_dataset, batch_size=args.batch_size, 
-            num_workers=args.workers, shuffle=False, drop_last=False
+            num_workers=args.workers, shuffle=False, drop_last=False,
+            persistent_workers=True if args.workers > 0 else False,
+            prefetch_factor=2 if args.workers > 0 else None,
+            pin_memory=True if torch.cuda.is_available() else False
         )
         random_results = evaluator.evaluate_dataloader(random_loader)
         
@@ -232,7 +237,10 @@ def main():
         )
         phrase_loader = DataLoader(
             phrase_dataset, batch_size=args.batch_size,
-            num_workers=args.workers, shuffle=False, drop_last=False
+            num_workers=args.workers, shuffle=False, drop_last=False,
+            persistent_workers=True if args.workers > 0 else False,
+            prefetch_factor=2 if args.workers > 0 else None,
+            pin_memory=True if torch.cuda.is_available() else False
         )
         phrase_results = evaluator.evaluate_dataloader(phrase_loader)
         
