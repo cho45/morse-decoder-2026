@@ -15,7 +15,7 @@ const HISTORY_LEN = 800;
 const NOISE_GAIN_VAL = 0.01;
 const TARGET_SAMPLE_RATE = 16000;
 const LOOKAHEAD_FRAMES = 20; // Sync with inference.js
-const HISTORY_LEN_SEC = 10;
+const HISTORY_LEN_SEC = 15;
 const SPECTRAM_HISTORY_LEN = Math.ceil(HISTORY_LEN_SEC * 1000 / HOP_MS);
 
 // --- Station Class for Demo ---
@@ -612,7 +612,12 @@ const app = createApp({
 
             if (sigHistory.length > 0) {
                 const barH = 10;
-                const sigColors = ['rgba(0,0,0,0)', '#ff4d4d', '#4d79ff', '#ffcc00'];
+                const sigColors = [
+                    'rgba(0,0,0,0)',
+                    'rgba(255,0,0,0.5)',
+                    'rgba(0,0,255,0.5)',
+                    'rgba(255, 255, 255, 0.3)',
+                ];
 
                 sigHistory.forEach(item => {
                     const x = w - (totalFrames - item.pos) - LOOKAHEAD_FRAMES;
