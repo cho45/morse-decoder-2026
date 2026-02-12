@@ -9,6 +9,8 @@
     "onnxruntime-node": "^1.20.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "serve": "^14.2.5",
     "vitest": "^3.0.0"
   }
 }

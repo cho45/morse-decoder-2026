@@ -115,7 +115,7 @@ class Station {
 
     stop() {
         this.active = false;
-        try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) {}
+        try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) { }
     }
 }
 
@@ -157,7 +157,7 @@ function calculateVolumeFromSNR(snrDb, sampleRate) {
     // Solve for A_s:
     // A_s^2 = G_n^2 * 10000 * 10^(SNR/10) / Fs
     // A_s = G_n * sqrt( (10000 / Fs) * 10^(SNR/10) )
-    
+
     return NOISE_GAIN_VAL * Math.sqrt((10000 / sampleRate) * Math.pow(10, snrDb / 10));
 }
 
@@ -264,7 +264,7 @@ function processAudioChunk(chunk) {
     // 2. Inference Sampling - Extract 14 bins centered on tracked frequency
     const binBW = TARGET_SAMPLE_RATE / nFft;
     const W = 14 * binBW;
-    const fStart = trackedFreq - W/2 + binBW/2;
+    const fStart = trackedFreq - W / 2 + binBW / 2;
     const specFrame = new Float32Array(14);
     for (let i = 0; i < 14; i++) {
         const f = fStart + i * binBW;
@@ -272,8 +272,8 @@ function processAudioChunk(chunk) {
         const kIdx = Math.floor(k);
         const kFrac = k - kIdx;
         if (kIdx >= 0 && kIdx < nFft - 1) {
-            const p1 = real[kIdx]*real[kIdx] + imag[kIdx]*imag[kIdx];
-            const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
+            const p1 = real[kIdx] * real[kIdx] + imag[kIdx] * imag[kIdx];
+            const p2 = real[kIdx + 1] * real[kIdx + 1] + imag[kIdx + 1] * imag[kIdx + 1];
             const p = p1 * (1 - kFrac) + p2 * kFrac;
 
             specFrame[i] = p;
@@ -313,7 +313,7 @@ async function initAudio() {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         sampleRate = audioContext.sampleRate;
         await NoiseNode.addModule(audioContext);
-        
+
         // windowSize/hopLength are now based on 16kHz
         windowSize = Math.floor(TARGET_SAMPLE_RATE * (WINDOW_MS / 1000));
         hopLength = Math.floor(TARGET_SAMPLE_RATE * (HOP_MS / 1000));
@@ -416,10 +416,10 @@ demoBtn.onclick = async () => {
     demoNodes.push(noise);
 
     const stations = [
-        { freq: 650,  wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
-        { freq: 1200, wpm: 25, jitter: 0.1,  snr: 10, msg: "CQ CQ DE K1XYZ K" },
+        { freq: 650, wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
+        { freq: 1200, wpm: 25, jitter: 0.1, snr: 10, msg: "CQ CQ DE K1XYZ K" },
         { freq: 1800, wpm: 35, jitter: 0.02, snr: 30, msg: "CQ CQ DE G4ZOO K" },
-        { freq: 2500, wpm: 20, jitter: 0.15, snr: 0,  msg: "CQ CQ DE JH1UMV K" },
+        { freq: 2500, wpm: 20, jitter: 0.15, snr: 0, msg: "CQ CQ DE JH1UMV K" },
         { freq: 3200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE DF7CB K" }
     ];
 
@@ -486,7 +486,7 @@ function drawInputSpec() {
     if (!isRunning || inputSpecHistory.length === 0) return;
     const w = inputCanvas.width;
     const h = inputCanvas.height;
-    
+
     if (inputSpecBuffer.length > 0) {
         const numToDraw = inputSpecBuffer.length;
         // 1. Shift Background by exactly the number of new frames
@@ -559,7 +559,8 @@ function drawInputOverlay(w, h) {
             inputOverlayCtx.moveTo(x, 0);
             inputOverlayCtx.lineTo(x, h - barH);
             inputOverlayCtx.stroke();
-            inputOverlayCtx.fillText(ev.char, x, 20);
+            const displayChar = ev.char === ' ' ? '\u2423' : ev.char;
+            inputOverlayCtx.fillText(displayChar, x, 20);
         }
     });
 }
@@ -569,7 +570,7 @@ function drawOverlay(w, h) {
     // 14 bins * binBW Hz/bin
     const binBW = TARGET_SAMPLE_RATE / nFft;
     const BW = 14 * binBW;
-    
+
     // 座標計算。MAX_FREQ に対する trackedFreq の比率で計算する。
     const yCenter = h - (trackedFreq / MAX_FREQ) * h;
     const yHalfWidth = (BW / 2 / MAX_FREQ) * h;

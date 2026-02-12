@@ -1,9 +1,10 @@
-import { createApp, reactive, ref, onMounted, onUnmounted, watch, nextTick } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.js';
+import { createApp, reactive, ref, onMounted, onUnmounted, watch, nextTick, computed } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.js';
 import { DSP } from '../dsp.js';
 import { NoiseNode } from '../noise-node.js';
 import { StreamInference } from '../stream-inference.js';
 import { MORSE_DICT } from '../data_gen.js';
 import { getViridisColor, powerToDBNormalized, normalizeDB } from '../visualization.js';
+import { PeakDetector } from '../peak-detector.js';
 
 // --- Constants ---
 const WINDOW_MS = 32;
@@ -14,6 +15,8 @@ const HISTORY_LEN = 800;
 const NOISE_GAIN_VAL = 0.01;
 const TARGET_SAMPLE_RATE = 16000;
 const LOOKAHEAD_FRAMES = 20; // Sync with inference.js
+const HISTORY_LEN_SEC = 10;
+const SPECTRAM_HISTORY_LEN = Math.ceil(HISTORY_LEN_SEC * 1000 / HOP_MS);
 
 // --- Station Class for Demo ---
 class Station {
@@ -62,7 +65,7 @@ class Station {
 
     stop() {
         this.active = false;
-        try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) {}
+        try { this.osc.stop(); this.osc.disconnect(); this.gain.disconnect(); } catch (e) { }
     }
 }
 
@@ -80,6 +83,17 @@ const app = createApp({
             trackedFreq: 700,
             isRunning: false,
             isLoading: false,
+            detectedPeaks: [], // Latest peaks from PeakDetector
+        });
+
+        const decodedTextStyle = computed(() => {
+            if (!waterfallOverlayCanvas.value) return {};
+            const h = waterfallOverlayCanvas.value.clientHeight;
+            const y = h - (state.trackedFreq / MAX_FREQ) * h;
+            // Position above the frequency line
+            return {
+                top: `${y - 45}px`
+            };
         });
 
         // Settings (Persistent)
@@ -113,10 +127,14 @@ const app = createApp({
             }
         });
 
+        // Enable ORT Proxy for Worker offloading
+        if (typeof ort !== 'undefined' && ort.env) {
+            ort.env.wasm.proxy = true;
+        }
+
         const errorMessage = ref('');
         const waterfallCanvas = ref(null);
-        const inputCanvas = ref(null);
-        const inputOverlayCanvas = ref(null);
+        const waterfallOverlayCanvas = ref(null);
         const textContainer = ref(null);
 
         // Audio & Processing State
@@ -128,35 +146,40 @@ const app = createApp({
         let masterGainNode = null;
         let userFilterNode = null;
         let waterfallCtx = null;
-        let inputCtx = null;
-        let inputOverlayCtx = null;
-        
+        let waterfallOverlayCtx = null;
+
         let windowSize = 0;
         let hopLength = 0;
         let nFft = 0;
         let audioBuf = null;
-        
+
         let waterfallBuffer = [];
-        let inputSpecBuffer = [];
-        let inputSpecHistory = [];
         let peakLockTimer = 0;
         let lastTrackedFreq = 700;
-        
+        let rawSpectrumHistory = [];
+        let peakDetector = null;
+
+
         // --- Core Logic ---
 
         const initAudioContext = async () => {
             if (!audioContext) {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 await NoiseNode.addModule(audioContext);
-                
+
                 windowSize = Math.floor(TARGET_SAMPLE_RATE * (WINDOW_MS / 1000));
                 hopLength = Math.floor(TARGET_SAMPLE_RATE * (HOP_MS / 1000));
                 nFft = Math.pow(2, Math.ceil(Math.log2(windowSize)));
                 audioBuf = new Float32Array(nFft);
-                
+
                 await audioContext.audioWorklet.addModule('../audio-processor.js');
             }
             if (audioContext.state === 'suspended') await audioContext.resume();
+
+            if (!peakDetector) {
+                const numBins = Math.floor(MAX_FREQ * nFft / TARGET_SAMPLE_RATE);
+                peakDetector = new PeakDetector(numBins);
+            }
         };
 
         const initModel = async () => {
@@ -164,6 +187,11 @@ const app = createApp({
                 streamInference.dispose();
                 streamInference = null;
             }
+
+            // Enable WebAssembly Proxy (requires ort-wasm-simd-threaded.jsep.wasm)
+            // This moves the heavy inference loop to a worker
+            ort.env.wasm.proxy = true;
+
             session = await ort.InferenceSession.create(settings.modelPath, {
                 executionProviders: ['wasm']
             });
@@ -188,29 +216,32 @@ const app = createApp({
             }
         };
 
-        const peakDetect = (magnitudes) => {
-            const numBins = magnitudes.length;
-            let peaks = [];
-            let sumP = 0;
-            for (let j = 0; j < numBins; j++) sumP += magnitudes[j];
-            const avgP = sumP / numBins;
-            const threshold = avgP * 5 + 0.0001;
+        const runPeakDetection = (magnitudes) => {
+            if (!peakDetector) return;
 
-            for (let j = 1; j < numBins - 1; j++) {
-                if (magnitudes[j] > threshold && magnitudes[j] > magnitudes[j - 1] && magnitudes[j] > magnitudes[j + 1]) {
-                    peaks.push({ p: magnitudes[j], k: j, f: j * TARGET_SAMPLE_RATE / nFft });
-                }
-            }
-            peaks.sort((a, b) => b.p - a.p);
+            const peaks = peakDetector.process(magnitudes);
+
+            const freqPeaks = peaks.map(p => ({
+                f: p.index * TARGET_SAMPLE_RATE / nFft,
+                p: p.magnitude,
+                snr: p.snr
+            }));
+
+            // Store detected peaks for visualization (always, even if not tracking)
+            state.detectedPeaks = freqPeaks;
 
             if (settings.autoTrack) {
                 const now = Date.now();
-                const nearbyPeak = peaks.find(p => Math.abs(p.f - state.trackedFreq) < 50);
+                // Find peak nearby current tracked frequency (within ±50Hz)
+                const nearbyPeak = freqPeaks.find(p => Math.abs(p.f - state.trackedFreq) < 50);
+
                 if (nearbyPeak) {
+                    // Smoothly track the nearby peak
                     state.trackedFreq = state.trackedFreq * 0.9 + nearbyPeak.f * 0.1;
                     peakLockTimer = now + PEAK_LOCK_MS;
-                } else if (now > peakLockTimer && peaks.length > 0) {
-                    state.trackedFreq = peaks[0].f;
+                } else if (now > peakLockTimer && freqPeaks.length > 0) {
+                    // If locked lost for a while, snap to the strongest peak
+                    state.trackedFreq = freqPeaks[0].f;
                     peakLockTimer = now + PEAK_LOCK_MS;
                 }
             } else {
@@ -236,12 +267,17 @@ const app = createApp({
             const magnitudes = new Float32Array(numBins);
             for (let j = 0; j < numBins; j++) magnitudes[j] = real[j] * real[j] + imag[j] * imag[j];
 
-            peakDetect(magnitudes);
+            runPeakDetection(magnitudes);
+
+            // Store raw magnitudes for re-decoding
+            rawSpectrumHistory.push(magnitudes);
+            if (rawSpectrumHistory.length > SPECTRAM_HISTORY_LEN) rawSpectrumHistory.shift();
+
 
             // Extract 14 bins
             const binBW = TARGET_SAMPLE_RATE / nFft;
             const W = 14 * binBW;
-            const fStart = state.trackedFreq - W/2 + binBW/2;
+            const fStart = state.trackedFreq - W / 2 + binBW / 2;
             const specFrame = new Float32Array(14);
             for (let i = 0; i < 14; i++) {
                 const f = fStart + i * binBW;
@@ -249,23 +285,46 @@ const app = createApp({
                 const kIdx = Math.floor(k);
                 const kFrac = k - kIdx;
                 if (kIdx >= 0 && kIdx < nFft - 1) {
-                    const p1 = real[kIdx]*real[kIdx] + imag[kIdx]*imag[kIdx];
-                    const p2 = real[kIdx+1]*real[kIdx+1] + imag[kIdx+1]*imag[kIdx+1];
+                    const p1 = real[kIdx] * real[kIdx] + imag[kIdx] * imag[kIdx];
+                    const p2 = real[kIdx + 1] * real[kIdx + 1] + imag[kIdx + 1] * imag[kIdx + 1];
                     specFrame[i] = p1 * (1 - kFrac) + p2 * kFrac;
                 }
             }
 
             if (streamInference) streamInference.pushFrame(specFrame);
 
-            // Visualization buffers
-            const frameCopy = new Float32Array(specFrame);
-            inputSpecHistory.push(frameCopy);
-            inputSpecBuffer.push(frameCopy);
-            if (inputSpecHistory.length > 800) inputSpecHistory.shift();
-
             const displayMagnitude = magnitudes.map(p => Math.max(0, Math.log1p(p * 5000) / 12));
             waterfallBuffer.push(displayMagnitude);
             if (waterfallBuffer.length > HISTORY_LEN) waterfallBuffer.shift();
+            if (waterfallBuffer.length > HISTORY_LEN) waterfallBuffer.shift();
+        };
+
+        const redecode = async () => {
+            if (!streamInference || rawSpectrumHistory.length === 0) return;
+
+            streamInference.reset();
+            if (peakDetector) peakDetector.reset();
+            state.decodedText = '';
+
+            const binBW = TARGET_SAMPLE_RATE / nFft;
+            const W = 14 * binBW;
+            const fStart = state.trackedFreq - W / 2 + binBW / 2;
+
+            for (const magnitudes of rawSpectrumHistory) {
+                const specFrame = new Float32Array(14);
+                for (let i = 0; i < 14; i++) {
+                    const f = fStart + i * binBW;
+                    const k = f * nFft / TARGET_SAMPLE_RATE;
+                    const kIdx = Math.floor(k);
+                    const kFrac = k - kIdx;
+                    if (kIdx >= 0 && kIdx < magnitudes.length - 1) {
+                        const p1 = magnitudes[kIdx];
+                        const p2 = magnitudes[kIdx + 1];
+                        specFrame[i] = p1 * (1 - kFrac) + p2 * kFrac;
+                    }
+                }
+                streamInference.pushFrame(specFrame);
+            }
         };
 
         const setupProcessing = (source) => {
@@ -289,7 +348,7 @@ const app = createApp({
             try {
                 await initAudioContext();
                 await initModel();
-                
+
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         channelCount: { ideal: 2, min: 1 },
@@ -315,7 +374,7 @@ const app = createApp({
 
                 state.isRunning = true;
                 state.view = 'main';
-                
+
                 nextTick(() => {
                     initCanvas();
                     requestAnimationFrame(drawLoop);
@@ -357,10 +416,11 @@ const app = createApp({
                 demoNodes.push(noise);
 
                 const stations = [
-                    { freq: 650,  wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
-                    { freq: 1200, wpm: 25, jitter: 0.1,  snr: 10, msg: "CQ CQ DE K1XYZ K" },
+                    { freq: 650, wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
+                    { freq: 1200, wpm: 25, jitter: 0.1, snr: 10, msg: "CQ CQ DE K1XYZ K" },
                     { freq: 1800, wpm: 35, jitter: 0.02, snr: 30, msg: "CQ CQ DE G4ZOO K" },
-                    { freq: 2500, wpm: 20, jitter: 0.15, snr: 0,  msg: "CQ CQ DE JH1UMV K" },
+                    { freq: 2500, wpm: 20, jitter: 0.15, snr: 0, msg: "CQ CQ DE JH1UMV K" },
+                    { freq: 800, wpm: 20, jitter: 0.15, snr: -5, msg: "CQ CQ DE JH1XYZ K" },
                     { freq: 3200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE DF7CB K" }
                 ];
 
@@ -392,17 +452,17 @@ const app = createApp({
         const stop = () => {
             state.isRunning = false;
             if (streamInference) streamInference.reset();
-            
+            if (peakDetector) peakDetector.reset();
+
             waterfallBuffer = [];
-            inputSpecBuffer = [];
-            inputSpecHistory = [];
+            state.detectedPeaks = [];
 
             if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
             demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
             demoNodes = [];
             masterGainNode = null;
             if (userFilterNode) { userFilterNode.disconnect(); userFilterNode = null; }
-            
+
             state.view = 'setup';
         };
 
@@ -410,6 +470,7 @@ const app = createApp({
             settings.targetFreq = Math.max(100, Math.min(3000, settings.targetFreq + delta));
             // Also update trackedFreq immediately in setup mode
             state.trackedFreq = settings.targetFreq;
+            redecode();
         };
 
         const toggleSettings = () => {
@@ -435,22 +496,17 @@ const app = createApp({
         };
 
         // --- Visualization ---
-        
+
         const initCanvas = () => {
             if (waterfallCanvas.value) {
                 waterfallCanvas.value.width = waterfallCanvas.value.clientWidth;
                 waterfallCanvas.value.height = waterfallCanvas.value.clientHeight;
                 waterfallCtx = waterfallCanvas.value.getContext('2d', { alpha: false });
             }
-            if (inputCanvas.value) {
-                inputCanvas.value.width = inputCanvas.value.clientWidth;
-                inputCanvas.value.height = inputCanvas.value.clientHeight;
-                inputCtx = inputCanvas.value.getContext('2d', { alpha: false });
-            }
-            if (inputOverlayCanvas.value) {
-                inputOverlayCanvas.value.width = inputOverlayCanvas.value.clientWidth;
-                inputOverlayCanvas.value.height = inputOverlayCanvas.value.clientHeight;
-                inputOverlayCtx = inputOverlayCanvas.value.getContext('2d');
+            if (waterfallOverlayCanvas.value) {
+                waterfallOverlayCanvas.value.width = waterfallOverlayCanvas.value.clientWidth;
+                waterfallOverlayCanvas.value.height = waterfallOverlayCanvas.value.clientHeight;
+                waterfallOverlayCtx = waterfallOverlayCanvas.value.getContext('2d');
             }
         };
 
@@ -461,36 +517,30 @@ const app = createApp({
 
         // Touch to set frequency on Waterfall
         const handleTouch = (e) => {
-            if (state.view !== 'main' || !waterfallCanvas.value) return;
-            const rect = waterfallCanvas.value.getBoundingClientRect();
+            // Use overlay canvas for interaction if available, else fallback
+            const targetCanvas = waterfallOverlayCanvas.value || waterfallCanvas.value;
+            if (state.view !== 'main' || !targetCanvas) return;
+            const rect = targetCanvas.getBoundingClientRect();
             const y = e.touches ? e.touches[0].clientY : e.clientY;
+
             const relY = y - rect.top;
-            
-            // Waterfall draws frequencies from bottom (0) to top (MAX_FREQ)?
-            // Actually in demo-mic.js: y=0 is top.
-            // drawWaterfall implementation:
-            //   waterfallCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
-            // i=0 is low freq, drawn at h (bottom).
-            // So Y at top is High Freq, Y at bottom is Low Freq.
-            
-            const h = waterfallCanvas.value.height;
+
+            // Waterfall draws frequencies from bottom (0) to top (MAX_FREQ)
+            const h = targetCanvas.height;
             const freq = (1 - relY / h) * MAX_FREQ;
-            
+
             settings.targetFreq = freq;
             settings.autoTrack = false; // Disable auto track on manual touch
             state.trackedFreq = freq;
             peakLockTimer = Date.now() + PEAK_LOCK_MS;
             updateUserFilter();
+            redecode();
         };
 
         onMounted(() => {
-            // Add touch listener to document to delegate to canvas if needed, 
-            // but ref is better. We add it in template via ref, but let's add logic here.
-            // Actually, let's attach to the canvas element in initCanvas or watcher?
-            // Using a watcher on waterfallCanvas ref is safer.
         });
 
-        watch(waterfallCanvas, (el) => {
+        watch(waterfallOverlayCanvas, (el) => {
             if (el) {
                 el.addEventListener('pointerdown', handleTouch);
                 el.addEventListener('pointermove', (e) => {
@@ -501,30 +551,29 @@ const app = createApp({
 
         const drawLoop = () => {
             if (!state.isRunning) return;
-            
+
             drawWaterfall();
-            drawInputSpec();
-            drawInputOverlay();
-            
+            drawWaterfallOverlay();
+
             requestAnimationFrame(drawLoop);
         };
 
         const drawWaterfall = () => {
             if (!waterfallCtx || waterfallBuffer.length === 0) return;
-            
+
             const w = waterfallCanvas.value.width;
             const h = waterfallCanvas.value.height;
             const numFrames = waterfallBuffer.length;
-            
+
             // Shift
             waterfallCtx.drawImage(waterfallCanvas.value, -numFrames, 0);
-            
+
             for (let f = 0; f < numFrames; f++) {
                 const frameData = waterfallBuffer[f];
                 const numBins = frameData.length;
                 const binH = h / numBins;
                 const x = w - numFrames + f;
-                
+
                 for (let i = 0; i < numBins; i++) {
                     const [r, g, b] = getViridisColor(frameData[i]);
                     waterfallCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
@@ -533,109 +582,111 @@ const app = createApp({
                 }
             }
             waterfallBuffer = []; // Clear buffer
-
-            // Draw Overlay (Target Freq Line)
-            // We can't clear the whole canvas because it holds history.
-            // But we want to show a line. 
-            // Option: Draw line on a separate overlay canvas?
-            // Or just draw a marker on the right edge?
-            // Given the scrolling nature, drawing a horizontal line across the whole screen 
-            // would require redrawing it every frame or using a separate layer.
-            // For performance and simplicity in this single-canvas setup, 
-            // let's draw a small indicator on the right edge.
-            
-            const y = h - (state.trackedFreq / MAX_FREQ) * h;
-            waterfallCtx.fillStyle = 'rgba(255, 0, 0, 0.8)';
-            waterfallCtx.fillRect(w - 20, y - 2, 20, 4);
         };
 
-        const drawInputSpec = () => {
-            if (!inputCtx || inputSpecBuffer.length === 0) return;
-            
-            const w = inputCanvas.value.width;
-            const h = inputCanvas.value.height;
-            const numFrames = inputSpecBuffer.length;
-            
-            // Shift
-            inputCtx.drawImage(inputCanvas.value, -numFrames, 0);
-            
-            // Normalize
-            const historyToScan = inputSpecHistory.slice(-w);
-            const { minDB, maxDB } = powerToDBNormalized(historyToScan);
-            const binH = h / 14;
+        const drawWaterfallOverlay = () => {
+            if (!waterfallOverlayCtx || !streamInference) return;
+            const w = waterfallOverlayCanvas.value.width;
+            const h = waterfallOverlayCanvas.value.height;
 
-            for (let f = 0; f < numFrames; f++) {
-                const frame = inputSpecBuffer[f];
-                const x = w - numFrames + f;
-                for (let i = 0; i < 14; i++) {
-                    const db = 10 * Math.log10(frame[i] + 1e-9);
-                    const val = normalizeDB(db, minDB, maxDB);
-                    const [r, g, b] = getViridisColor(val);
-                    inputCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-                    inputCtx.fillRect(x, h - (i + 1) * binH, 1, binH + 1);
-                }
-            }
-            inputSpecBuffer = [];
-        };
+            waterfallOverlayCtx.clearRect(0, 0, w, h);
 
-        const drawInputOverlay = () => {
-            if (!inputOverlayCtx || !streamInference) return;
+            // 1. Calculate Metrics for Layering
+            const binBW = TARGET_SAMPLE_RATE / nFft;
+            const focusBW = 14 * binBW;
+            const focusH = (focusBW / MAX_FREQ) * h;
+            const trackY = h - (state.trackedFreq / MAX_FREQ) * h;
 
-            const w = inputOverlayCanvas.value.width;
-            const h = inputOverlayCanvas.value.height;
+            // --- LAYER 1: Focus Band Overlay (Semi-transparent black) ---
+            waterfallOverlayCtx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            waterfallOverlayCtx.fillRect(0, trackY - focusH / 2, w, focusH);
 
-            inputOverlayCtx.clearRect(0, 0, w, h);
+            // --- LAYER 2: Target Line & Inference History (Dit/Dah Bars) ---
+            waterfallOverlayCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            const barW = 80;
+            waterfallOverlayCtx.fillRect(w - barW, trackY - 0.5, barW, 1);
 
             const sigHistory = streamInference.getSignalHistory();
             const eventHistory = streamInference.getEvents();
             const totalFrames = streamInference.frameCount;
 
-            if (sigHistory.length === 0) return;
+            if (sigHistory.length > 0) {
+                const barH = 10;
+                const sigColors = ['rgba(0,0,0,0)', '#ff4d4d', '#4d79ff', '#ffcc00'];
 
-            const barH = 12;
-            const sigColors = ['rgba(0,0,0,0)', '#ff4d4d', '#4d79ff', '#ffcc00'];
+                sigHistory.forEach(item => {
+                    const x = w - (totalFrames - item.pos) - LOOKAHEAD_FRAMES;
+                    if (x < 0 || x >= w) return;
 
-            // Draw Signal Classification (Dit/Dah)
-            sigHistory.forEach(item => {
-                // Adjust for lookahead delay to align with input signal
-                const x = w - (totalFrames - item.pos) - LOOKAHEAD_FRAMES;
-                if (x < 0 || x >= w) return;
+                    let maxIdx = 0, maxP = -1;
+                    for (let s = 0; s < 4; s++) {
+                        if (item.probs[s] > maxP) { maxP = item.probs[s]; maxIdx = s; }
+                    }
 
-                let maxIdx = 0, maxP = -1;
-                for (let s = 0; s < 4; s++) {
-                    if (item.probs[s] > maxP) { maxP = item.probs[s]; maxIdx = s; }
-                }
+                    if (maxIdx > 0) {
+                        waterfallOverlayCtx.fillStyle = sigColors[maxIdx];
+                        // Centered on the track line
+                        waterfallOverlayCtx.fillRect(x - 1, trackY - barH / 2, 2, barH);
+                    }
+                });
+            }
 
-                if (maxIdx > 0) {
-                    inputOverlayCtx.fillStyle = sigColors[maxIdx];
-                    // Each sig output represents 2 input frames (subsampling)
-                    inputOverlayCtx.fillRect(x - 1, h - barH, 2, barH);
-                }
-            });
-
-            // Draw Decoded Characters
-            inputOverlayCtx.fillStyle = '#fff';
-            inputOverlayCtx.font = 'bold 16px Courier New';
-            inputOverlayCtx.textAlign = 'center';
+            // --- LAYER 3: Boundary Markers (Red Dots) & Decoded Characters ---
+            // Positioned BELOW the center line (trackY)
+            const markerY = trackY + 8;
+            const charY = trackY + 25;
 
             eventHistory.forEach(ev => {
-                // Adjust for lookahead delay
                 const x = w - (totalFrames - ev.pos) - LOOKAHEAD_FRAMES;
                 if (x > 0 && x < w) {
-                    inputOverlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-                    inputOverlayCtx.beginPath();
-                    inputOverlayCtx.moveTo(x, 0);
-                    inputOverlayCtx.lineTo(x, h - barH);
-                    inputOverlayCtx.stroke();
-                    inputOverlayCtx.fillText(ev.char, x, 20);
+                    // Red Dot Marker
+                    waterfallOverlayCtx.fillStyle = '#ff0000';
+                    waterfallOverlayCtx.beginPath();
+                    waterfallOverlayCtx.arc(x, markerY, 3, 0, Math.PI * 2);
+                    waterfallOverlayCtx.fill();
+
+                    // Character text
+                    waterfallOverlayCtx.fillStyle = '#fff';
+                    waterfallOverlayCtx.font = 'bold 16px Courier New';
+                    waterfallOverlayCtx.textAlign = 'center';
+                    const displayChar = ev.char === ' ' ? '\u2423' : ev.char;
+                    waterfallOverlayCtx.fillText(displayChar, x, charY);
                 }
             });
+
+            // --- LAYER 4: Peak Detector SNR Labels (ON TOP) ---
+            const snrOffset = 10 * Math.log10(binBW / 2500);
+            state.detectedPeaks.forEach((peak) => {
+                const y = h - (peak.f / MAX_FREQ) * h;
+                const snrDb = 10 * Math.log10(peak.snr + 1e-12) + snrOffset;
+
+                // Marker: Red with White border
+                waterfallOverlayCtx.fillStyle = 'red';
+                waterfallOverlayCtx.strokeStyle = 'white';
+                waterfallOverlayCtx.lineWidth = 1.5;
+
+                waterfallOverlayCtx.beginPath();
+                waterfallOverlayCtx.arc(w - 10, y, 4, 0, Math.PI * 2);
+                waterfallOverlayCtx.fill();
+                waterfallOverlayCtx.stroke();
+
+                // Label: Normalized SNR
+                waterfallOverlayCtx.fillStyle = 'white';
+                waterfallOverlayCtx.font = 'bold 11px sans-serif';
+                waterfallOverlayCtx.textAlign = 'right';
+                waterfallOverlayCtx.fillText(snrDb.toFixed(1) + ' dB', w - 20, y - 6);
+            });
+
+            // "Locked" indicator at the very edge (Topmost)
+            waterfallOverlayCtx.fillStyle = settings.autoTrack ? '#f00' : '#888';
+            waterfallOverlayCtx.fillRect(w - 5, trackY - 5, 5, 10);
         };
 
         return {
             state,
             settings,
             errorMessage,
+            decodedTextStyle,
             startMic,
             startDemo,
             stop,
@@ -643,8 +694,7 @@ const app = createApp({
             toggleSettings,
             clearCache,
             waterfallCanvas,
-            inputCanvas,
-            inputOverlayCanvas,
+            waterfallOverlayCanvas,
             textContainer
         };
     }

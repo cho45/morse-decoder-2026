@@ -117,6 +117,7 @@ export class StreamInference extends EventTarget {
         this._events = [];
         this._isProcessing = false;
         this._pendingChunk = null;
+        this._processedFrames = 0;
 
         // Clear history
         this._sigHistory = [];
@@ -138,13 +139,11 @@ export class StreamInference extends EventTarget {
         if (specFrame.length !== N_BINS) {
             throw new Error(`Expected frame of ${N_BINS} bins, got ${specFrame.length}`);
         }
-
-        this._buffer.push(new Float32Array(specFrame));
+        this._buffer.push(specFrame);
         this._totalFrames++;
 
-        if (this._buffer.length >= this._options.chunkSize) {
-            // Store the promise for later awaiting via waitForProcessing()
-            this._pendingChunk = this._runChunk();
+        if (!this._isProcessing) {
+            this._runChunk();
         }
     }
 
@@ -159,6 +158,9 @@ export class StreamInference extends EventTarget {
      * @returns {Promise<void>}
      */
     async flush() {
+        // Wait for any ongoing processing to complete
+        await this.waitForProcessing();
+
         if (this._buffer.length === 0) {
             return;
         }
@@ -168,17 +170,19 @@ export class StreamInference extends EventTarget {
 
         if (completeChunkLen > 0) {
             // Keep only the frames that form a complete chunk
-            const remainingFrames = this._buffer.slice(completeChunkLen);
-            this._buffer = this._buffer.slice(0, completeChunkLen);
-            await this._runChunk();
-            // Discard remaining frames (cannot be processed without padding)
-            if (remainingFrames.length > 0) {
-                console.warn(`StreamInference.flush(): Discarding ${remainingFrames.length} frames (not a multiple of 4)`);
-            }
+            const framesToProcess = this._buffer.splice(0, completeChunkLen);
+
+            // Temporarily store current buffer, process framesToProcess, then restore
+            const originalBuffer = this._buffer;
+            this._buffer = framesToProcess;
+
+            await this._runChunk(true);
+
+            this._buffer = originalBuffer; // Restore remaining frames
+            // Frames remaining in buffer will be processed next time (or require more data)
         } else {
             // Less than 4 frames - cannot process
-            console.warn(`StreamInference.flush(): Discarding ${this._buffer.length} frames (less than 4)`);
-            this._buffer = [];
+            // leave in buffer (do not discard)
         }
     }
 
@@ -257,14 +261,9 @@ export class StreamInference extends EventTarget {
      * @returns {Promise<void>}
      */
     async waitForProcessing() {
-        // Wait for current processing to complete
+        // Wait for current processing chain to complete
         while (this._isProcessing) {
-            await new Promise(r => setTimeout(r, 10));
-        }
-        // Process any remaining buffered frames that triggered _runChunk
-        if (this._pendingChunk) {
-            await this._pendingChunk;
-            this._pendingChunk = null;
+            await this._processingPromise;
         }
     }
 
@@ -312,35 +311,55 @@ export class StreamInference extends EventTarget {
 
     /**
      * Run inference on buffered frames.
+     * @param {boolean} [flush=false] - If true, process even if buffer < chunkSize (multiple of 4)
      * @private
      */
-    async _runChunk() {
+    async _runChunk(flush = false) {
         if (this._isProcessing || !this._session || !this._states) {
             return;
         }
 
+        // Guard: check if we have enough data to process
+        // We need at least chunkSize, OR if flushing, at least 4 frames (ONNX requirement)
+        const minFrames = flush ? 4 : this._options.chunkSize;
+        if (this._buffer.length < minFrames) {
+            return;
+        }
+
         this._isProcessing = true;
-        const chunkSize = this._buffer.length;
-        const framesBefore = this._totalFrames - chunkSize;
+        let resolveProcessing;
+        this._processingPromise = new Promise(r => resolveProcessing = r);
 
         try {
-            // Combine buffered frames into single array
-            const combined = new Float32Array(N_BINS * chunkSize);
-            for (let i = 0; i < chunkSize; i++) {
-                combined.set(this._buffer[i], i * N_BINS);
+            // Determine actual chunk size to process
+            let processSize = this._options.chunkSize;
+            if (flush && this._buffer.length < processSize) {
+                // If flushing and less than chunkSize, take largest multiple of 4
+                processSize = Math.floor(this._buffer.length / 4) * 4;
             }
-            this._buffer = [];
+
+            // Extract exact chunk
+            if (processSize === 0) return;
+            const chunk = this._buffer.splice(0, processSize);
+
+            // Should not happen due to guard, but check
+            if (chunk.length === 0) return;
+
+            // Combine into input tensor
+            const inputTensor = new Float32Array(N_BINS * chunk.length);
+            for (let i = 0; i < chunk.length; i++) {
+                inputTensor.set(chunk[i], i * N_BINS);
+            }
 
             // Run inference
             const result = await runChunkInference(
                 this._session,
-                combined,
+                inputTensor,
                 this._states,
                 this._ort
             );
 
             if (this._isDisposed) {
-                // If disposed during inference, update states so they can be cleaned up in finally block
                 this._states = result.nextStates;
                 return;
             }
@@ -351,88 +370,77 @@ export class StreamInference extends EventTarget {
             this._lastTensorTime = result.tensorTime;
             this._lastSessionTime = result.sessionTime;
 
-            // Dispose old states (skip in WebGPU mode to avoid reallocation overhead)
+            // Dispose old states
             if (!this._options.useWebGPU) {
                 const nextStateValues = Object.values(this._states);
                 oldStateValues.forEach(t => {
                     if (t && t.dispose && !nextStateValues.includes(t)) {
                         try {
-                            // Only dispose tensors with non-empty dims
                             if (t.dims && t.dims.length > 0 && t.dims.every(d => d > 0)) {
                                 t.dispose();
                             }
-                        } catch (e) {
-                            // Ignore disposal errors (can happen with onnxruntime-node)
-                        }
+                        } catch (e) { }
                     }
                 });
             }
 
-            // Process output frames
+            // Process outputs
             const numOutFrames = result.logits.length / result.numClasses;
             const newChars = [];
 
-            for (let t = 0; t < numOutFrames; t++) {
-                // Each output frame corresponds to 2 input frames (SUBSAMPLING_RATE=2)
-                const framePos = framesBefore + (t * 2);
+            // Frame position calculation:
+            // Since we process sequentially, `_processedFrames` tracks the start of this chunk.
+            const chunkStartPos = this._processedFrames;
 
-                // Extract logits for this frame
+            for (let t = 0; t < numOutFrames; t++) {
+                // Output corresponds to 2 input frames (subsampling)
+                const framePos = chunkStartPos + (t * 2);
+
                 const ctcLogits = result.logits.slice(t * result.numClasses, (t + 1) * result.numClasses);
                 const sigLogits = result.signalLogits.slice(t * 4, (t + 1) * 4);
                 const boundLogit = result.boundaryLogits[t];
 
-                // Calculate probabilities
                 const ctcProbs = softmax(Array.from(ctcLogits));
                 const sigProbs = softmax(Array.from(sigLogits));
                 const boundProb = sigmoid(boundLogit);
 
-                // Update history
                 this._sigHistory.push({ probs: sigProbs, pos: framePos });
                 this._ctcHistory.push(ctcProbs);
                 this._boundHistory.push(boundProb);
 
-                // Trim history to max length
-                while (this._sigHistory.length > this._options.historyLength) {
-                    this._sigHistory.shift();
-                }
-                while (this._ctcHistory.length > this._options.historyLength) {
-                    this._ctcHistory.shift();
-                }
-                while (this._boundHistory.length > this._options.historyLength) {
-                    this._boundHistory.shift();
-                }
+                while (this._sigHistory.length > this._options.historyLength) this._sigHistory.shift();
+                while (this._ctcHistory.length > this._options.historyLength) this._ctcHistory.shift();
+                while (this._boundHistory.length > this._options.historyLength) this._boundHistory.shift();
 
-                // Decode frame
                 const decodeResult = this._decoder.decodeFrame(ctcLogits, sigLogits, boundProb);
-
-                // Track new characters
                 if (decodeResult.newChar) {
                     this._events.push({ char: decodeResult.newChar, pos: framePos });
                     newChars.push(decodeResult.newChar);
                 }
             }
 
-            // Trim events to reasonable length
-            // historyLength is in output frames, but pos/totalFrames are in input frames (2x)
+            this._processedFrames += chunk.length;
+
+            // Trim events
             const historyInInputFrames = this._options.historyLength * 2;
-            while (this._events.length > 0 && this._events[0].pos < this._totalFrames - historyInInputFrames) {
+            while (this._events.length > 0 && this._events[0].pos < this._processedFrames - historyInInputFrames) {
                 this._events.shift();
             }
 
-            // Fire events
+            // Emit result
             if (newChars.length > 0) {
                 this.dispatchEvent(new CustomEvent('result', {
                     detail: {
                         text: this._decoder.getText(),
                         newChars: newChars,
-                        framePos: this._totalFrames
+                        framePos: this._processedFrames
                     }
                 }));
             }
 
             this.dispatchEvent(new CustomEvent('frame', {
                 detail: {
-                    framePos: this._totalFrames
+                    framePos: this._processedFrames
                 }
             }));
 
@@ -441,7 +449,15 @@ export class StreamInference extends EventTarget {
             throw e;
         } finally {
             this._isProcessing = false;
-            if (this._isDisposed) {
+            if (resolveProcessing) resolveProcessing();
+
+            // Recursive chain: check if more processing needed
+            if (!this._isDisposed) {
+                const nextMinFrames = flush ? 4 : this._options.chunkSize;
+                if (this._buffer.length >= nextMinFrames) {
+                    this._runChunk(flush);
+                }
+            } else {
                 this._disposeStates();
             }
         }

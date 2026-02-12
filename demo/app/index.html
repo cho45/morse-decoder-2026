@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -8,18 +9,21 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.all.min.js"></script>
     <style>
-        [v-cloak] { display: none; }
+        [v-cloak] {
+            display: none;
+        }
     </style>
 </head>
+
 <body>
     <div id="app" v-cloak>
         <!-- Setup Screen -->
         <div v-if="state.view === 'setup'" class="screen setup-screen">
             <h1>CW Decoder</h1>
-            
+
             <div class="card">
                 <h2>受信設定</h2>
-                
+
                 <div class="control-group">
                     <label>ターゲット周波数 (Hz)</label>
                     <div class="freq-input">
@@ -49,9 +53,10 @@
                 </button>
             </div>
 
-            <div class="card system-settings" style="margin-top: 30px; border: 1px solid #444; background: transparent;">
+            <div class="card system-settings"
+                style="margin-top: 30px; border: 1px solid #444; background: transparent;">
                 <h2 style="font-size: 16px; color: #888; border-bottom: 1px solid #444;">システム設定</h2>
-                
+
                 <div class="control-group">
                     <label>ボリューム (サイドトーン/デモ音)</label>
                     <input type="range" v-model.number="settings.volume" min="0" max="1" step="0.01">
@@ -66,10 +71,11 @@
                 </div>
 
                 <div class="control-group">
-                    <button class="secondary small" @click="clearCache" style="font-size: 14px; padding: 8px;">キャッシュ削除 (更新用)</button>
+                    <button class="secondary small" @click="clearCache" style="font-size: 14px; padding: 8px;">キャッシュ削除
+                        (更新用)</button>
                 </div>
             </div>
-            
+
             <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
         </div>
 
@@ -85,17 +91,11 @@
             </div>
 
             <!-- Wide-band Spectrogram -->
-            <canvas ref="waterfallCanvas" class="waterfall-canvas"></canvas>
-
-            <!-- Decoded Text (Above Focus View) -->
-            <div class="decoded-text-container" ref="textContainer">
-                <div class="decoded-text-content">{{ state.decodedText }}</div>
-            </div>
-
-            <!-- Focus View (Model Input) -->
-            <div class="focus-view">
-                <canvas ref="inputCanvas" class="input-canvas"></canvas>
-                <canvas ref="inputOverlayCanvas" class="input-overlay-canvas"></canvas>
+            <div class="waterfall-container">
+                <canvas ref="waterfallCanvas" class="waterfall-canvas"></canvas>
+                <canvas ref="waterfallOverlayCanvas" class="waterfall-overlay-canvas"></canvas>
+                <div ref="textContainer" class="decoded-text-content" :style="decodedTextStyle">{{ state.decodedText }}
+                </div>
             </div>
         </div>
     </div>
@@ -109,4 +109,5 @@
         }
     </script>
 </body>
+
 </html>
