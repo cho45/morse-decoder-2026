@@ -347,11 +347,11 @@ button:disabled {
 
 .peak-decoded-text {
     font-family: 'Courier New', monospace;
-    font-size: 10px;
-    color: #ddd;
+    font-size: 13px;
+    color: #eee;
     font-weight: bold;
     text-shadow: 0 0 3px black, 0 0 6px black;
-    width: 20em;
+    width: 10em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -143,10 +143,7 @@ const app = createApp({
             }
         });
 
-        // Enable ORT Proxy for Worker offloading
-        if (typeof ort !== 'undefined' && ort.env) {
-            ort.env.wasm.proxy = true;
-        }
+        // Initialize state variables
 
         const errorMessage = ref('');
         const waterfallCanvas = ref(null);
