@@ -9,14 +9,18 @@ import { PeakDetector } from '../peak-detector.js';
 // --- Constants ---
 const WINDOW_MS = 32;
 const HOP_MS = 10;
-const MAX_FREQ = 4000;
+const MAX_FREQ = 16000;
 const PEAK_LOCK_MS = 3000;
 const HISTORY_LEN = 800;
 const NOISE_GAIN_VAL = 0.01;
-const TARGET_SAMPLE_RATE = 16000;
+const TARGET_SAMPLE_RATE = 32000;
 const LOOKAHEAD_FRAMES = 20; // Sync with inference.js
 const HISTORY_LEN_SEC = 15;
 const SPECTRAM_HISTORY_LEN = Math.ceil(HISTORY_LEN_SEC * 1000 / HOP_MS);
+
+if (MAX_FREQ > TARGET_SAMPLE_RATE / 2) {
+    throw new Error(`MAX_FREQ must be less than TARGET_SAMPLE_RATE/2 (Nyquist frequency). MAX_FREQ=${MAX_FREQ}, TARGET_SAMPLE_RATE=${TARGET_SAMPLE_RATE}`);
+}
 
 // --- Station Class for Demo ---
 class Station {
@@ -83,6 +87,8 @@ const app = createApp({
             trackedFreq: 700,
             isRunning: false,
             isLoading: false,
+            loadingProgress: 0,
+            loadingStatus: '準備中...',
             detectedPeaks: [], // Latest peaks from PeakDetector
         });
 
@@ -172,7 +178,13 @@ const app = createApp({
                 nFft = Math.pow(2, Math.ceil(Math.log2(windowSize)));
                 audioBuf = new Float32Array(nFft);
 
-                await audioContext.audioWorklet.addModule('../audio-processor.js');
+                // Assert consistent bin width (approx 31.25Hz)
+                const binWidth = TARGET_SAMPLE_RATE / nFft;
+                if (Math.abs(binWidth - 31.25) > 0.1) {
+                    console.warn(`Warning: Bin width Changed! ${binWidth} Hz (Expected 31.25 Hz). Model performance may degrade.`);
+                }
+
+                await audioContext.audioWorklet.addModule(`../audio-processor.js?t=${Date.now()}`);
             }
             if (audioContext.state === 'suspended') await audioContext.resume();
 
@@ -180,6 +192,33 @@ const app = createApp({
                 const numBins = Math.floor(MAX_FREQ * nFft / TARGET_SAMPLE_RATE);
                 peakDetector = new PeakDetector(numBins);
             }
+        };
+
+        const fetchModelWithProgress = async (url, onProgress) => {
+            const response = await fetch(url);
+            const contentLength = response.headers.get('content-length');
+            const total = parseInt(contentLength, 10);
+            const reader = response.body.getReader();
+            let received = 0;
+            const chunks = [];
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                received += value.length;
+                if (total) {
+                    onProgress((received / total) * 100);
+                }
+            }
+
+            const allChunks = new Uint8Array(received);
+            let position = 0;
+            for (const chunk of chunks) {
+                allChunks.set(chunk, position);
+                position += chunk.length;
+            }
+            return allChunks.buffer; // Return ArrayBuffer
         };
 
         const initModel = async () => {
@@ -192,21 +231,41 @@ const app = createApp({
             // This moves the heavy inference loop to a worker
             ort.env.wasm.proxy = true;
 
-            session = await ort.InferenceSession.create(settings.modelPath, {
-                executionProviders: ['wasm']
-            });
-            streamInference = new StreamInference(session, ort, {
-                chunkSize: 12,
-                useWebGPU: false,
-                historyLength: HISTORY_LEN
-            });
-            streamInference.addEventListener('result', (e) => {
-                state.decodedText = e.detail.text;
-                // Auto scroll text
-                if (textContainer.value) {
-                    textContainer.value.scrollLeft = textContainer.value.scrollWidth;
-                }
-            });
+            try {
+                // state.isLoading is managed by caller (startMic/startDemo)
+
+                state.loadingStatus = 'モデルをダウンロード中...';
+                state.loadingProgress = 0;
+
+                const modelBuffer = await fetchModelWithProgress(settings.modelPath, (progress) => {
+                    state.loadingProgress = progress;
+                });
+
+                state.loadingStatus = 'AIエンジンを初期化中...';
+
+                // Force UI update before heavy initialization
+                await new Promise(r => setTimeout(r, 10));
+
+                session = await ort.InferenceSession.create(modelBuffer, {
+                    executionProviders: ['wasm']
+                });
+                streamInference = new StreamInference(session, ort, {
+                    chunkSize: 12,
+                    useWebGPU: false,
+                    historyLength: HISTORY_LEN
+                });
+                streamInference.addEventListener('result', (e) => {
+                    state.decodedText = e.detail.text;
+                    // Auto scroll text
+                    if (textContainer.value) {
+                        textContainer.value.scrollLeft = textContainer.value.scrollWidth;
+                    }
+                });
+            } catch (e) {
+                throw e; // Handled by caller (watch or button click) - actually caller is startMic/startDemo which sets isLoading
+                // But initModel is called from watchers too?
+                // initModel is called from watch(settings.modelPath) ? No, let's check.
+            }
         };
 
         const updateUserFilter = () => {
@@ -328,10 +387,15 @@ const app = createApp({
         };
 
         const setupProcessing = (source) => {
+            if (audioContext.state === 'suspended') audioContext.resume();
+
+            // Ensure previous worklet is cleaned up
+            // Note: demoNodes cleanup is handled in stop/start but let's be safe
+
             const workletNode = new AudioWorkletNode(audioContext, 'morse-processor', {
                 processorOptions: {
-                    sampleRate: audioContext.sampleRate,
-                    hopLength: hopLength
+                    hopLength: hopLength,
+                    targetSampleRate: TARGET_SAMPLE_RATE
                 }
             });
             workletNode.port.onmessage = (e) => {
@@ -358,6 +422,15 @@ const app = createApp({
                     }
                 });
                 const source = audioContext.createMediaStreamSource(stream);
+
+                // Clear previous session data
+                waterfallBuffer = [];
+                state.detectedPeaks = [];
+                rawSpectrumHistory = [];
+                state.decodedText = '';
+                if (streamInference) streamInference.reset();
+                if (peakDetector) peakDetector.reset();
+
                 setupProcessing(source);
 
                 userFilterNode = audioContext.createBiquadFilter();
@@ -417,11 +490,21 @@ const app = createApp({
 
                 const stations = [
                     { freq: 650, wpm: 18, jitter: 0.05, snr: 20, msg: "CQ CQ DE JA1ABC K" },
+                    { freq: 800, wpm: 20, jitter: 0.15, snr: -5, msg: "CQ CQ DE JH1XYZ K" },
                     { freq: 1200, wpm: 25, jitter: 0.1, snr: 10, msg: "CQ CQ DE K1XYZ K" },
                     { freq: 1800, wpm: 35, jitter: 0.02, snr: 30, msg: "CQ CQ DE G4ZOO K" },
                     { freq: 2500, wpm: 20, jitter: 0.15, snr: 0, msg: "CQ CQ DE JH1UMV K" },
-                    { freq: 800, wpm: 20, jitter: 0.15, snr: -5, msg: "CQ CQ DE JH1XYZ K" },
-                    { freq: 3200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE DF7CB K" }
+                    { freq: 2800, wpm: 12, jitter: 0.15, snr: -10, msg: "CQ CQ DE JX1KLM K" },
+                    { freq: 3200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE DF7CB K" },
+                    { freq: 4000, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE JA7ABC K" },
+                    { freq: 5200, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE JQ1XYZ K" },
+                    { freq: 6000, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE JC8ABC K" },
+                    { freq: 7500, wpm: 28, jitter: 0.05, snr: 15, msg: "CQ CQ DE JX2KLM K" },
+                    { freq: 8200, wpm: 22, jitter: 0.05, snr: 15, msg: "CQ CQ DE JA1HJK K" },
+                    { freq: 9500, wpm: 25, jitter: 0.05, snr: 10, msg: "CQ CQ DE K1AW K" },
+                    { freq: 11500, wpm: 20, jitter: 0.1, snr: 5, msg: "CQ CQ DE G3ZZZ K" },
+                    { freq: 13000, wpm: 28, jitter: 0.05, snr: 20, msg: "CQ CQ DE VK2FGH K" },
+                    { freq: 14000, wpm: 15, jitter: 0.1, snr: 0, msg: "CQ CQ DE ZL1JKL K" }
                 ];
 
                 stations.forEach(s => {
@@ -431,6 +514,14 @@ const app = createApp({
                     st.play(s.msg);
                     demoNodes.push(st);
                 });
+
+                // Clear previous session data
+                waterfallBuffer = [];
+                state.detectedPeaks = [];
+                rawSpectrumHistory = [];
+                state.decodedText = '';
+                if (streamInference) streamInference.reset();
+                if (peakDetector) peakDetector.reset();
 
                 setupProcessing(analysisMix);
 
@@ -453,9 +544,6 @@ const app = createApp({
             state.isRunning = false;
             if (streamInference) streamInference.reset();
             if (peakDetector) peakDetector.reset();
-
-            waterfallBuffer = [];
-            state.detectedPeaks = [];
 
             if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
             demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
@@ -614,9 +702,9 @@ const app = createApp({
                 const barH = 10;
                 const sigColors = [
                     'rgba(0,0,0,0)',
-                    'rgba(255,0,0,0.5)',
-                    'rgba(0,0,255,0.5)',
-                    'rgba(255, 255, 255, 0.3)',
+                    'rgba(255,60,60,0.7)',
+                    'rgba(60,60,255,0.7)',
+                    'rgba(0, 0, 0, 0.3)',
                 ];
 
                 sigHistory.forEach(item => {
@@ -661,30 +749,30 @@ const app = createApp({
 
             // --- LAYER 4: Peak Detector SNR Labels (ON TOP) ---
             const snrOffset = 10 * Math.log10(binBW / 2500);
-            state.detectedPeaks.forEach((peak) => {
-                const y = h - (peak.f / MAX_FREQ) * h;
-                const snrDb = 10 * Math.log10(peak.snr + 1e-12) + snrOffset;
-
-                // Marker: Red with White border
-                waterfallOverlayCtx.fillStyle = 'red';
-                waterfallOverlayCtx.strokeStyle = 'white';
-                waterfallOverlayCtx.lineWidth = 1.5;
-
-                waterfallOverlayCtx.beginPath();
-                waterfallOverlayCtx.arc(w - 10, y, 4, 0, Math.PI * 2);
-                waterfallOverlayCtx.fill();
-                waterfallOverlayCtx.stroke();
-
-                // Label: Normalized SNR
-                waterfallOverlayCtx.fillStyle = 'white';
-                waterfallOverlayCtx.font = 'bold 11px sans-serif';
-                waterfallOverlayCtx.textAlign = 'right';
-                waterfallOverlayCtx.fillText(snrDb.toFixed(1) + ' dB', w - 20, y - 6);
-            });
-
             // "Locked" indicator at the very edge (Topmost)
             waterfallOverlayCtx.fillStyle = settings.autoTrack ? '#f00' : '#888';
             waterfallOverlayCtx.fillRect(w - 5, trackY - 5, 5, 10);
+        };
+
+        const getPeakY = (freq) => {
+            if (!waterfallCanvas.value) return 0;
+            const h = waterfallCanvas.value.height;
+            return h * (1 - freq / MAX_FREQ);
+        };
+
+        const getPeakSNR = (snr) => {
+            const binBW = TARGET_SAMPLE_RATE / nFft;
+            const snrOffset = 10 * Math.log10(binBW / 2500);
+            return 10 * Math.log10(snr + 1e-12) + snrOffset;
+        };
+
+        const selectPeak = (freq) => {
+            settings.targetFreq = freq;
+            settings.autoTrack = false; // Disable auto tracking on manual peak selection
+            state.trackedFreq = freq;
+            peakLockTimer = Date.now() + PEAK_LOCK_MS;
+            updateUserFilter();
+            redecode();
         };
 
         return {
@@ -700,7 +788,10 @@ const app = createApp({
             clearCache,
             waterfallCanvas,
             waterfallOverlayCanvas,
-            textContainer
+            textContainer,
+            getPeakY,
+            getPeakSNR,
+            selectPeak
         };
     }
 }).mount('#app');

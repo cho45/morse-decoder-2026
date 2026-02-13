@@ -44,11 +44,21 @@
 
             <div class="actions">
                 <button class="primary" @click="startMic" :disabled="state.isLoading">
-                    <span v-if="state.isLoading">準備中...</span>
+                    <span v-if="state.isLoading">
+                        {{ state.loadingStatus }}
+                        <span v-if="state.loadingProgress > 0 && state.loadingProgress < 100">
+                            ({{ Math.floor(state.loadingProgress) }}%)
+                        </span>
+                    </span>
                     <span v-else>マイクで開始</span>
                 </button>
                 <button class="secondary" @click="startDemo" :disabled="state.isLoading">
-                    <span v-if="state.isLoading">準備中...</span>
+                    <span v-if="state.isLoading">
+                        {{ state.loadingStatus }}
+                        <span v-if="state.loadingProgress > 0 && state.loadingProgress < 100">
+                            ({{ Math.floor(state.loadingProgress) }}%)
+                        </span>
+                    </span>
                     <span v-else>デモモード開始</span>
                 </button>
             </div>
@@ -80,7 +90,7 @@
         </div>
 
         <!-- Main Spectrogram Screen -->
-        <div v-else class="screen main-screen">
+        <div class="screen main-screen">
             <!-- Overlay Info -->
             <div class="overlay-info">
                 <div class="status-bar">
@@ -94,6 +104,16 @@
             <div class="waterfall-container">
                 <canvas ref="waterfallCanvas" class="waterfall-canvas"></canvas>
                 <canvas ref="waterfallOverlayCanvas" class="waterfall-overlay-canvas"></canvas>
+
+                <!-- Markers Layer -->
+                <div class="markers-container">
+                    <div v-for="(peak, index) in state.detectedPeaks" :key="index" class="peak-marker"
+                        :style="{ top: getPeakY(peak.f) + 'px' }" @click="selectPeak(peak.f)">
+                        <div class="peak-dot"></div>
+                        <div class="peak-label">{{ getPeakSNR(peak.snr).toFixed(1) }} dB</div>
+                    </div>
+                </div>
+
                 <div ref="textContainer" class="decoded-text-content" :style="decodedTextStyle">{{ state.decodedText }}
                 </div>
             </div>

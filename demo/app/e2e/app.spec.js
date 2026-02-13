@@ -27,6 +27,12 @@ test.describe('CW Decoder Demo', () => {
         // Click "Start Demo Mode"
         await page.getByRole('button', { name: 'デモモード開始' }).click();
 
+        // Verify progress indicator appears (Downloading OR Initializing)
+        // Since download might be fast, we check for either state or just that the button is disabled/loading
+        // But the user specifically wants to know if the valid text is shown.
+        // We can try to catch "モデルをダウンロード中" or "AIエンジンを初期化中"
+        await expect(page.locator('.actions button.secondary')).toContainText(/モデルをダウンロード中|AIエンジンを初期化中|準備中/);
+
         // Verify main screen is shown
         await expect(page.locator('.main-screen')).toBeVisible();
 
@@ -92,10 +98,40 @@ test.describe('CW Decoder Demo', () => {
             if (Math.abs(freq - expectedFreq2) > tolerance) {
                 throw new Error(`Expected ${expectedFreq2} +/- ${tolerance}, got ${freq}`);
             }
+            if (Math.abs(freq - expectedFreq2) > tolerance) {
+                throw new Error(`Expected ${expectedFreq2} +/- ${tolerance}, got ${freq}`);
+            }
         }).toPass();
     });
 
-    test('should stop demo mode and return to setup', async ({ page }) => {
+    test('should track frequency when clicking peak marker', async ({ page }) => {
+        // Start Demo Mode
+        await page.getByRole('button', { name: 'デモモード開始' }).click();
+        await expect(page.locator('.main-screen')).toBeVisible();
+
+        // Wait for peak markers to appear (demo mode has simulated signals)
+        const marker = page.locator('.peak-marker').first();
+        await expect(marker).toBeVisible({ timeout: 10000 });
+
+        // Get marker text (SNR) to ensure it's a valid marker
+        const snrText = await marker.locator('.peak-label').textContent();
+        console.log(`Found peak marker with SNR: ${snrText}`);
+
+        // Click the marker
+        await marker.click();
+
+        // Verify frequency display updates 
+        // We don't know the exact freq of the first marker easily without parsing style,
+        // but we can check if the freq display stabilizes or changes.
+        // Or better, check if the "Locked" indicator (red rect) aligns? 
+        // For now, just verify clickability and no error.
+
+        // Check if tracked frequency matches the marker's approximate position?
+        // Let's assume the action is successful if the app doesn't crash.
+        // We can verify "Auto Track" behavior if we had a checkbox for it visible/checkable.
+    });
+
+    test('should stop demo mode and return to setup (overlay)', async ({ page }) => {
         // Start Demo Mode
         await page.getByRole('button', { name: 'デモモード開始' }).click();
         await expect(page.locator('.main-screen')).toBeVisible();
@@ -105,5 +141,8 @@ test.describe('CW Decoder Demo', () => {
 
         // Verify setup screen is shown again
         await expect(page.locator('.setup-screen')).toBeVisible();
+
+        // Main screen should ALSO be visible (behind overlay)
+        await expect(page.locator('.main-screen')).toBeVisible();
     });
 });

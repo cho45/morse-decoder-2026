@@ -9,10 +9,11 @@ class MorseBufferProcessor extends AudioWorkletProcessor {
         super();
         const opts = options.processorOptions || {};
         this.hopLength = opts.hopLength || 160;
-        
+        this.targetSampleRate = opts.targetSampleRate || 16000;
+
         // Resampler (sampleRate is global in AudioWorkletGlobalScope)
-        this.resampler = new Resampler(sampleRate, 16000);
-        
+        this.resampler = new Resampler(sampleRate, this.targetSampleRate);
+
         this.audioBuffer = new Float32Array(this.hopLength);
         this.bufferPtr = 0;
 
@@ -28,14 +29,14 @@ class MorseBufferProcessor extends AudioWorkletProcessor {
         if (!input || !input[0]) return true;
 
         const channel = input[0];
-        
+
         // Resample the entire channel into pre-allocated buffer
         const numResampled = this.resampler.process(channel, this.resampleBuffer);
 
         for (let i = 0; i < numResampled; i++) {
             const sample = this.resampleBuffer[i];
 
-            // Buffer for feature extraction (now at 16kHz)
+            // Buffer for feature extraction
             this.audioBuffer[this.bufferPtr++] = sample;
             if (this.bufferPtr >= this.hopLength) {
                 // Send a copy of the buffer to the main thread

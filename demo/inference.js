@@ -149,7 +149,23 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
     const x = new ort.Tensor('float32', chunkFrames, [1, currentLen, N_BINS]);
     const tensorTime = performance.now() - tensorStart;
 
-    const inputs = { x, ...states };
+    const inputs = { x };
+    const tempTensors = [x]; // Track for disposal
+
+    // [FIX] Ensure empty tensors have unique buffers to prevent DataCloneError in ORT Proxy
+    // when multiple empty tensors share the same underlying ArrayBuffer.
+    for (const key of Object.keys(states)) {
+        const state = states[key];
+        if (state.data && state.data.byteLength === 0) {
+            // Create a fresh empty tensor effectively deep-copying the empty buffer
+            const newTensor = new ort.Tensor(state.type, new Float32Array(0), state.dims);
+            inputs[key] = newTensor;
+            tempTensors.push(newTensor);
+        } else {
+            inputs[key] = state;
+        }
+    }
+
     const sessionStart = performance.now();
     let results;
     try {
@@ -157,6 +173,9 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
     } catch (e) {
         console.error(`session.run failed at inference #${inferenceCount}`);
         throw e;
+    } finally {
+        // Clean up temporary tensors (x and any fresh empty tensors)
+        for (const t of tempTensors) t.dispose();
     }
     const sessionTime = performance.now() - sessionStart;
 
@@ -189,9 +208,6 @@ export async function runChunkInference(session, chunkFrames, states, ort) {
         nextStates[`offset_${l}`] = results[`new_offset_${l}`];
         nextStates[`conv_cache_${l}`] = results[`new_conv_cache_${l}`];
     }
-
-    // Clean up temporary tensors (keep nextStates)
-    x.dispose();
 
     // Dispose output tensors after extracting data (logits/signalLogits/boundaryLogits are Float32Array copies)
     results.logits.dispose();

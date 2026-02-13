@@ -394,4 +394,259 @@ describe('StreamInference', () => {
             inference.dispose();
         });
     });
+    describe('Regression: Race Condition on Reset', () => {
+        // Mocks specifically for this test to control timing
+        class MockTensor {
+            constructor(type, data, dims) {
+                this.type = type;
+                this.data = data;
+                this.dims = dims;
+            }
+            dispose() { }
+        }
+
+        class MockSession {
+            constructor() {
+                this.runResolve = null;
+                this.runPromise = null;
+            }
+
+            async run(inputs) {
+                return new Promise(resolve => {
+                    this.runResolve = resolve;
+                });
+            }
+
+            // Helper to manually complete the inference
+            completeRun(nextStates) {
+                if (this.runResolve) {
+                    const outputs = {
+                        logits: new MockTensor('float32', new Float32Array(10 * 64), [1, 10, 64]),
+                        signal_logits: new MockTensor('float32', new Float32Array(10 * 4), [1, 10, 4]),
+                        boundary_logits: new MockTensor('float32', new Float32Array(10), [1, 10]),
+                    };
+                    // Map nextStates to new_* keys
+                    for (const key of Object.keys(nextStates)) {
+                        outputs[`new_${key}`] = nextStates[key];
+                    }
+                    this.runResolve(outputs);
+                    this.runResolve = null;
+                }
+            }
+        }
+
+        const mockOrt = {
+            Tensor: MockTensor
+        };
+
+        it('should prevent stale inference results from overwriting reset state', async () => {
+            const session = new MockSession();
+            const streamInference = new StreamInference(session, mockOrt, { chunkSize: 4, historyLength: 10 });
+
+            // 1. Initial State
+            const initialStates = streamInference._states;
+
+            // 2. Push frames to trigger inference
+            const frame = new Float32Array(N_BINS).fill(0.1);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+
+            // Wait a macro task to ensure _runChunk execution started and hit await session.run()
+            await new Promise(r => setTimeout(r, 0));
+
+            expect(streamInference.isProcessing).toBe(true);
+
+            // 3. Trigger Reset (Simulate 'redecode' during drag)
+            streamInference.reset();
+
+            // Verify reset happened
+            const resetStates = streamInference._states;
+            expect(initialStates).not.toBe(resetStates);
+
+            // 4. Complete the delayed inference with "TAINTED" states
+            const taintedStates = {
+                pcen_state: new MockTensor('float32', new Float32Array([999]), [1, 1, 1]), // Marker
+                sub_cache: new MockTensor('float32', new Float32Array([999]), [1, 1, 1]),
+            };
+            // Add other required keys
+            for (let i = 0; i < 6; i++) {
+                taintedStates[`attn_k_${i}`] = new MockTensor('float32', new Float32Array(0), []);
+                taintedStates[`attn_v_${i}`] = new MockTensor('float32', new Float32Array(0), []);
+                taintedStates[`offset_${i}`] = new MockTensor('int64', new BigInt64Array([0n]), []);
+                taintedStates[`conv_cache_${i}`] = new MockTensor('float32', new Float32Array(0), []);
+            }
+
+            session.completeRun(taintedStates);
+
+            // Wait for the async chain to finish
+            await new Promise(r => setTimeout(r, 0));
+
+            // 5. Verification
+            const currentStates = streamInference._states;
+
+            // If the bug exists, currentStates.pcen_state will be our tainted [999] tensor
+            if (currentStates.pcen_state.data[0] === 999) {
+                expect.fail("Race condition reproduced! _states was overwritten by old inference result.");
+            } else {
+                expect(currentStates.pcen_state.data[0]).not.toBe(999);
+            }
+        });
+    });
+
+    describe('Regression: Detached State Reuse on Failure', () => {
+        // バッファのdetachと推論失敗をシミュレートするMock
+        class MockTensor {
+            constructor(type, data, dims) {
+                this.type = type;
+                this.data = data;
+                this.dims = dims;
+            }
+            dispose() { }
+        }
+
+        class MockSession {
+            async run(inputs) {
+                // Detachmentシミュレーション: 入力のバッファがdetachされる (byteLength 0になる)
+                Object.values(inputs).forEach(t => {
+                    if (t.data && t.data.buffer) {
+                        try {
+                            // Node/V8ではWorkerへの転送やモックでdetachを再現できる。
+                            // ここではモックデータを操作して "detached" (byteLength 0) 状態にする。
+                            // MockTensorがデータを保持している前提。
+                            // 具体的なエラー "Tensor's size(14) does not match data length(0)" を再現するには、
+                            // 既存のテンソルのデータ長が0になる必要がある。
+                            if (t.data.length > 0) {
+                                // 空配列に置き換えて "Detach" 状態を模倣する。
+                                // テンソルオブジェクト自体は生存している。
+                                // 実際のWASMでは内部バッファがdetachされるが、
+                                // inference.jsのコードは t.data.byteLength をチェックするため、
+                                // ここではデータを空配列に置換することで再現する。
+                                t.data = new Float32Array(0);
+                            }
+                        } catch (e) { }
+                    }
+                });
+
+                // session.run 内でのエラー（ネットワークエラーや推論失敗など）をシミュレート
+                throw new Error("Simulated Inference Failure");
+            }
+        }
+
+        const mockOrt = {
+            Tensor: MockTensor
+        };
+
+        it('should recover from failed inference where states were detached', async () => {
+            const session = new MockSession();
+            const streamInference = new StreamInference(session, mockOrt, { chunkSize: 4 });
+
+            // 1. 初期状態 (正常)
+            // pcen_state は [1, 1, 14] でデータが存在する
+            const initialStates = streamInference._states;
+            expect(initialStates.pcen_state.data.byteLength).toBeGreaterThan(0);
+
+            // 2. 推論を実行し、失敗と入力のDETACHを引き起こす
+            const frame = new Float32Array(N_BINS).fill(0.1);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+
+            // 処理待ち（内部で例外が発生し、catch/logされるはず）
+            await streamInference.waitForProcessing();
+
+            // 3. この時点で、修正によりエラーが捕捉され reset() が呼ばれているはずである。
+            // したがって _states は新規作成（初期化）されており、有効（byteLength > 0）であるべき。
+            expect(streamInference._states.pcen_state.data.byteLength).toBeGreaterThan(0); // リカバリ済み
+            expect(streamInference._states).not.toBe(initialStates); // リセットされた
+
+            // 4. 再度推論を実行
+            // 状態がリセットされているため、これは成功するはずである
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+            streamInference.pushFrame(frame);
+
+            await expect(streamInference.waitForProcessing()).resolves.not.toThrow();
+        });
+    });
+
+    describe('Regression: Concurrent Redecode (Race Condition)', () => {
+        class MockTensor {
+            constructor(type, data, dims) {
+                this.type = type;
+                this.data = data;
+                this.dims = dims;
+            }
+            dispose() { }
+        }
+
+        class SlowSession {
+            constructor() {
+                this.runningCount = 0;
+            }
+            async run(inputs) {
+                this.runningCount++;
+                if (this.runningCount > 1) {
+                    throw new Error("Concurrency Error: session.run called while another run is pending!");
+                }
+                // 推論の遅延をシミュレート (10ms)
+                await new Promise(r => setTimeout(r, 10));
+                this.runningCount--;
+
+                // ダミー出力を返す
+                const outputs = {
+                    logits: new MockTensor('float32', new Float32Array(10 * 64), [1, 10, 64]),
+                    signal_logits: new MockTensor('float32', new Float32Array(10 * 4), [1, 10, 4]),
+                    boundary_logits: new MockTensor('float32', new Float32Array(10), [1, 10]),
+                };
+                // nextStates を入力からコピーして返す (ダミー)
+                ['pcen_state', 'sub_cache'].forEach(k => outputs[`new_${k}`] = inputs[k]);
+                for (let i = 0; i < 6; i++) {
+                    ['attn_k', 'attn_v', 'offset', 'conv_cache'].forEach(k => outputs[`new_${k}_${i}`] = inputs[`${k}_${i}`]);
+                }
+                return outputs;
+            }
+        }
+        const mockOrt = { Tensor: MockTensor };
+
+        it('should NOT run concurrent inference loops when reset is called mid-processing', async () => {
+            const consoleSpy = vi.spyOn(console, 'error');
+            const session = new SlowSession();
+            const inference = new StreamInference(session, mockOrt, { chunkSize: 4 });
+
+            // 1. 推論1を開始
+            const frame = new Float32Array(N_BINS).fill(0.1);
+            inference.pushFrame(frame);
+            inference.pushFrame(frame);
+            inference.pushFrame(frame);
+            inference.pushFrame(frame); // ここで _runChunk -> session.run (10ms待機) がトリガーされる
+
+            expect(inference.isProcessing).toBe(true);
+
+            // 2. 直ちにリセットし、推論2を開始 (redecodeのシミュレーション)
+            // バグがある場合、reset() が isProcessing=false に設定してしまうため、
+            // pushFrame が2回目の _runChunk を起動してしまい、並行実行が発生する。
+            inference.reset();
+
+            // 2回目のストリーム用にフレームをプッシュ
+            inference.pushFrame(frame);
+            inference.pushFrame(frame);
+            inference.pushFrame(frame);
+            inference.pushFrame(frame); // 安全ならばキューイングされるか、前の完了を待つべき
+
+            // 処理が落ち着くまで待機
+            await new Promise(r => setTimeout(r, 50));
+
+            // コンソールエラーに "Concurrency Error" が含まれていないことを確認
+            const errors = consoleSpy.mock.calls.map(args => args.join(' '));
+            const concurrencyErrors = errors.filter(e => e.includes('Concurrency Error'));
+            expect(concurrencyErrors).toHaveLength(0);
+
+            inference.dispose();
+            consoleSpy.mockRestore();
+        });
+    });
 });

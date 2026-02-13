@@ -18,7 +18,7 @@ export class PeakDetector {
         // alphaDecay ~= 0.004
         this.alphaAttack = 0.05;
         this.alphaDecay = 0.004;
-        this.snrThreshold = 4.0;
+        this.snrThreshold = 2.0;
     }
 
     /**

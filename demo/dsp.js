@@ -109,9 +109,59 @@ export class Resampler {
      * @param {number} targetRate - Output sample rate (e.g., 16000)
      */
     constructor(sourceRate, targetRate) {
+        this.sourceRate = sourceRate;
+        this.targetRate = targetRate;
         this.ratio = sourceRate / targetRate;
         this.accum = 0;
         this.timeLeft = this.ratio;
+
+        // --- NEW: Polyphase FIR Coefficient Generation ---
+        // For 48k -> 32k, ratio is 1.5 (3:2). 
+        // We'll use a fixed number of phases (oversampling) to approximate the ratio,
+        // or strictly follow the rational ratio if possible.
+        // For simplicity and high quality, let's use a large oversampling (e.g. 64 phases)
+        // for generic ratios, providing quasi-continuous delay-line sinc interpolation.
+        this.numPhases = 64;
+        this.tapsPerPhase = 12;
+        this.coeffs = new Array(this.numPhases);
+
+        const cutoff = Math.min(1.0, 1.0 / this.ratio) * 0.9; // Anti-aliasing cutoff
+        const halfSize = this.tapsPerPhase / 2;
+
+        for (let p = 0; p < this.numPhases; p++) {
+            const phase = p / this.numPhases;
+            const phaseCoeffs = new Float32Array(this.tapsPerPhase);
+            let sum = 0;
+
+            for (let i = 0; i < this.tapsPerPhase; i++) {
+                // Sinc center is at p/numPhases
+                const x = (i - halfSize + 1 - phase) * cutoff;
+
+                // Sinc * Blackman window
+                let weight = 1.0;
+                if (Math.abs(x) > 1e-10) {
+                    const piX = Math.PI * x;
+                    weight = Math.sin(piX) / piX;
+                }
+
+                // Window (Blackman)
+                const t = (i - phase) / (this.tapsPerPhase - 1);
+                const blackman = 0.42 - 0.5 * Math.cos(2 * Math.PI * t) + 0.08 * Math.cos(4 * Math.PI * t);
+                weight *= blackman;
+
+                phaseCoeffs[i] = weight;
+                sum += weight;
+            }
+
+            // Normalize for DC gain = 1.0
+            for (let i = 0; i < this.tapsPerPhase; i++) {
+                phaseCoeffs[i] /= sum;
+            }
+            this.coeffs[p] = phaseCoeffs;
+        }
+
+        // Initialize pointer to wait for enough samples, matching Box filter's output timing.
+        this.fractionalIndex = this.ratio - 1;
     }
 
     /**
@@ -121,32 +171,62 @@ export class Resampler {
      * @returns {number} Number of samples written to output
      */
     process(input, output) {
-        let outPtr = 0;
-        const EPS = 1e-9;
+        const halfSize = Math.floor(this.tapsPerPhase / 2);
 
-        for (let i = 0; i < input.length; i++) {
-            let sample = input[i];
-            let sampleTime = 1.0;
-
-            while (sampleTime > EPS) {
-                if (sampleTime >= this.timeLeft - EPS) {
-                    // This input sample fills the remaining part of the current target window
-                    this.accum += sample * this.timeLeft;
-                    if (outPtr < output.length) {
-                        output[outPtr++] = this.accum / this.ratio;
-                    }
-                    
-                    sampleTime -= this.timeLeft;
-                    this.accum = 0;
-                    this.timeLeft = this.ratio;
-                } else {
-                    // This input sample is entirely within the current target window
-                    this.accum += sample * sampleTime;
-                    this.timeLeft -= sampleTime;
-                    sampleTime = 0;
-                }
+        // 1. Initialize history on first call
+        if (!this.history) {
+            this.history = new Float32Array(halfSize);
+            // Pre-fill with first sample to avoid slow ramp-up in DC tests
+            if (input.length > 0) {
+                this.history.fill(input[0]);
             }
         }
+
+        let outPtr = 0;
+        const inputLen = input.length;
+
+        // Use a temporary buffer combining history and current input
+        // For FIR windowed sinc, we need some 'history' samples.
+        const buffer = new Float32Array(halfSize + inputLen + halfSize);
+        buffer.set(this.history);
+        buffer.set(input, halfSize);
+        // Fill future padding with the last sample to prevent artifacts at the very end
+        if (inputLen > 0) {
+            buffer.fill(input[inputLen - 1], halfSize + inputLen);
+        }
+
+        let idx = this.fractionalIndex || 0; // index relative to the start of 'input'
+
+        while (idx < inputLen && outPtr < output.length) {
+            const intPart = Math.floor(idx);
+            const frac = idx - intPart;
+            // Phase selection
+            const phaseIdx = Math.min(this.numPhases - 1, Math.floor(frac * this.numPhases));
+            const coeffs = this.coeffs[phaseIdx];
+
+            let sum = 0;
+            // Apply FIR filter: centered at idx.
+            // idx in 'input' maps to 'idx + halfSize' in 'buffer'.
+            // Kernel covers buffer[intPart + i] where i=0...taps-1.
+            // If intPart=0, it uses buffer[0...11]. idx=0 is at buffer[6].
+            // So it uses 6 samples before and 6 samples at/after idx.
+            for (let i = 0; i < this.tapsPerPhase; i++) {
+                sum += buffer[intPart + i] * coeffs[i];
+            }
+            output[outPtr++] = sum;
+            idx += this.ratio;
+        }
+
+        // Save state for next call
+        this.fractionalIndex = idx - inputLen;
+        if (inputLen >= halfSize) {
+            this.history.set(input.subarray(inputLen - halfSize));
+        } else if (inputLen > 0) {
+            // Shift existing history and append new input
+            this.history.copyWithin(0, inputLen);
+            this.history.set(input, halfSize - inputLen);
+        }
+
         return outPtr;
     }
 }

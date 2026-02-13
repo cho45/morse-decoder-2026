@@ -115,7 +115,6 @@ export class StreamInference extends EventTarget {
         this._buffer = [];
         this._totalFrames = 0;
         this._events = [];
-        this._isProcessing = false;
         this._pendingChunk = null;
         this._processedFrames = 0;
 
@@ -351,16 +350,44 @@ export class StreamInference extends EventTarget {
                 inputTensor.set(chunk[i], i * N_BINS);
             }
 
-            // Run inference
-            const result = await runChunkInference(
-                this._session,
-                inputTensor,
-                this._states,
-                this._ort
-            );
+            // Capture current states to detect if reset() happens during inference
+            const capturedStates = this._states;
 
-            if (this._isDisposed) {
-                this._states = result.nextStates;
+            let result;
+            try {
+                // Run inference
+                result = await runChunkInference(
+                    this._session,
+                    inputTensor,
+                    this._states,
+                    this._ort
+                );
+            } catch (e) {
+                console.error("Inference failed, processing will restart reset:", e);
+                // If inference fails, our state might be corrupted (e.g. detached buffers).
+                // We MUST reset to recover.
+                this.reset();
+                return;
+            }
+
+            if (this._isDisposed || this._states !== capturedStates) {
+                // If reset() was called (changing this._states), discard this result
+                // to prevent overwriting fresh states with old results.
+                try {
+                    // Start cleaning up the results we just got
+                    if (!this._options.useWebGPU) {
+                        // We need to be careful: result.nextStates might contain tensors
+                        // that need disposal if we are discarding them.
+                        // Unlike before, we are responsible for these new tensors.
+                        if (result && result.nextStates) {
+                            Object.values(result.nextStates).forEach(t => {
+                                if (t && t.dispose) t.dispose();
+                            });
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Error cleaning up discarded inference result:", e);
+                }
                 return;
             }
 

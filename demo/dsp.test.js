@@ -31,13 +31,13 @@ describe('DSP class', () => {
 
             // Peak should be at index 2 (and size-2 due to symmetry)
             // Magnitude at peak should be size/2 = 8
-            expect(Math.sqrt(real[2]**2 + imag[2]**2)).toBeCloseTo(size / 2);
-            expect(Math.sqrt(real[size - freq]**2 + imag[size - freq]**2)).toBeCloseTo(size / 2);
-            
+            expect(Math.sqrt(real[2] ** 2 + imag[2] ** 2)).toBeCloseTo(size / 2);
+            expect(Math.sqrt(real[size - freq] ** 2 + imag[size - freq] ** 2)).toBeCloseTo(size / 2);
+
             // Other bins should be near zero
             for (let i = 0; i < size; i++) {
                 if (i !== freq && i !== size - freq) {
-                    expect(Math.sqrt(real[i]**2 + imag[i]**2)).toBeLessThan(1e-5);
+                    expect(Math.sqrt(real[i] ** 2 + imag[i] ** 2)).toBeLessThan(1e-5);
                 }
             }
         });
@@ -149,7 +149,7 @@ describe('Resampler class', () => {
         const input = new Float32Array(30).fill(1.0);
         const output = new Float32Array(10);
         const n = resampler.process(input, output);
-        
+
         expect(n).toBe(10);
         for (let v of output) expect(v).toBeCloseTo(1.0);
     });
@@ -159,7 +159,7 @@ describe('Resampler class', () => {
         const input = new Float32Array(4410).fill(1.0); // 0.1s
         const output = new Float32Array(1600);
         const n = resampler.process(input, output);
-        
+
         expect(n).toBe(1600);
         for (let v of output) expect(v).toBeCloseTo(1.0);
     });
@@ -167,14 +167,14 @@ describe('Resampler class', () => {
     it('should handle streaming correctly', () => {
         const resampler = new Resampler(48000, 16000); // Ratio 3
         const outBuf = new Float32Array(1);
-        
+
         const n1 = resampler.process(new Float32Array([1, 1]), outBuf);
         expect(n1).toBe(0);
-        
+
         const n2 = resampler.process(new Float32Array([1, 1]), outBuf);
         expect(n2).toBe(1);
         expect(outBuf[0]).toBeCloseTo(1.0);
-        
+
         const n3 = resampler.process(new Float32Array([1, 1]), outBuf);
         expect(n3).toBe(1);
         expect(outBuf[0]).toBeCloseTo(1.0);
@@ -185,23 +185,76 @@ describe('Resampler class', () => {
         const srOut = 16000;
         const freq = 1000;
         const resampler = new Resampler(srIn, srOut);
-        
+
         const input = new Float32Array(srIn / 10); // 0.1s
         for (let i = 0; i < input.length; i++) {
             input[i] = Math.sin(2 * Math.PI * freq * i / srIn);
         }
-        
+
         const output = new Float32Array(srOut / 10);
         const n = resampler.process(input, output);
         expect(n).toBe(srOut / 10);
-        
+
         let peaks = 0;
         for (let i = 1; i < output.length - 1; i++) {
-            if (output[i] > output[i-1] && output[i] > output[i+1] && output[i] > 0.5) {
+            if (output[i] > output[i - 1] && output[i] > output[i + 1] && output[i] > 0.5) {
                 peaks++;
             }
         }
         expect(peaks).toBeGreaterThan(95);
         expect(peaks).toBeLessThan(105);
+    });
+
+    it('should suppress aliasing leakage for non-integer ratios (e.g. 48k to 32k)', () => {
+        const sourceRate = 48000;
+        const targetRate = 32000;
+        const freq = 1800; // Test frequency
+        const aliasFreq = (targetRate / 2) - (freq - (targetRate / 2)); // Mirror around 16kHz -> 14200Hz
+
+        const inputLen = 4800; // 100ms
+        const input = new Float32Array(inputLen);
+        for (let i = 0; i < inputLen; i++) {
+            input[i] = Math.sin(2 * Math.PI * freq * i / sourceRate);
+        }
+
+        const resampler = new Resampler(sourceRate, targetRate);
+        const output = new Float32Array(3200);
+        resampler.process(input, output);
+
+        const nFft = 2048;
+        const real = new Float32Array(nFft);
+        const imag = new Float32Array(nFft);
+        real.set(output.subarray(500, 500 + nFft));
+
+        // Windowing to reduce leakage
+        for (let i = 0; i < nFft; i++) {
+            real[i] *= 0.5 * (1 - Math.cos(2 * Math.PI * i / nFft));
+        }
+
+        DSP.fft(real, imag);
+
+        const getMagnitude = (f) => {
+            const idx = Math.round(f * nFft / targetRate);
+            return Math.sqrt(real[idx] * real[idx] + imag[idx] * imag[idx]);
+        };
+
+        const mainMag = getMagnitude(freq);
+        const aliasMag = getMagnitude(14200);
+
+        const ratio = 20 * Math.log10(aliasMag / mainMag);
+        // Requirement: Suppress aliasing leakage below -60dB (Current: ~ -71dB)
+        expect(ratio).toBeLessThan(-60);
+    });
+
+    it('should generate valid polyphase coefficients during initialization', () => {
+        const resampler = new Resampler(48000, 32000);
+        expect(resampler.coeffs).toBeDefined();
+        expect(resampler.coeffs.length).toBe(64); // numPhases
+
+        // Check each phase for DC gain = 1.0
+        for (let p = 0; p < resampler.coeffs.length; p++) {
+            const phaseSum = resampler.coeffs[p].reduce((a, b) => a + b, 0);
+            expect(phaseSum).toBeCloseTo(1.0, 2);
+        }
     });
 });
