@@ -55,8 +55,8 @@ test.describe('CW Decoder Demo', () => {
         // Click on the waterfall overlay
         // The overlay is at top-left. Clicking near the top should select a high frequency,
         // clicking near the bottom should select a low frequency.
-        // MAX_FREQ is 4000. 
-        // y=0 is top (High Freq ~4000Hz), y=height is bottom (0Hz).
+        // MAX_FREQ is 16000. 
+        // y=0 is top (High Freq ~16000Hz), y=height is bottom (0Hz).
 
         // Click near the top (High frequency)
         const overlay = page.locator('.waterfall-overlay-canvas');
@@ -64,21 +64,22 @@ test.describe('CW Decoder Demo', () => {
         if (!box) throw new Error('Overlay not found');
 
         // Click at 10% from top
-        // (1 - 0.1) * 4000 = 3600
+        // (1 - 0.1) * 16000 = 14400
         const clickY1 = box.height * 0.1;
         await overlay.click({ position: { x: box.width / 2, y: clickY1 } });
 
         // Calculate expected freq and tolerance
-        // Resolution is MAX_FREQ / height. 4000 / 550 ~= 7.27 Hz/px
-        const hzPerPx = 4000 / box.height;
-        const expectedFreq1 = (1 - 0.1) * 4000;
+        // Resolution is MAX_FREQ / height. 16000 / 550 ~= 29.09 Hz/px
+        const hzPerPx = 16000 / box.height;
+        const expectedFreq1 = (1 - 0.1) * 16000;
 
         // Allow 2px tolerance
         const tolerance = hzPerPx * 2;
 
         await expect(async () => {
             const txt = await freqDisplay.textContent();
-            const freq = parseInt(txt);
+            // remove ' Hz' and parse
+            const freq = parseInt(txt.replace(' Hz', ''));
             if (Math.abs(freq - expectedFreq1) > tolerance) {
                 throw new Error(`Expected ${expectedFreq1} +/- ${tolerance}, got ${freq}`);
             }
@@ -86,18 +87,15 @@ test.describe('CW Decoder Demo', () => {
 
 
         // Click at 90% from top
-        // (1 - 0.9) * 4000 = 400
+        // (1 - 0.9) * 16000 = 1600
         const clickY2 = box.height * 0.9;
         await overlay.click({ position: { x: box.width / 2, y: clickY2 } });
 
-        const expectedFreq2 = (1 - 0.9) * 4000;
+        const expectedFreq2 = (1 - 0.9) * 16000;
 
         await expect(async () => {
             const txt = await freqDisplay.textContent();
-            const freq = parseInt(txt);
-            if (Math.abs(freq - expectedFreq2) > tolerance) {
-                throw new Error(`Expected ${expectedFreq2} +/- ${tolerance}, got ${freq}`);
-            }
+            const freq = parseInt(txt.replace(' Hz', ''));
             if (Math.abs(freq - expectedFreq2) > tolerance) {
                 throw new Error(`Expected ${expectedFreq2} +/- ${tolerance}, got ${freq}`);
             }

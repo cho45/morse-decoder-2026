@@ -7,3 +7,5 @@ node_modules/
 pytorch/
 .claude/
 plan/
+plans/
+test-results/

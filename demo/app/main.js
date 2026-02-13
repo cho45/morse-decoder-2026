@@ -2,6 +2,7 @@ import { createApp, reactive, ref, onMounted, onUnmounted, watch, nextTick, comp
 import { DSP } from '../dsp.js';
 import { NoiseNode } from '../noise-node.js';
 import { StreamInference } from '../stream-inference.js';
+import { MultiStreamManager } from '../multi-stream-manager.js';
 import { MORSE_DICT } from '../data_gen.js';
 import { getViridisColor, powerToDBNormalized, normalizeDB } from '../visualization.js';
 import { PeakDetector } from '../peak-detector.js';
@@ -90,6 +91,10 @@ const app = createApp({
             loadingProgress: 0,
             loadingStatus: '準備中...',
             detectedPeaks: [], // Latest peaks from PeakDetector
+            subDecoders: [],   // [{freq, text, snr, throttled}]
+            activeDecoders: 0,
+            decoderThrottled: false,
+            decoderUtilization: '',
         });
 
         const decodedTextStyle = computed(() => {
@@ -107,7 +112,8 @@ const app = createApp({
             targetFreq: 700,
             volume: 0.3,
             modelPath: '../cw_decoder_quantized.onnx',
-            autoTrack: true
+            autoTrack: true,
+            maxDecoders: 4
         });
 
         // Load settings from localStorage
@@ -128,6 +134,10 @@ const app = createApp({
                     state.trackedFreq = newSettings.targetFreq;
                     updateUserFilter();
                 }
+                // Update max decoders at runtime
+                if (multiStreamManager) {
+                    multiStreamManager.setMaxSlots(newSettings.maxDecoders);
+                }
             } else {
                 state.trackedFreq = newSettings.targetFreq;
             }
@@ -147,6 +157,7 @@ const app = createApp({
         let audioContext = null;
         let session = null;
         let streamInference = null;
+        let multiStreamManager = null;
         let stream = null;
         let demoNodes = [];
         let masterGainNode = null;
@@ -222,6 +233,10 @@ const app = createApp({
         };
 
         const initModel = async () => {
+            if (multiStreamManager) {
+                multiStreamManager.dispose();
+                multiStreamManager = null;
+            }
             if (streamInference) {
                 streamInference.dispose();
                 streamInference = null;
@@ -232,8 +247,6 @@ const app = createApp({
             ort.env.wasm.proxy = true;
 
             try {
-                // state.isLoading is managed by caller (startMic/startDemo)
-
                 state.loadingStatus = 'モデルをダウンロード中...';
                 state.loadingProgress = 0;
 
@@ -249,22 +262,22 @@ const app = createApp({
                 session = await ort.InferenceSession.create(modelBuffer, {
                     executionProviders: ['wasm']
                 });
-                streamInference = new StreamInference(session, ort, {
+
+                // MultiStreamManager (複数ピーク同時デコード)
+                multiStreamManager = new MultiStreamManager(session, ort, {
+                    maxSlots: settings.maxDecoders,
                     chunkSize: 12,
+                    hopMs: HOP_MS,
                     useWebGPU: false,
                     historyLength: HISTORY_LEN
                 });
-                streamInference.addEventListener('result', (e) => {
-                    state.decodedText = e.detail.text;
-                    // Auto scroll text
-                    if (textContainer.value) {
-                        textContainer.value.scrollLeft = textContainer.value.scrollWidth;
-                    }
-                });
+
+                // メインスロットの StreamInference への互換参照
+                // (drawWaterfallOverlay 等で使用)
+                streamInference = null; // mainInference は multiStreamManager 経由で取得
+
             } catch (e) {
-                throw e; // Handled by caller (watch or button click) - actually caller is startMic/startDemo which sets isLoading
-                // But initModel is called from watchers too?
-                // initModel is called from watch(settings.modelPath) ? No, let's check.
+                throw e;
             }
         };
 
@@ -308,6 +321,11 @@ const app = createApp({
                 state.trackedFreq = state.trackedFreq * 0.9 + settings.targetFreq * 0.1;
             }
             updateUserFilter();
+
+            // MultiStreamManager にピーク情報を伝搬
+            if (multiStreamManager) {
+                multiStreamManager.updatePeaks(freqPeaks, state.trackedFreq);
+            }
         };
 
         const processAudioChunk = (chunk) => {
@@ -332,25 +350,23 @@ const app = createApp({
             rawSpectrumHistory.push(magnitudes);
             if (rawSpectrumHistory.length > SPECTRAM_HISTORY_LEN) rawSpectrumHistory.shift();
 
+            // MultiStreamManager: 全スロットにmagnitudesを配信
+            if (multiStreamManager) {
+                multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
 
-            // Extract 14 bins
-            const binBW = TARGET_SAMPLE_RATE / nFft;
-            const W = 14 * binBW;
-            const fStart = state.trackedFreq - W / 2 + binBW / 2;
-            const specFrame = new Float32Array(14);
-            for (let i = 0; i < 14; i++) {
-                const f = fStart + i * binBW;
-                const k = f * nFft / TARGET_SAMPLE_RATE;
-                const kIdx = Math.floor(k);
-                const kFrac = k - kIdx;
-                if (kIdx >= 0 && kIdx < nFft - 1) {
-                    const p1 = real[kIdx] * real[kIdx] + imag[kIdx] * imag[kIdx];
-                    const p2 = real[kIdx + 1] * real[kIdx + 1] + imag[kIdx + 1] * imag[kIdx + 1];
-                    specFrame[i] = p1 * (1 - kFrac) + p2 * kFrac;
+                // メインスロットのテキストを更新
+                state.decodedText = multiStreamManager.mainText;
+                if (textContainer.value) {
+                    textContainer.value.scrollLeft = textContainer.value.scrollWidth;
                 }
-            }
 
-            if (streamInference) streamInference.pushFrame(specFrame);
+                // サブデコーダー情報を更新
+                state.subDecoders = multiStreamManager.getSubSlots();
+                const stats = multiStreamManager.performanceStats;
+                state.activeDecoders = stats.activeSlots;
+                state.decoderThrottled = stats.throttled;
+                state.decoderUtilization = `${stats.totalInferenceTime.toFixed(0)}/${stats.budget.toFixed(0)}=${(stats.utilization * 100).toFixed(0)}%`;
+            }
 
             const displayMagnitude = magnitudes.map(p => Math.max(0, Math.log1p(p * 5000) / 12));
             waterfallBuffer.push(displayMagnitude);
@@ -359,31 +375,20 @@ const app = createApp({
         };
 
         const redecode = async () => {
-            if (!streamInference || rawSpectrumHistory.length === 0) return;
+            if (!multiStreamManager || rawSpectrumHistory.length === 0) return;
 
-            streamInference.reset();
+            // メインスロットのみリデコード
+            multiStreamManager.reset();
             if (peakDetector) peakDetector.reset();
             state.decodedText = '';
 
-            const binBW = TARGET_SAMPLE_RATE / nFft;
-            const W = 14 * binBW;
-            const fStart = state.trackedFreq - W / 2 + binBW / 2;
+            // メインスロットを再作成
+            multiStreamManager.updatePeaks([], state.trackedFreq);
 
             for (const magnitudes of rawSpectrumHistory) {
-                const specFrame = new Float32Array(14);
-                for (let i = 0; i < 14; i++) {
-                    const f = fStart + i * binBW;
-                    const k = f * nFft / TARGET_SAMPLE_RATE;
-                    const kIdx = Math.floor(k);
-                    const kFrac = k - kIdx;
-                    if (kIdx >= 0 && kIdx < magnitudes.length - 1) {
-                        const p1 = magnitudes[kIdx];
-                        const p2 = magnitudes[kIdx + 1];
-                        specFrame[i] = p1 * (1 - kFrac) + p2 * kFrac;
-                    }
-                }
-                streamInference.pushFrame(specFrame);
+                multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
             }
+            state.decodedText = multiStreamManager.mainText;
         };
 
         const setupProcessing = (source) => {
@@ -428,7 +433,7 @@ const app = createApp({
                 state.detectedPeaks = [];
                 rawSpectrumHistory = [];
                 state.decodedText = '';
-                if (streamInference) streamInference.reset();
+                if (multiStreamManager) multiStreamManager.reset();
                 if (peakDetector) peakDetector.reset();
 
                 setupProcessing(source);
@@ -520,7 +525,7 @@ const app = createApp({
                 state.detectedPeaks = [];
                 rawSpectrumHistory = [];
                 state.decodedText = '';
-                if (streamInference) streamInference.reset();
+                if (multiStreamManager) multiStreamManager.reset();
                 if (peakDetector) peakDetector.reset();
 
                 setupProcessing(analysisMix);
@@ -542,7 +547,7 @@ const app = createApp({
 
         const stop = () => {
             state.isRunning = false;
-            if (streamInference) streamInference.reset();
+            if (multiStreamManager) multiStreamManager.reset();
             if (peakDetector) peakDetector.reset();
 
             if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
@@ -673,7 +678,8 @@ const app = createApp({
         };
 
         const drawWaterfallOverlay = () => {
-            if (!waterfallOverlayCtx || !streamInference) return;
+            const mainInference = multiStreamManager ? multiStreamManager.mainInference : null;
+            if (!waterfallOverlayCtx || !mainInference) return;
             const w = waterfallOverlayCanvas.value.width;
             const h = waterfallOverlayCanvas.value.height;
 
@@ -694,9 +700,9 @@ const app = createApp({
             const barW = 80;
             waterfallOverlayCtx.fillRect(w - barW, trackY - 0.5, barW, 1);
 
-            const sigHistory = streamInference.getSignalHistory();
-            const eventHistory = streamInference.getEvents();
-            const totalFrames = streamInference.frameCount;
+            const sigHistory = mainInference.getSignalHistory();
+            const eventHistory = mainInference.getEvents();
+            const totalFrames = mainInference.frameCount;
 
             if (sigHistory.length > 0) {
                 const barH = 10;
@@ -775,6 +781,49 @@ const app = createApp({
             redecode();
         };
 
+        const getSubDecoderText = (freq) => {
+            if (!multiStreamManager) return null;
+            return multiStreamManager.getTextForFreq(freq);
+        };
+
+        // detectedPeaks とアクティブサブスロットをマージ
+        // ピーク消失後もスロットが生存中ならマーカーを残す
+        const mergedPeaks = computed(() => {
+            const NEARBY = 50;
+            // state.subDecoders はリアクティブ（processAudioChunk で毎フレーム更新）
+            const subSlots = state.subDecoders;
+            const usedSlotFreqs = new Set();
+
+            const result = state.detectedPeaks.map(p => {
+                // このピークに対応するスロットを探す
+                const matchedSlot = subSlots.find(s => Math.abs(s.freq - p.f) < NEARBY);
+                if (matchedSlot) usedSlotFreqs.add(matchedSlot.freq);
+                return {
+                    f: p.f, p: p.p, snr: p.snr,
+                    hasSlot: !!matchedSlot,
+                    slotText: matchedSlot ? matchedSlot.text : '',
+                };
+            });
+
+            // スロットはあるが detected peaks にないものを追加
+            for (const sub of subSlots) {
+                if (sub.throttled) continue;
+                if (usedSlotFreqs.has(sub.freq)) continue;
+                const alreadyShown = result.some(r => Math.abs(r.f - sub.freq) < NEARBY);
+                if (!alreadyShown && sub.text) {
+                    result.push({
+                        f: sub.freq,
+                        p: 0,
+                        snr: sub.snr,
+                        hasSlot: true,
+                        slotText: sub.text,
+                    });
+                }
+            }
+
+            return result;
+        });
+
         return {
             state,
             settings,
@@ -791,7 +840,9 @@ const app = createApp({
             textContainer,
             getPeakY,
             getPeakSNR,
-            selectPeak
+            selectPeak,
+            getSubDecoderText,
+            mergedPeaks
         };
     }
 }).mount('#app');

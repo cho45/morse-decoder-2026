@@ -81,6 +81,16 @@
                 </div>
 
                 <div class="control-group">
+                    <label>最大同時デコード数</label>
+                    <select v-model.number="settings.maxDecoders">
+                        <option :value="1">1 (メインのみ)</option>
+                        <option :value="2">2</option>
+                        <option :value="4">4 (推奨)</option>
+                        <option :value="8">8</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
                     <button class="secondary small" @click="clearCache" style="font-size: 14px; padding: 8px;">キャッシュ削除
                         (更新用)</button>
                 </div>
@@ -95,6 +105,12 @@
             <div class="overlay-info">
                 <div class="status-bar">
                     <span class="freq-display">{{ Math.round(state.trackedFreq) }} Hz</span>
+                    <span v-if="settings.maxDecoders > 1" class="decoder-status"
+                        :class="{ throttled: state.decoderThrottled }">
+                        {{ state.activeDecoders }}/{{ settings.maxDecoders }}
+                        {{ state.decoderThrottled ? '⚠' : '▶' }}
+                        ({{ state.decoderUtilization }})
+                    </span>
                     <button class="icon-btn" @click="toggleSettings">⚙️</button>
                     <button class="icon-btn stop-btn" @click="stop">■</button>
                 </div>
@@ -107,9 +123,12 @@
 
                 <!-- Markers Layer -->
                 <div class="markers-container">
-                    <div v-for="(peak, index) in state.detectedPeaks" :key="index" class="peak-marker"
+                    <div v-for="(peak, index) in mergedPeaks" :key="index" class="peak-marker"
                         :style="{ top: getPeakY(peak.f) + 'px' }" @click="selectPeak(peak.f)">
-                        <div class="peak-dot"></div>
+                        <div v-if="peak.slotText" class="peak-decoded-text">
+                            {{ peak.slotText }}
+                        </div>
+                        <div class="peak-dot" :class="{ 'has-slot': peak.hasSlot }"></div>
                         <div class="peak-label">{{ getPeakSNR(peak.snr).toFixed(1) }} dB</div>
                     </div>
                 </div>
