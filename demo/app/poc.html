@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ONNX Runtime Web Worker PoC</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+        }
+
+        .controls {
+            margin-bottom: 20px;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .worker-card {
+            border: 1px solid #ccc;
+            padding: 10px;
+            border-radius: 5px;
+            background: #f9f9f9;
+        }
+
+        .worker-id {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .worker-status {
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        #log {
+            background: #eee;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 0.8rem;
+            border-radius: 5px;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 8px 16px;
+            font-size: 1rem;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>ONNX Runtime Web Worker PoC (Multi-Worker)</h1>
+
+    <div class="controls">
+        <button id="start-btn" disabled>Start Parallel Inference</button>
+    </div>
+
+    <div id="worker-container" class="status-grid">
+        <!-- Worker cards will be injected here -->
+    </div>
+
+    <pre id="log"></pre>
+
+    <script type="module" src="poc.js"></script>
+</body>
+
+</html>
