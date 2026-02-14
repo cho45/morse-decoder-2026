@@ -8,8 +8,9 @@
     <style>
         body {
             font-family: sans-serif;
-            padding: 20px;
-            color: #333;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
         }
 
         h1 {
@@ -19,31 +20,59 @@
 
         .controls {
             margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
         }
 
-        .status-grid {
+        #worker-container {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
             gap: 10px;
-            margin-bottom: 20px;
+            margin-bottom: 200px;
         }
 
         .worker-card {
             border: 1px solid #ccc;
             padding: 10px;
-            border-radius: 5px;
+            border-radius: 4px;
             background: #f9f9f9;
+            position: relative;
         }
 
         .worker-id {
             font-weight: bold;
+            font-size: 0.8em;
+            color: #666;
             margin-bottom: 5px;
         }
 
         .worker-status {
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
             font-size: 0.9rem;
             color: #666;
         }
+
+        /* Busy Indicator */
+        .busy-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ccc;
+        }
+
+        .busy-indicator.idle {
+            background: #4caf50;
+        }
+
+        /* Green */
+        .busy-indicator.busy {
+            background: #f44336;
+        }
+
+        /* Red */
 
         #log {
             background: #eee;
@@ -75,8 +104,18 @@
 <body>
     <h1>ONNX Runtime Web Worker PoC (Multi-Worker)</h1>
 
+    <div
+        style="background: #f0f4f8; border-left: 4px solid #2980b9; padding: 15px; margin-bottom: 25px; font-size: 0.95rem; line-height: 1.6;">
+        <strong>PoC の目的:</strong>
+        <ul style="margin: 8px 0 0 20px; padding: 0;">
+            <li>ONNX Runtime Web による、複数 Worker / 複数ストリームを用いた軽量モデルの同時推論の検証</li>
+            <li>「スロット」概念によるストリームの抽象化と、Worker 通信を隠蔽した透過的な API (SlotProxy) の実現</li>
+        </ul>
+    </div>
+
     <div class="controls">
         <button id="start-btn" disabled>Start Parallel Inference</button>
+        <button id="stop-btn" disabled>Stop</button>
     </div>
 
     <div id="worker-container" class="status-grid">
