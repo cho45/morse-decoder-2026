@@ -396,28 +396,24 @@ const app = createApp({
             if (!multiStreamManager || rawSpectrumHistory.length === 0) return;
 
             // メインスロットのみリデコード
-            multiStreamManager.resetMainSlot();
             if (peakDetector) peakDetector.reset();
             state.decodedText = '';
-            
+
             // キャッシュをクリア
             cachedSigHistory = [];
             cachedEventHistory = [];
             cachedTotalFrames = 0;
 
-            // メインスロットを再作成
-            multiStreamManager.updatePeaks([], state.trackedFreq);
+            // メインスロットを再作成（周波数情報は維持）
+            await multiStreamManager.updatePeaks([], state.trackedFreq);
+            await multiStreamManager.redecode(rawSpectrumHistory, nFft, TARGET_SAMPLE_RATE);
 
-            for (const magnitudes of rawSpectrumHistory) {
-                await multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
-            }
-            
             // キャッシュ更新: リデコード完了後にメインスロットのデータを取得
             const mainInference = multiStreamManager.mainInference;
             cachedSigHistory = await mainInference.getSignalHistory();
             cachedEventHistory = await mainInference.getEvents();
             cachedTotalFrames = await mainInference.frameCount;
-            
+
             const allSlots = await multiStreamManager.getAllSlots();
             const mainSlot = allSlots.find(s => s.isMain);
             state.decodedText = mainSlot ? mainSlot.text : '';

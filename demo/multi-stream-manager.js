@@ -636,6 +636,27 @@ export class MultiStreamManager {
         }
     }
 
+    /**
+     * メインスロットのみをリデコードする
+     * @param {Float32Array[]} history - rawSpectrumHistory (magnitudesの配列)
+     * @param {number} nFft - FFTサイズ
+     * @param {number} sampleRate - サンプリングレート
+     */
+    async redecode(history, nFft, sampleRate) {
+        const mainSlotId = this.getMainSlotId();
+        const proxy = this._multiStreamProxy.getSlot(mainSlotId);
+        if (!proxy) return;
+
+        // メインスロットをリセット
+        await proxy.reset();
+
+        // 履歴データをメインスロットにプッシュ
+        for (const magnitudes of history) {
+            const specFrame = extractSpecFrame(magnitudes, this._mainFreq, nFft, sampleRate);
+            await proxy.pushFrames([specFrame]);
+        }
+    }
+
     dispose() {
         this._disposed = true;
         this._multiStreamProxy.dispose();
