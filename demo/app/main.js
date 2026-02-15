@@ -3,6 +3,7 @@ import { DSP } from '../dsp.js';
 import { NoiseNode } from '../noise-node.js';
 import { StreamInference } from '../stream-inference.js';
 import { MultiStreamManager } from '../multi-stream-manager.js';
+import { MultiStreamProxy } from '../multi-stream-proxy.js';
 import { MORSE_DICT } from '../data_gen.js';
 import { getViridisColor, powerToDBNormalized, normalizeDB } from '../visualization.js';
 import { PeakDetector } from '../peak-detector.js';
@@ -152,7 +153,6 @@ const app = createApp({
 
         // Audio & Processing State
         let audioContext = null;
-        let session = null;
         let streamInference = null;
         let multiStreamManager = null;
         let stream = null;
@@ -172,6 +172,11 @@ const app = createApp({
         let lastTrackedFreq = 700;
         let rawSpectrumHistory = [];
         let peakDetector = null;
+        
+        // Cached inference data for visualization (updated after pushMagnitudes)
+        let cachedSigHistory = [];
+        let cachedEventHistory = [];
+        let cachedTotalFrames = 0;
 
 
         // --- Core Logic ---
@@ -253,21 +258,27 @@ const app = createApp({
 
                 state.loadingStatus = 'AIエンジンを初期化中...';
 
-                // Force UI update before heavy initialization
-                await new Promise(r => setTimeout(r, 10));
-
-                session = await ort.InferenceSession.create(modelBuffer, {
-                    executionProviders: ['wasm']
-                });
+                // MultiStreamProxy (ワーカー管理)
+                const multiStreamProxy = new MultiStreamProxy(2);
 
                 // MultiStreamManager (複数ピーク同時デコード)
-                multiStreamManager = new MultiStreamManager(session, ort, {
+                multiStreamManager = new MultiStreamManager(modelBuffer, {
+                    multiStreamProxy: multiStreamProxy,
                     maxSlots: settings.maxDecoders,
+                    numWorkers: 2,
                     chunkSize: 12,
                     hopMs: HOP_MS,
                     useWebGPU: false,
-                    historyLength: HISTORY_LEN
+                    historyLength: HISTORY_LEN,
+                    workerURL: "../worker-multi-stream.js"
                 });
+
+                // 初期化
+                console.log("[Main] Calling multiStreamManager.init()...");
+                await multiStreamManager.init();
+                console.log("[Main] multiStreamManager.init() complete");
+
+                state.loadingStatus = 'AIエンジンを初期化';
 
                 // メインスロットの StreamInference への互換参照
                 // (drawWaterfallOverlay 等で使用)
@@ -325,7 +336,7 @@ const app = createApp({
             }
         };
 
-        const processAudioChunk = (chunk) => {
+        const processAudioChunk = async (chunk) => {
             audioBuf.set(audioBuf.subarray(chunk.length));
             audioBuf.set(chunk, nFft - chunk.length);
 
@@ -349,20 +360,30 @@ const app = createApp({
 
             // MultiStreamManager: 全スロットにmagnitudesを配信
             if (multiStreamManager) {
-                multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
+                await multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
 
                 // メインスロットのテキストを更新
-                state.decodedText = multiStreamManager.mainText;
+                const allSlots = await multiStreamManager.getAllSlots();
+                const mainSlot = allSlots.find(s => s.isMain);
+                state.decodedText = mainSlot ? mainSlot.text : '';
                 if (textContainer.value) {
                     textContainer.value.scrollLeft = textContainer.value.scrollWidth;
                 }
 
                 // サブデコーダー情報を更新
-                state.subDecoders = multiStreamManager.getSubSlots();
-                const stats = multiStreamManager.performanceStats;
+                const subSlots = await multiStreamManager.getSubSlots();
+                state.subDecoders = subSlots;
+
+                const stats = await multiStreamManager.performanceStats();
                 state.activeDecoders = stats.activeSlots;
                 state.decoderThrottled = stats.throttled;
                 state.decoderUtilization = `${stats.totalInferenceTime.toFixed(0)}/${stats.budget.toFixed(0)}=${(stats.utilization * 100).toFixed(0)}%`;
+
+                // キャッシュ更新: メインスロットの推論データを取得して保持
+                const mainInference = multiStreamManager.mainInference;
+                cachedSigHistory = await mainInference.getSignalHistory();
+                cachedEventHistory = await mainInference.getEvents();
+                cachedTotalFrames = await mainInference.frameCount;
             }
 
             const displayMagnitude = magnitudes.map(p => Math.max(0, Math.log1p(p * 5000) / 12));
@@ -375,17 +396,31 @@ const app = createApp({
             if (!multiStreamManager || rawSpectrumHistory.length === 0) return;
 
             // メインスロットのみリデコード
-            multiStreamManager.reset();
+            multiStreamManager.resetMainSlot();
             if (peakDetector) peakDetector.reset();
             state.decodedText = '';
+            
+            // キャッシュをクリア
+            cachedSigHistory = [];
+            cachedEventHistory = [];
+            cachedTotalFrames = 0;
 
             // メインスロットを再作成
             multiStreamManager.updatePeaks([], state.trackedFreq);
 
             for (const magnitudes of rawSpectrumHistory) {
-                multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
+                await multiStreamManager.pushMagnitudes(magnitudes, nFft, TARGET_SAMPLE_RATE);
             }
-            state.decodedText = multiStreamManager.mainText;
+            
+            // キャッシュ更新: リデコード完了後にメインスロットのデータを取得
+            const mainInference = multiStreamManager.mainInference;
+            cachedSigHistory = await mainInference.getSignalHistory();
+            cachedEventHistory = await mainInference.getEvents();
+            cachedTotalFrames = await mainInference.frameCount;
+            
+            const allSlots = await multiStreamManager.getAllSlots();
+            const mainSlot = allSlots.find(s => s.isMain);
+            state.decodedText = mainSlot ? mainSlot.text : '';
         };
 
         const setupProcessing = (source) => {
@@ -430,6 +465,10 @@ const app = createApp({
                 state.detectedPeaks = [];
                 rawSpectrumHistory = [];
                 state.decodedText = '';
+                // キャッシュをクリア
+                cachedSigHistory = [];
+                cachedEventHistory = [];
+                cachedTotalFrames = 0;
                 if (multiStreamManager) multiStreamManager.reset();
                 if (peakDetector) peakDetector.reset();
 
@@ -522,6 +561,10 @@ const app = createApp({
                 state.detectedPeaks = [];
                 rawSpectrumHistory = [];
                 state.decodedText = '';
+                // キャッシュをクリア
+                cachedSigHistory = [];
+                cachedEventHistory = [];
+                cachedTotalFrames = 0;
                 if (multiStreamManager) multiStreamManager.reset();
                 if (peakDetector) peakDetector.reset();
 
@@ -546,6 +589,11 @@ const app = createApp({
             state.isRunning = false;
             if (multiStreamManager) multiStreamManager.reset();
             if (peakDetector) peakDetector.reset();
+            
+            // キャッシュをクリア
+            cachedSigHistory = [];
+            cachedEventHistory = [];
+            cachedTotalFrames = 0;
 
             if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
             demoNodes.forEach(n => { if (n.stop) n.stop(); if (n.disconnect) n.disconnect(); });
@@ -675,10 +723,14 @@ const app = createApp({
         };
 
         const drawWaterfallOverlay = () => {
-            const mainInference = multiStreamManager ? multiStreamManager.mainInference : null;
-            if (!waterfallOverlayCtx || !mainInference) return;
+            if (!waterfallOverlayCtx) return;
             const w = waterfallOverlayCanvas.value.width;
             const h = waterfallOverlayCanvas.value.height;
+
+            // キャッシュされた推論データを使用
+            const sigHistory = cachedSigHistory;
+            const eventHistory = cachedEventHistory;
+            const totalFrames = cachedTotalFrames;
 
             waterfallOverlayCtx.clearRect(0, 0, w, h);
 
@@ -696,10 +748,6 @@ const app = createApp({
             waterfallOverlayCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
             const barW = 80;
             waterfallOverlayCtx.fillRect(w - barW, trackY - 0.5, barW, 1);
-
-            const sigHistory = mainInference.getSignalHistory();
-            const eventHistory = mainInference.getEvents();
-            const totalFrames = mainInference.frameCount;
 
             if (sigHistory.length > 0) {
                 const barH = 10;

@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Worker Test - MultiStreamProxy</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+        }
+
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        #slot-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 10px;
+            margin-bottom: 200px;
+        }
+
+        .slot-card {
+            border: 1px solid #ccc;
+            padding: 10px;
+            border-radius: 4px;
+            background: #f9f9f9;
+            position: relative;
+        }
+
+        .slot-id {
+            font-weight: bold;
+            font-size: 0.8em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .slot-status {
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        /* Busy Indicator */
+        .busy-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ccc;
+        }
+
+        .busy-indicator.idle {
+            background: #4caf50;
+        }
+
+        /* Green */
+        .busy-indicator.busy {
+            background: #f44336;
+        }
+
+        /* Red */
+
+        .decoded-text {
+            font-size: 0.8rem;
+            color: #333;
+            word-wrap: break-word;
+            min-height: 20px;
+        }
+
+        #log {
+            background: #eee;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 0.8rem;
+            border-radius: 5px;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 8px 16px;
+            font-size: 1rem;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .test-status {
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+
+        .test-status.pass {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .test-status.fail {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .test-status.running {
+            background: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Worker Test - MultiStreamProxy</h1>
+
+    <div class="test-status" id="test-status">Waiting for initialization...</div>
+
+    <div class="controls">
+        <button id="start-btn" disabled>Start Test</button>
+        <button id="stop-btn" disabled>Stop</button>
+    </div>
+
+    <div id="slot-container" class="status-grid">
+        <!-- Slot cards will be injected here -->
+    </div>
+
+    <pre id="log"></pre>
+
+    <script type="module">
+        import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/esm/ort.min.js";
+        import { MultiStreamProxy } from '/multi-stream-proxy.js';
+        
+        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+        ort.env.wasm.numThreads = 1;
+
+        let proxy = null;
+        let session = null;
+        let running = false;
+        let intervalId = null;
+
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const logEl = document.getElementById('log');
+        const testStatusEl = document.getElementById('test-status');
+        const slotContainer = document.getElementById('slot-container');
+
+        function log(msg) {
+            const time = new Date().toISOString().split('T')[1].split('.')[0];
+            logEl.textContent += `[${time}] ${msg}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function setTestStatus(status, message) {
+            testStatusEl.className = `test-status ${status}`;
+            testStatusEl.textContent = message;
+        }
+
+        async function init() {
+            try {
+                setTestStatus('running', 'Initializing ONNX session...');
+                log('Loading ONNX model...');
+                
+                // Load model
+                const modelPath = '/cw_decoder_quantized.onnx';
+                const response = await fetch(modelPath);
+                const modelBuffer = await response.arrayBuffer();
+                
+                session = await ort.InferenceSession.create(modelBuffer);
+                log('ONNX session created');
+
+                setTestStatus('running', 'Initializing MultiStreamProxy...');
+                log('Initializing MultiStreamProxy with 4 workers, 4 slots per worker...');
+
+                proxy = new MultiStreamProxy();
+                await proxy.init(modelBuffer, 4, {
+                    maxSlotsPerWorker: 4,
+                    chunkSize: 12,
+                    hopMs: 10,
+                    historyLength: 800,
+                });
+
+                log('MultiStreamProxy initialized');
+                log(`Total slots: ${proxy.slots.size}`);
+
+                // Create slot cards
+                for (const [slotId, slotInfo] of proxy.slots) {
+                    const card = document.createElement('div');
+                    card.className = 'slot-card';
+                    card.id = `card-${slotId}`;
+                    card.innerHTML = `
+                        <div class="slot-id">${slotId} (Worker ${slotInfo.workerIndex})</div>
+                        <div class="slot-status">
+                            <div class="busy-indicator idle" id="busy-${slotId}"></div>
+                            <span id="status-${slotId}">Idle</span>
+                        </div>
+                        <div class="decoded-text" id="text-${slotId}"></div>
+                    `;
+                    slotContainer.appendChild(card);
+                }
+
+                startBtn.disabled = false;
+                setTestStatus('pass', 'Initialization successful. Ready to start test.');
+                log('Ready to start test');
+
+            } catch (error) {
+                log(`ERROR: ${error.message}`);
+                console.error(error);
+                setTestStatus('fail', `Initialization failed: ${error.message}`);
+            }
+        }
+
+        async function startTest() {
+            if (running) return;
+            running = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            log('Starting test...');
+            setTestStatus('running', 'Running test...');
+
+            // Generate dummy frames (N_BINS=14)
+            const N_BINS = 14;
+            const frame = new Float32Array(N_BINS).fill(0.01);
+
+            // Push frames to all slots
+            for (const [slotId, slotInfo] of proxy.slots) {
+                await proxy.pushFrames(slotId, [frame]);
+                log(`Pushed frame to ${slotId}`);
+            }
+
+            // Update status periodically
+            intervalId = setInterval(async () => {
+                if (!running) return;
+
+                const allSlots = await proxy.getAllSlots();
+                for (const slot of allSlots) {
+                    const busyEl = document.getElementById(`busy-${slot.slotId}`);
+                    const statusEl = document.getElementById(`status-${slot.slotId}`);
+                    const textEl = document.getElementById(`text-${slot.slotId}`);
+
+                    if (busyEl && statusEl && textEl) {
+                        if (slot.isProcessing) {
+                            busyEl.className = 'busy-indicator busy';
+                            statusEl.textContent = 'Processing';
+                        } else {
+                            busyEl.className = 'busy-indicator idle';
+                            statusEl.textContent = 'Idle';
+                        }
+
+                        if (slot.text && slot.text !== textEl.textContent) {
+                            textEl.textContent = slot.text;
+                            log(`${slot.slotId}: ${slot.text}`);
+                        }
+                    }
+                }
+            }, 500);
+
+            log('Test started. Pushing frames every 120ms...');
+
+            // Push frames continuously
+            const pushInterval = setInterval(async () => {
+                if (!running) {
+                    clearInterval(pushInterval);
+                    return;
+                }
+
+                for (const [slotId, slotInfo] of proxy.slots) {
+                    await proxy.pushFrames(slotId, [frame]);
+                }
+            }, 120);
+
+            // Store interval ID for cleanup
+            window.pushInterval = pushInterval;
+        }
+
+        async function stopTest() {
+            if (!running) return;
+            running = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
+            }
+
+            if (window.pushInterval) {
+                clearInterval(window.pushInterval);
+                window.pushInterval = null;
+            }
+
+            log('Test stopped');
+            setTestStatus('pass', 'Test stopped successfully.');
+        }
+
+        startBtn.addEventListener('click', startTest);
+        stopBtn.addEventListener('click', stopTest);
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+
+</html>

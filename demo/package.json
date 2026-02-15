@@ -11,7 +11,9 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "@vitest/browser-playwright": "^4.0.18",
+    "onnxruntime-web": "^1.24.1",
     "serve": "^14.2.5",
-    "vitest": "^3.0.0"
+    "vitest": "^4.0.18"
   }
 }

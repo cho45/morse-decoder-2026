@@ -2,10 +2,16 @@
  * MultiStreamManager - 複数ピークの同時デコード管理
  *
  * 責務:
- * - StreamInference インスタンスの動的割り当て・解放
- * - ピーク検出結果から各スロットへのフレーム配信
+ * - スロットIDへの周波数の割り当て
+ * - ピークとスロットとのマッピング
+ * - スロットル管理
  * - メイン/サブ周波数の区別管理
- * - 推論パフォーマンスの測定と動的スロット削減
+ *
+ * 設計方針:
+ * - Single Source of Truth: スロットの状態（周波数、割り当て状況）は Manager 内の _slots (Map<string, SlotState>) で管理する。
+ *   ワーカー側の状態には依存せず、Manager が一方的にコマンドを送る。
+ * - Race Condition 対策: AsyncLock を使用し、updatePeaks などの非同期処理が重複しないように制御する。
+ *   処理中に新しいリクエストが来た場合は、待たずにスキップする（最新の処理のみを行えばよいため）。
  */
 
 import { StreamInference, N_BINS } from './stream-inference.js';
@@ -18,6 +24,67 @@ const SNR_REPLACE_MARGIN = 2.0; // SNR置換に必要な倍率（ヒステリシ
 const EMA_ALPHA = 0.1;          // 推論時間のEMA平滑化係数
 const THROTTLE_THRESHOLD = 0.95; // 予算の95%超過でスロットル
 const RECOVER_THRESHOLD = 0.7;  // 予算の70%未満で復帰
+
+/**
+ * 簡易 AsyncLock (Mutex)
+ * 処理中の再入を防ぎ、スキップするためのロック
+ */
+class AsyncLock {
+    constructor() {
+        this._locked = false;
+    }
+
+    /**
+     * ロックを取得して関数を実行する。
+     * すでにロックされている場合は実行せずに false を返す。
+     * @param {Function} task - 非同期タスク
+     * @returns {Promise<boolean>} タスクが実行されたかどうか
+     */
+    async tryLock(task) {
+        if (this._locked) {
+            return false;
+        }
+        this._locked = true;
+        try {
+            await task();
+            return true;
+        } finally {
+            this._locked = false;
+        }
+    }
+}
+
+/**
+ * スロットの状態を管理するクラス
+ */
+class SlotState {
+    /**
+     * @param {string} id - スロットID
+     * @param {boolean} isMain - メインスロットかどうか
+     */
+    constructor(id, isMain) {
+        this.id = id;
+        this.isMain = isMain;
+        this.freq = 0;          // 割り当て周波数 (0 = 未割り当て)
+        this.snr = 0;           // 最新SNR
+        this.text = '';         // 最新デコードテキスト
+        this.lastSeen = 0;      // 最後にピークが検出された時間
+        this.lastTextUpdate = 0;// 最後にテキストが更新された時間
+        this.throttled = false; // スロットル状態
+        this.avgInferenceTime = 0; // 推論時間のEMA
+    }
+
+    reset() {
+        this.freq = 0;
+        this.snr = 0;
+        this.text = '';
+        this.lastSeen = 0;
+        this.lastTextUpdate = 0;
+        this.throttled = false;
+        this.avgInferenceTime = 0;
+        // isMain, id は維持
+    }
+}
 
 /**
  * スペクトル magnitudes から指定中心周波数を基準に N_BINS 幅の
@@ -50,389 +117,489 @@ export function extractSpecFrame(magnitudes, centerFreq, nFft, sampleRate) {
 }
 
 /**
- * @typedef {Object} Slot
- * @property {number} freq - 中心周波数
- * @property {StreamInference} inference - StreamInference インスタンス
- * @property {string} text - デコード済みテキスト
- * @property {number} snr - 最新SNR (linear)
- * @property {number} lastSeen - 最後にピーク検出されたタイムスタンプ
- * @property {boolean} isMain - メイン周波数かどうか
- * @property {boolean} throttled - パフォーマンス制限で一時停止中か
- * @property {number} avgInferenceTime - EMA平滑化された推論時間(ms)
- */
-
-/**
+ * PerformanceStats
  * @typedef {Object} PerformanceStats
- * @property {number} totalInferenceTime - 全アクティブスロットの推論時間合計(ms)
- * @property {number} budget - 時間予算(ms)
- * @property {number} utilization - 予算利用率 (0.0-1.0+)
- * @property {number} activeSlots - アクティブスロット数
- * @property {number} maxSlots - 最大スロット数
- * @property {boolean} throttled - いずれかのスロットがスロットル中か
+ * @property {number} totalInferenceTime
+ * @property {number} budget
+ * @property {number} utilization
+ * @property {number} activeSlots
+ * @property {number} maxSlots
+ * @property {boolean} throttled
  */
 
 export class MultiStreamManager {
     /**
-     * @param {ort.InferenceSession} session - ONNX Runtime inference session (全スロットで共有)
-     * @param {typeof ort} ort - ONNX Runtime module
+     * @param {ArrayBuffer} modelBuffer - ONNXモデルバッファ
      * @param {Object} options
+     * @param {Object} options.multiStreamProxy - MultiStreamProxyインスタンス（必須）
+     * @param {number} [options.numWorkers=4] - ワーカー数
      * @param {number} [options.maxSlots=4] - 最大同時デコード数
      * @param {number} [options.chunkSize=12] - StreamInference の chunkSize
      * @param {number} [options.hopMs=10] - フレーム間隔(ms)
      * @param {number} [options.historyLength=800] - 可視化用ヒストリ長
      * @param {boolean} [options.useWebGPU=false]
+     * @param {string} [options.workerURL="./worker-multi-stream.js"] - ワーカーファイルのパス
      */
-    constructor(session, ort, options = {}) {
-        if (!session) throw new Error('MultiStreamManager requires an ONNX session');
-        if (!ort) throw new Error('MultiStreamManager requires ort module');
+    constructor(modelBuffer, options = {}) {
+        if (!modelBuffer) throw new Error('MultiStreamManager requires modelBuffer');
+        if (!options.multiStreamProxy) throw new Error('MultiStreamManager requires multiStreamProxy');
 
-        this._session = session;
-        this._ort = ort;
-        this._maxSlots = options.maxSlots || 4;
+        this._modelBuffer = modelBuffer;
+        this._numWorkers = options.numWorkers || 2;
+        this._maxSlots = options.maxSlots || 8;
         this._chunkSize = options.chunkSize || 12;
         this._hopMs = options.hopMs || 10;
         this._historyLength = options.historyLength || 800;
         this._useWebGPU = options.useWebGPU || false;
+        this._workerURL = options.workerURL;
+
+        // 時間管理（テスト用に注入可能）
+        this._now = options.now || Date.now;
 
         // 時間予算 = chunkSize * hopMs
         this._budgetMs = this._chunkSize * this._hopMs;
 
-        /** @type {Slot[]} */
-        this._slots = [];
+        // スロット管理 (Source of Truth)
+        /** @type {Map<string, SlotState>} */
+        this._slots = new Map();
+
+        // メイン周波数（追従中の周波数）
+        this._mainFreq = 700;
 
         this._disposed = false;
+        this._initialized = false;
+        this._lock = new AsyncLock();
+
+        // MultiStreamProxyを呼び出し元から受け取る（必須）
+        this._multiStreamProxy = options.multiStreamProxy;
     }
 
     /**
-     * 新しいスロットを作成する
-     * @param {number} freq
-     * @param {number} snr
-     * @param {boolean} isMain
-     * @returns {Slot}
-     * @private
+     * 初期化する
+     * @returns {Promise<void>}
      */
-    _createSlot(freq, snr, isMain) {
-        const inference = new StreamInference(this._session, this._ort, {
+    async init() {
+        if (this._initialized) return;
+
+        console.log("[MultiStreamManager] Starting init...");
+        console.log("[MultiStreamManager] Initializing MultiStreamProxy...");
+
+        // Proxyの初期化（ワーカー起動）
+        await this._multiStreamProxy.init(this._modelBuffer, this._numWorkers, {
+            workerURL: this._workerURL,
+            maxSlotsPerWorker: Math.ceil(this._maxSlots / this._numWorkers), // 十分な数を確保
             chunkSize: this._chunkSize,
             useWebGPU: this._useWebGPU,
             historyLength: this._historyLength,
         });
 
-        const slot = {
-            freq,
-            inference,
-            text: '',
-            snr,
-            lastSeen: Date.now(),
-            lastTextUpdate: 0,
-            isMain,
-            throttled: false,
-            avgInferenceTime: 0,
-        };
+        // スロット情報の初期化 (Proxyが作成したスロットIDを取得して管理下に置く)
+        const proxySlots = await this._multiStreamProxy.getAllSlots();
 
-        // テキスト更新を購読（newChars を追記、inference.reset() の影響を受けない）
-        inference.addEventListener('result', (e) => {
-            const newChars = e.detail.newChars;
-            if (newChars && newChars.length > 0) {
-                slot.text += newChars.join('');
-                slot.lastTextUpdate = Date.now();
-            }
-        });
+        // メインスロット用IDを決定（最初の1つを固定）
+        // スロットIDは `slot-{i}` の形式を想定
+        for (const s of proxySlots) {
+            // 最初のスロットをメインにする
+            const isMain = (this._slots.size === 0);
+            const slotState = new SlotState(s.slotId, isMain);
+            this._slots.set(s.slotId, slotState);
+        }
 
-        console.log(`[MSM] スロット割当: ${isMain ? 'MAIN' : 'SUB'} freq=${Math.round(freq)}Hz snr=${snr.toFixed(1)}`);
-        return slot;
+        console.log(`[MultiStreamManager] Initialized with ${this._slots.size} slots.`);
+        this._initialized = true;
     }
 
     /**
-     * スロットを破棄する
-     * @param {Slot} slot
-     * @private
+     * スロットの状態を取得する (内部使用)
+     * @param {string} slotId 
+     * @returns {SlotState}
      */
-    _destroySlot(slot) {
-        console.log(`[MSM] スロット解放: ${slot.isMain ? 'MAIN' : 'SUB'} freq=${Math.round(slot.freq)}Hz text="${slot.text.slice(-30)}"`);
-        if (slot.inference) {
-            slot.inference.dispose();
-            slot.inference = null;
+    _getSlot(slotId) {
+        return this._slots.get(slotId);
+    }
+
+    /**
+     * メインスロットのIDを取得
+     * @returns {string}
+     */
+    getMainSlotId() {
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) return slot.id;
         }
+        throw "Invalid state main slot not found";
+    }
+
+    /**
+     * スロットIDから周波数を取得する（互換用）
+     * @param {string} slotId 
+     */
+    _getFreqForSlotId(slotId) {
+        const slot = this._slots.get(slotId);
+        return slot ? slot.freq : 0;
     }
 
     /**
      * ピーク検出結果を受け取り、スロット割り当てを更新する。
+     * AsyncLock により、実行中の場合はスキップされる。
      *
      * @param {Array<{f: number, snr: number}>} peaks - ピーク検出結果 (SNR降順)
      * @param {number} mainFreq - メイン追従中の中心周波数
+     * @returns {Promise<void>}
      */
-    updatePeaks(peaks, mainFreq) {
+    async updatePeaks(peaks, mainFreq) {
         if (this._disposed) return;
 
-        const now = Date.now();
-        const matched = new Set();
+        // ロックが取れない（処理中）ならスキップ（最新のピーク情報だけで処理すれば十分なため）
+        const executed = await this._lock.tryLock(async () => {
+            await this._updatePeaksInternal(peaks, mainFreq);
+        });
 
-        // 1. 既存スロットの近傍マッチング
-        for (const slot of this._slots) {
-            const nearbyPeak = peaks.find(
-                (p, idx) => !matched.has(idx) && Math.abs(p.f - slot.freq) < NEARBY_HZ
-            );
-            if (nearbyPeak) {
-                const peakIdx = peaks.indexOf(nearbyPeak);
-                matched.add(peakIdx);
-                // スムーズに追従
-                slot.freq = slot.freq * 0.9 + nearbyPeak.f * 0.1;
-                slot.snr = nearbyPeak.snr;
-                slot.lastSeen = now;
-            } else if (!slot.isMain) {
-                const age = now - slot.lastSeen;
-                if (age > 1000 && age % 2000 < 100) { // 頻度を抑えてログ
-                    console.log(`[MSM] ピーク未検出: freq=${Math.round(slot.freq)}Hz age=${(age / 1000).toFixed(1)}s/${SLOT_TIMEOUT_MS / 1000}s`);
+        if (!executed) {
+            // console.debug("[MultiStreamManager] updatePeaks skipped due to lock.");
+        }
+    }
+
+    /**
+     * ピーク更新の内部ロジック (Locked)
+     * @private
+     */
+    async _updatePeaksInternal(peaks, mainFreq) {
+        this._mainFreq = mainFreq;
+        const now = this._now();
+
+        // --- 1. メインスロットの更新 ---
+        const mainSlotId = this.getMainSlotId();
+        const mainSlot = this._getSlot(mainSlotId);
+        if (mainSlot.freq !== mainFreq) {
+            mainSlot.freq = mainFreq;
+        }
+        mainSlot.lastSeen = now; // メインは常に生存
+
+        // --- 2. ワーカーからの最新テキスト・統計を取得してローカル状態を更新 ---
+        // これを行わないと、lastTextUpdate や avgInferenceTime が古くなる
+        const workerSlots = await this._multiStreamProxy.getAllSlots();
+        for (const ws of workerSlots) {
+            const slot = this._slots.get(ws.slotId);
+            if (slot) {
+                if (ws.text && ws.text.length > slot.text.length) {
+                    slot.lastTextUpdate = now;
                 }
+                slot.text = ws.text;
+                slot.avgInferenceTime = slot.avgInferenceTime * (1 - EMA_ALPHA) + (ws.inferenceTime || 0) * EMA_ALPHA;
             }
         }
 
-        // 2. メインスロットの確認・作成
-        const mainSlot = this._slots.find(s => s.isMain);
-        if (!mainSlot) {
-            // メインスロットがない → 作成
-            const slot = this._createSlot(mainFreq, 0, true);
-            this._slots.unshift(slot); // メインは先頭
-        } else {
-            // メインスロットはメイン周波数に追従
-            mainSlot.freq = mainFreq;
-            mainSlot.isMain = true;
+        // --- 3. ピークとサブスロットのマッチング ---
+        const matchedPeaks = new Set();
+
+        // 既存サブスロットへの近傍マッチング
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) continue;
+            if (slot.freq === 0) continue; // 未割り当て
+
+            // メイン周波数に吸われた場合は解放（メインが優先）
+            if (Math.abs(slot.freq - mainFreq) < NEARBY_HZ) {
+                // console.log(`[MSM] Slot ${slot.id} (${Math.round(slot.freq)}Hz) absorbed by main freq.`);
+                await this._releaseSlot(slot);
+                continue;
+            }
+
+            // 最も近いピークを探す
+            let closestPeak = null;
+            let minDiff = Infinity;
+            for (let i = 0; i < peaks.length; i++) {
+                if (matchedPeaks.has(i)) continue;
+                const diff = Math.abs(peaks[i].f - slot.freq);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestPeak = { peak: peaks[i], idx: i };
+                }
+            }
+
+            if (closestPeak && minDiff < NEARBY_HZ) {
+                // 近傍: マッチ
+                matchedPeaks.add(closestPeak.idx);
+                // 周波数更新 (Smoothing)
+                slot.freq = slot.freq * 0.9 + closestPeak.peak.f * 0.1;
+                slot.snr = closestPeak.peak.snr;
+                slot.lastSeen = now;
+            }
         }
 
-        // 3. 新規ピークの割り当て（空きスロットまたはSNR置換）
-        const effectiveMax = this._getEffectiveMaxSlots();
+        // --- 4. 新規割り当てと置換 ---
         for (let i = 0; i < peaks.length; i++) {
-            if (matched.has(i)) continue;
+            if (matchedPeaks.has(i)) continue;
             const peak = peaks[i];
 
-            // メイン周波数と近すぎるピークはスキップ
+            // メイン周波数に近いピークはスキップ（メインスロットで扱う）
             if (Math.abs(peak.f - mainFreq) < NEARBY_HZ) continue;
 
-            // 既存スロットと近すぎるピークはスキップ
-            const tooClose = this._slots.some(s => Math.abs(s.freq - peak.f) < NEARBY_HZ);
+            // 既存スロットに近いピークもスキップ
+            let tooClose = false;
+            for (const slot of this._slots.values()) {
+                if (slot.freq > 0 && Math.abs(slot.freq - peak.f) < NEARBY_HZ) {
+                    tooClose = true;
+                    break;
+                }
+            }
             if (tooClose) continue;
 
-            if (this._slots.length < effectiveMax) {
-                // 空きスロットに割り当て
-                const slot = this._createSlot(peak.f, peak.snr, false);
-                this._slots.push(slot);
+            // 空きスロットを探す
+            // メインスロットは除外
+            const freeSlot = Array.from(this._slots.values()).find(s => !s.isMain && s.freq === 0);
+
+            if (freeSlot) {
+                // 新規割り当て
+                await this._assignSlot(freeSlot, peak.f, peak.snr, now);
             } else {
-                // 満杯 → SNRが十分高く、クールダウン済みのサブスロットより強ければ置換
-                let worstIdx = -1;
-                let worstSnr = Infinity;
-                for (let j = 0; j < this._slots.length; j++) {
-                    const s = this._slots[j];
-                    // 最終テキスト更新からクールダウン経過済みのみ置換対象
-                    if (!s.isMain && s.snr < worstSnr && (now - s.lastTextUpdate) > SLOT_COOLDOWN_MS) {
-                        worstSnr = s.snr;
-                        worstIdx = j;
+                // 空きなし: 置換判定
+                // スロット保有数チェック (maxSlots)
+                let activeCount = 0;
+                for (const s of this._slots.values()) { if (s.freq > 0) activeCount++; }
+
+                if (activeCount >= this._maxSlots) {
+                    // 最弱スロットを探す
+                    let worstSlot = null;
+                    let worstSnr = Infinity;
+
+                    for (const slot of this._slots.values()) {
+                        if (slot.isMain) continue;
+                        if (slot.freq === 0) continue; // 未割り当てはスキップ
+
+                        // クールダウン中は保護 (最後にテキストが出てから一定時間)
+                        if ((now - slot.lastTextUpdate) < SLOT_COOLDOWN_MS) continue;
+
+                        if (slot.snr < worstSnr) {
+                            worstSnr = slot.snr;
+                            worstSlot = slot;
+                        }
                     }
-                }
-                if (worstIdx >= 0 && peak.snr > worstSnr * SNR_REPLACE_MARGIN) {
-                    console.log(`[MSM] SNR置換: ${Math.round(this._slots[worstIdx].freq)}Hz(snr=${worstSnr.toFixed(1)}) → ${Math.round(peak.f)}Hz(snr=${peak.snr.toFixed(1)}) margin=${(peak.snr / worstSnr).toFixed(1)}x`);
-                    this._destroySlot(this._slots[worstIdx]);
-                    this._slots.splice(worstIdx, 1);
-                    const slot = this._createSlot(peak.f, peak.snr, false);
-                    this._slots.push(slot);
+
+                    if (worstSlot && peak.snr > worstSnr * SNR_REPLACE_MARGIN) {
+                        console.log(`[MSM] Converting slot ${worstSlot.id} (${Math.round(worstSlot.freq)}Hz -> ${Math.round(peak.f)}Hz)`);
+                        await this._assignSlot(worstSlot, peak.f, peak.snr, now);
+                    }
+                } else {
+                    // 論理的にはまだ割り当てられるはずだが、物理スロットが足りない（バグ？）
+                    // initで十分確保しているはずなので、ここには来ないはず。
                 }
             }
         }
 
-        // 5. タイムアウトしたサブスロットの解放
-        //    ただし最近テキストを受信したスロットは保護する
-        for (let i = this._slots.length - 1; i >= 0; i--) {
-            const slot = this._slots[i];
-            if (!slot.isMain && (now - slot.lastSeen) > SLOT_TIMEOUT_MS
-                && (now - slot.lastTextUpdate) > SLOT_COOLDOWN_MS) {
-                console.log(`[MSM] タイムアウト解放: freq=${Math.round(slot.freq)}Hz age=${((now - slot.lastSeen) / 1000).toFixed(1)}s`);
-                this._destroySlot(slot);
-                this._slots.splice(i, 1);
+        // --- 5. タイムアウト解放 ---
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) continue;
+            if (slot.freq === 0) continue;
+
+            // クールダウン中は保護
+            if ((now - slot.lastTextUpdate) < SLOT_COOLDOWN_MS) continue;
+
+            if ((now - slot.lastSeen) > SLOT_TIMEOUT_MS) {
+                console.log(`[MSM] Slot ${slot.id} timed out. (${Math.round(slot.freq)}Hz)`);
+                await this._releaseSlot(slot);
             }
         }
 
-        // 6. パフォーマンスベースのスロットル管理
-        this._updateThrottling();
+        // --- 6. スロットル制御 ---
+        await this._updateThrottling();
     }
 
     /**
-     * 現在のパフォーマンス状態に基づいて有効な最大スロット数を返す。
-     * スロットルで削減された数を反映する。
-     * @returns {number}
+     * スロットに周波数を割り当てる
      * @private
      */
-    _getEffectiveMaxSlots() {
-        return this._maxSlots;
+    async _assignSlot(slot, freq, snr, now) {
+        slot.freq = freq;
+        slot.snr = snr;
+        slot.lastSeen = now;
+        // リセット
+        slot.text = '';
+        slot.lastTextUpdate = 0; // 新規なので0
+        // Workerの状態リセット
+        await this._multiStreamProxy.getSlot(slot.id).reset();
     }
 
     /**
-     * パフォーマンスベースのスロットル管理
+     * スロットを解放する
      * @private
      */
-    _updateThrottling() {
-        const stats = this.performanceStats;
+    async _releaseSlot(slot) {
+        slot.reset(); // freq=0 になる
+        // Workerの状態リセット
+        const proxy = this._multiStreamProxy.getSlot(slot.id);
+        if (proxy) await proxy.reset();
+    }
+
+    /**
+     * パフォーマンス制御
+     * @private
+     */
+    async _updateThrottling() {
+        const stats = await this.performanceStats();
+
         if (stats.utilization > THROTTLE_THRESHOLD) {
-            // 予算超過: SNR最低の非スロットル・非メインスロットをスロットル
-            let worstSlot = null;
-            let worstSnr = Infinity;
-            for (const slot of this._slots) {
-                if (!slot.isMain && !slot.throttled && slot.snr < worstSnr) {
-                    worstSnr = slot.snr;
-                    worstSlot = slot;
+            // スロットル対象：SNRが低く、メインでない、まだスロットルされていないもの
+            let target = null;
+            let minSnr = Infinity;
+            for (const slot of this._slots.values()) {
+                if (slot.isMain) continue;
+                if (slot.freq === 0) continue;
+                if (!slot.throttled && slot.snr < minSnr) {
+                    minSnr = slot.snr;
+                    target = slot;
                 }
             }
-            if (worstSlot) {
-                worstSlot.throttled = true;
+            if (target) {
+                target.throttled = true;
+                // console.log(`[MSM] Throttled slot ${target.id}`);
             }
         } else if (stats.utilization < RECOVER_THRESHOLD) {
-            // 予算に余裕: スロットルされたスロットを1つ復帰
-            const throttledSlot = this._slots.find(s => s.throttled);
+            // 復帰：スロットルされているもののうち、SNRが高いもの（あるいは適当に）
+            const throttledSlot = Array.from(this._slots.values()).find(s => s.throttled);
             if (throttledSlot) {
                 throttledSlot.throttled = false;
-                // 復帰したスロットの推論状態をリセット（古い状態は使えない）
-                // テキストは保持する（newChars 追記方式なので reset しても消えない）
-                if (throttledSlot.inference) {
-                    throttledSlot.inference.reset();
-                }
+                // console.log(`[MSM] Unthrottled slot ${throttledSlot.id}`);
+                // 復帰時はモデルの状態が飛んでいるのでリセット推奨
+                const proxy = this._multiStreamProxy.getSlot(throttledSlot.id);
+                if (proxy) await proxy.reset();
             }
         }
     }
 
     /**
-     * 全アクティブスロットにスペクトルフレームを配信する。
-     *
-     * @param {Float32Array} magnitudes - ワイドバンドFFTパワースペクトル
-     * @param {number} nFft - FFTサイズ
-     * @param {number} sampleRate - サンプルレート
+     * 全スロットにスペクトルフレームを配信する。
+     * @param {Float32Array} magnitudes 
+     * @param {number} nFft 
+     * @param {number} sampleRate 
      */
-    pushMagnitudes(magnitudes, nFft, sampleRate) {
+    async pushMagnitudes(magnitudes, nFft, sampleRate) {
         if (this._disposed) return;
 
-        for (const slot of this._slots) {
-            if (slot.throttled || !slot.inference) continue;
+        // 以下のループは非同期ロックを行わない（パフォーマンス重視）
+        // メインスレッドでの実行なので、SlotStateの参照競合は起きない（JSはシングルスレッド）
+        // ただし updatePeaks の await 中にここが割り込む可能性はあるが、
+        // freq などの値はアトミックに読めるので問題ない。
+
+        const tasks = [];
+        for (const slot of this._slots.values()) {
+            if (slot.throttled) continue;
+            if (slot.freq === 0) continue;
+
+            const proxy = this._multiStreamProxy.getSlot(slot.id);
+            if (!proxy) continue;
 
             const specFrame = extractSpecFrame(magnitudes, slot.freq, nFft, sampleRate);
-            slot.inference.pushFrame(specFrame);
 
-            // EMA で推論時間を更新
-            const lastTime = slot.inference.inferenceTime;
-            if (lastTime > 0) {
-                slot.avgInferenceTime = slot.avgInferenceTime === 0
-                    ? lastTime
-                    : EMA_ALPHA * lastTime + (1 - EMA_ALPHA) * slot.avgInferenceTime;
-            }
+            // Promise.all で待たない方が良いかもしれないが、
+            // ここでは await せず fire and forget にする
+            tasks.push(proxy.pushFrames([specFrame]).catch(e => console.error(e)));
         }
+        await Promise.all(tasks);
     }
 
     /**
-     * メインスロットの StreamInference を取得する。
-     * @returns {StreamInference|null}
+     * メインスロットのインターフェース取得
      */
     get mainInference() {
-        const main = this._slots.find(s => s.isMain);
-        return main ? main.inference : null;
+        const id = this.getMainSlotId();
+        return id ? this._multiStreamProxy.getSlot(id) : null;
     }
 
     /**
-     * メインスロットのデコード済みテキストを取得する。
-     * @returns {string}
+     * サブスロット情報取得 (UI用)
      */
-    get mainText() {
-        const main = this._slots.find(s => s.isMain);
-        return main ? main.text : '';
-    }
-
-    /**
-     * サブスロットの情報を取得する（表示用）。
-     * @returns {Array<{freq: number, text: string, snr: number, throttled: boolean}>}
-     */
-    getSubSlots() {
-        return this._slots
-            .filter(s => !s.isMain)
-            .map(s => ({
-                freq: s.freq,
-                text: s.text,
-                snr: s.snr,
-                throttled: s.throttled,
-            }));
-    }
-
-    /**
-     * 全スロット情報を取得する（デバッグ/テスト用）。
-     * @returns {Array<{freq: number, text: string, snr: number, isMain: boolean, throttled: boolean, avgInferenceTime: number}>}
-     */
-    getAllSlots() {
-        return this._slots.map(s => ({
-            freq: s.freq,
-            text: s.text,
-            snr: s.snr,
-            isMain: s.isMain,
-            throttled: s.throttled,
-            avgInferenceTime: s.avgInferenceTime,
-        }));
-    }
-
-    /**
-     * 指定周波数に最も近いスロットのデコードテキストを取得する。
-     * @param {number} freq
-     * @param {number} [tolerance=50] - 許容誤差(Hz)
-     * @returns {string|null}
-     */
-    getTextForFreq(freq, tolerance = NEARBY_HZ) {
-        const slot = this._slots.find(s => !s.isMain && Math.abs(s.freq - freq) < tolerance);
-        return slot ? slot.text : null;
-    }
-
-    /**
-     * メインスロットの中心周波数を更新する（trackedFreq 変更時）。
-     * @param {number} freq
-     */
-    setMainFreq(freq) {
-        const main = this._slots.find(s => s.isMain);
-        if (main) {
-            main.freq = freq;
+    async getSubSlots() {
+        const result = [];
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) continue;
+            if (slot.freq === 0) continue;
+            result.push({
+                freq: slot.freq,
+                text: slot.text, // Workerから同期された最新テキスト
+                snr: slot.snr,
+                throttled: slot.throttled
+            });
         }
+        return result;
     }
 
     /**
-     * 最大スロット数を変更する。減った場合は超過分を解放する。
-     * @param {number} maxSlots
+     * 全スロット情報取得
      */
-    setMaxSlots(maxSlots) {
+    async getAllSlots() {
+        const result = [];
+        for (const slot of this._slots.values()) {
+            result.push({
+                slotId: slot.id,
+                freq: slot.freq,
+                text: slot.text,
+                snr: slot.snr,
+                isMain: slot.isMain,
+                throttled: slot.throttled,
+                avgInferenceTime: slot.avgInferenceTime
+            });
+        }
+        return result;
+    }
+
+    /**
+     * 指定周波数のテキスト取得
+     */
+    async getTextForFreq(freq, tolerance = NEARBY_HZ) {
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) continue;
+            if (slot.freq > 0 && Math.abs(slot.freq - freq) < tolerance) {
+                return slot.text;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 最大スロット数変更
+     */
+    async setMaxSlots(maxSlots) {
         this._maxSlots = maxSlots;
-        // 超過分のサブスロットを解放
-        while (this._slots.length > this._maxSlots) {
-            let worstIdx = -1;
-            let worstSnr = Infinity;
-            for (let i = 0; i < this._slots.length; i++) {
-                if (!this._slots[i].isMain && this._slots[i].snr < worstSnr) {
-                    worstSnr = this._slots[i].snr;
-                    worstIdx = i;
-                }
+        console.warn("[MultiStreamManager] setMaxSlots is partially supported (logical limit only).");
+
+        // 論理的な制限を超えている分を解放する
+        let activeCount = 0;
+        const activeSubs = [];
+        for (const slot of this._slots.values()) {
+            if (slot.isMain) continue;
+            if (slot.freq > 0) {
+                activeCount++;
+                activeSubs.push(slot);
             }
-            if (worstIdx >= 0) {
-                this._destroySlot(this._slots[worstIdx]);
-                this._slots.splice(worstIdx, 1);
-            } else {
-                break;
+        }
+
+        if (activeCount > this._maxSlots) {
+            // SNR昇順（弱い順）にソート
+            activeSubs.sort((a, b) => a.snr - b.snr);
+
+            // 超過分
+            const removeCount = activeCount - this._maxSlots;
+            for (let i = 0; i < removeCount; i++) {
+                await this._releaseSlot(activeSubs[i]);
             }
         }
     }
 
     /**
-     * パフォーマンス統計を取得する。
-     * @returns {PerformanceStats}
+     * パフォーマンス統計
      */
-    get performanceStats() {
+    async performanceStats() {
         let totalTime = 0;
         let activeCount = 0;
         let anyThrottled = false;
 
-        for (const slot of this._slots) {
+        for (const slot of this._slots.values()) {
             if (slot.throttled) {
                 anyThrottled = true;
                 continue;
             }
+            if (slot.freq === 0) continue;
+
             totalTime += slot.avgInferenceTime;
             activeCount++;
         }
@@ -447,23 +614,37 @@ export class MultiStreamManager {
         };
     }
 
-    /**
-     * 全状態をリセットする。
-     */
-    reset() {
-        for (const slot of this._slots) {
-            this._destroySlot(slot);
+    async reset() {
+        for (const slot of this._slots.values()) {
+            // Mainであっても状態を完全にリセット
+            slot.reset();
+
+            const proxy = this._multiStreamProxy.getSlot(slot.id);
+            if (proxy) await proxy.reset();
         }
-        this._slots = [];
     }
 
-    /**
-     * 全リソースを解放する。
-     */
+    async resetMainSlot() {
+        const id = this.getMainSlotId();
+        if (id) {
+            const slot = this._slots.get(id);
+            // 周波数情報は消さないが、推論状態は消す
+            slot.text = '';
+
+            const proxy = this._multiStreamProxy.getSlot(id);
+            if (proxy) await proxy.reset();
+        }
+    }
+
     dispose() {
         this._disposed = true;
-        this.reset();
-        this._session = null;
-        this._ort = null;
+        this._multiStreamProxy.dispose();
+        this._slots.clear();
+    }
+
+    // Test helper
+    _updateSlotFreq(slotId, freq) {
+        const slot = this._slots.get(slotId);
+        if (slot) slot.freq = freq;
     }
 }
