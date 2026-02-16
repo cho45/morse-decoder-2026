@@ -37,43 +37,29 @@ describe('MultiStreamManager', () => {
 
         it('should initialize slots from proxy', () => {
             expect(manager._slots.size).toBe(4);
-            expect(manager.getMainSlotId()).toBe('slot-0'); // First one becomes main
         });
     });
 
     describe('updatePeaks', () => {
-        describe('メインスロットの確保', () => {
-            it('should update main slot frequency', async () => {
-                const peaks = [{ f: 710, snr: 10 }];
-                const mainFreq = 710;
-
-                await manager.updatePeaks(peaks, mainFreq);
-
-                const mainSlot = manager._slots.get('slot-0');
-                expect(mainSlot.freq).toBe(710);
-            });
-        });
-
         describe('近傍マッチング', () => {
             it('should match nearby peaks to existing slots', async () => {
                 // Setup slots manually
-                manager._slots.get('slot-0').freq = 700; // Main
-                manager._slots.get('slot-1').freq = 800; // Sub
+                manager._slots.get('slot-0').freq = 800; // Sub
+                manager._slots.get('slot-1').freq = 900; // Sub
 
                 const peaks = [
-                    { f: 705, snr: 10 },
                     { f: 805, snr: 10 },
+                    { f: 905, snr: 10 },
                 ];
-                const mainFreq = 705;
+                const mainFreq = 700;
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-0').freq).toBe(705); // Main tracks exactly
-                expect(manager._slots.get('slot-1').freq).toBeCloseTo(800.5); // Sub smooths
+                expect(manager._slots.get('slot-0').freq).toBeCloseTo(800.5); // Sub smooths
+                expect(manager._slots.get('slot-1').freq).toBeCloseTo(900.5); // Sub smooths
             });
 
             it('should skip peaks too close to main frequency', async () => {
-                manager._slots.get('slot-0').freq = 700;
                 const peaks = [
                     { f: 705, snr: 10 }, // Too close to Main
                     { f: 800, snr: 10 },
@@ -82,14 +68,13 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                // slot-1 should take 800
-                expect(manager._slots.get('slot-1').freq).toBe(800);
+                // slot-0 should take 800
+                expect(manager._slots.get('slot-0').freq).toBe(800);
             });
         });
 
         describe('新規ピークの割り当て', () => {
             it('should assign new peak to empty slot', async () => {
-                manager._slots.get('slot-0').freq = 700;
                 const peaks = [
                     { f: 800, snr: 10 },
                 ];
@@ -97,18 +82,18 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-1').freq).toBe(800);
+                expect(manager._slots.get('slot-0').freq).toBe(800);
             });
 
             it('should replace worst slot when full and SNR is high enough', async () => {
-                manager._slots.get('slot-0').freq = 700;
-                manager._slots.get('slot-1').freq = 800;
-                manager._slots.get('slot-1').snr = 5;
-                manager._slots.get('slot-1').lastTextUpdate = 0; // Very old (since START_TIME is 100000)
+                manager._slots.get('slot-0').freq = 800;
+                manager._slots.get('slot-0').snr = 5;
+                manager._slots.get('slot-0').lastTextUpdate = 0; // Very old (since START_TIME is 100000)
 
                 // Fill other slots too to make it full
-                manager._slots.get('slot-2').freq = 810; manager._slots.get('slot-2').snr = 100;
-                manager._slots.get('slot-3').freq = 820; manager._slots.get('slot-3').snr = 100;
+                manager._slots.get('slot-1').freq = 810; manager._slots.get('slot-1').snr = 100;
+                manager._slots.get('slot-2').freq = 820; manager._slots.get('slot-2').snr = 100;
+                manager._slots.get('slot-3').freq = 830; manager._slots.get('slot-3').snr = 100;
 
                 mockNow.mockReturnValue(START_TIME + 25000); // 25s later
 
@@ -119,20 +104,19 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                // slot-1 should be replaced
-                expect(manager._slots.get('slot-1').freq).toBe(900);
+                // slot-0 should be replaced
+                expect(manager._slots.get('slot-0').freq).toBe(900);
             });
         });
 
         describe('タイムアウト解放', () => {
             it('should timeout and release sub slots', async () => {
-                manager._slots.get('slot-0').freq = 700;
-                manager._slots.get('slot-1').freq = 800;
-                manager._slots.get('slot-1').lastSeen = START_TIME;
-                manager._slots.get('slot-1').lastTextUpdate = 0;
+                manager._slots.get('slot-0').freq = 800;
+                manager._slots.get('slot-0').lastSeen = START_TIME;
+                manager._slots.get('slot-0').lastTextUpdate = 0;
 
-                // Move forward 15s. 
-                // START_TIME = 100000. 
+                // Move forward 15s.
+                // START_TIME = 100000.
                 // now = 115000.
                 // lastSeen = 100000. Diff = 15000 > 10000. Timeout OK.
                 // lastText = 0. Diff = 115000 > 20000. Cooldown OK.
@@ -143,8 +127,7 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-1').freq).toBe(0); // Released
-                expect(manager._slots.get('slot-0').freq).toBe(700); // Main preserved
+                expect(manager._slots.get('slot-0').freq).toBe(0); // Released
             });
         });
 
@@ -174,9 +157,9 @@ describe('MultiStreamManager', () => {
 
         describe('パフォーマンス統計', () => {
             it('should return correct statistics', async () => {
-                manager._slots.get('slot-0').freq = 700;
+                manager._slots.get('slot-0').freq = 800;
                 manager._slots.get('slot-0').avgInferenceTime = 50;
-                manager._slots.get('slot-1').freq = 800;
+                manager._slots.get('slot-1').freq = 900;
                 manager._slots.get('slot-1').avgInferenceTime = 70;
 
                 const stats = await manager.performanceStats();

@@ -60,11 +60,9 @@ class AsyncLock {
 class SlotState {
     /**
      * @param {string} id - スロットID
-     * @param {boolean} isMain - メインスロットかどうか
      */
-    constructor(id, isMain) {
+    constructor(id) {
         this.id = id;
-        this.isMain = isMain;
         this.freq = 0;          // 割り当て周波数 (0 = 未割り当て)
         this.snr = 0;           // 最新SNR
         this.text = '';         // 最新デコードテキスト
@@ -82,7 +80,7 @@ class SlotState {
         this.lastTextUpdate = 0;
         this.throttled = false;
         this.avgInferenceTime = 0;
-        // isMain, id は維持
+        // id は維持
     }
 }
 
@@ -196,12 +194,9 @@ export class MultiStreamManager {
         // スロット情報の初期化 (Proxyが作成したスロットIDを取得して管理下に置く)
         const proxySlots = await this._multiStreamProxy.getAllSlots();
 
-        // メインスロット用IDを決定（最初の1つを固定）
-        // スロットIDは `slot-{i}` の形式を想定
+        // すべてのスロットをサブスロットとして管理
         for (const s of proxySlots) {
-            // 最初のスロットをメインにする
-            const isMain = (this._slots.size === 0);
-            const slotState = new SlotState(s.slotId, isMain);
+            const slotState = new SlotState(s.slotId);
             this._slots.set(s.slotId, slotState);
         }
 
@@ -211,7 +206,7 @@ export class MultiStreamManager {
 
     /**
      * スロットの状態を取得する (内部使用)
-     * @param {string} slotId 
+     * @param {string} slotId
      * @returns {SlotState}
      */
     _getSlot(slotId) {
@@ -219,19 +214,8 @@ export class MultiStreamManager {
     }
 
     /**
-     * メインスロットのIDを取得
-     * @returns {string}
-     */
-    getMainSlotId() {
-        for (const slot of this._slots.values()) {
-            if (slot.isMain) return slot.id;
-        }
-        throw "Invalid state main slot not found";
-    }
-
-    /**
      * スロットIDから周波数を取得する（互換用）
-     * @param {string} slotId 
+     * @param {string} slotId
      */
     _getFreqForSlotId(slotId) {
         const slot = this._slots.get(slotId);
@@ -267,16 +251,7 @@ export class MultiStreamManager {
         this._mainFreq = mainFreq;
         const now = this._now();
 
-        // --- 1. メインスロットの更新 ---
-        const mainSlotId = this.getMainSlotId();
-        const mainSlot = this._getSlot(mainSlotId);
-        if (mainSlot.freq !== mainFreq) {
-            mainSlot.freq = mainFreq;
-        }
-        mainSlot.lastSeen = now; // メインは常に生存
-
-        // --- 2. ワーカーからの最新テキスト・統計を取得してローカル状態を更新 ---
-        // これを行わないと、lastTextUpdate や avgInferenceTime が古くなる
+        // ワーカーからの最新テキスト・統計を取得してローカル状態を更新
         const workerSlots = await this._multiStreamProxy.getAllSlots();
         for (const ws of workerSlots) {
             const slot = this._slots.get(ws.slotId);
@@ -289,12 +264,11 @@ export class MultiStreamManager {
             }
         }
 
-        // --- 3. ピークとサブスロットのマッチング ---
+        // ピークとサブスロットのマッチング
         const matchedPeaks = new Set();
 
         // 既存サブスロットへの近傍マッチング
         for (const slot of this._slots.values()) {
-            if (slot.isMain) continue;
             if (slot.freq === 0) continue; // 未割り当て
 
             // メイン周波数に吸われた場合は解放（メインが優先）
@@ -326,7 +300,7 @@ export class MultiStreamManager {
             }
         }
 
-        // --- 4. 新規割り当てと置換 ---
+        // 新規割り当てと置換
         for (let i = 0; i < peaks.length; i++) {
             if (matchedPeaks.has(i)) continue;
             const peak = peaks[i];
@@ -345,8 +319,7 @@ export class MultiStreamManager {
             if (tooClose) continue;
 
             // 空きスロットを探す
-            // メインスロットは除外
-            const freeSlot = Array.from(this._slots.values()).find(s => !s.isMain && s.freq === 0);
+            const freeSlot = Array.from(this._slots.values()).find(s => s.freq === 0);
 
             if (freeSlot) {
                 // 新規割り当て
@@ -363,7 +336,6 @@ export class MultiStreamManager {
                     let worstSnr = Infinity;
 
                     for (const slot of this._slots.values()) {
-                        if (slot.isMain) continue;
                         if (slot.freq === 0) continue; // 未割り当てはスキップ
 
                         // クールダウン中は保護 (最後にテキストが出てから一定時間)
@@ -386,9 +358,8 @@ export class MultiStreamManager {
             }
         }
 
-        // --- 5. タイムアウト解放 ---
+        // タイムアウト解放
         for (const slot of this._slots.values()) {
-            if (slot.isMain) continue;
             if (slot.freq === 0) continue;
 
             // クールダウン中は保護
@@ -400,7 +371,7 @@ export class MultiStreamManager {
             }
         }
 
-        // --- 6. スロットル制御 ---
+        // スロットル制御
         await this._updateThrottling();
     }
 
@@ -438,11 +409,10 @@ export class MultiStreamManager {
         const stats = await this.performanceStats();
 
         if (stats.utilization > THROTTLE_THRESHOLD) {
-            // スロットル対象：SNRが低く、メインでない、まだスロットルされていないもの
+            // スロットル対象：SNRが低く、まだスロットルされていないもの
             let target = null;
             let minSnr = Infinity;
             for (const slot of this._slots.values()) {
-                if (slot.isMain) continue;
                 if (slot.freq === 0) continue;
                 if (!slot.throttled && slot.snr < minSnr) {
                     minSnr = slot.snr;
@@ -498,20 +468,11 @@ export class MultiStreamManager {
     }
 
     /**
-     * メインスロットのインターフェース取得
-     */
-    get mainInference() {
-        const id = this.getMainSlotId();
-        return id ? this._multiStreamProxy.getSlot(id) : null;
-    }
-
-    /**
      * サブスロット情報取得 (UI用)
      */
     async getSubSlots() {
         const result = [];
         for (const slot of this._slots.values()) {
-            if (slot.isMain) continue;
             if (slot.freq === 0) continue;
             result.push({
                 freq: slot.freq,
@@ -534,7 +495,6 @@ export class MultiStreamManager {
                 freq: slot.freq,
                 text: slot.text,
                 snr: slot.snr,
-                isMain: slot.isMain,
                 throttled: slot.throttled,
                 avgInferenceTime: slot.avgInferenceTime
             });
@@ -547,7 +507,6 @@ export class MultiStreamManager {
      */
     async getTextForFreq(freq, tolerance = NEARBY_HZ) {
         for (const slot of this._slots.values()) {
-            if (slot.isMain) continue;
             if (slot.freq > 0 && Math.abs(slot.freq - freq) < tolerance) {
                 return slot.text;
             }
@@ -566,7 +525,6 @@ export class MultiStreamManager {
         let activeCount = 0;
         const activeSubs = [];
         for (const slot of this._slots.values()) {
-            if (slot.isMain) continue;
             if (slot.freq > 0) {
                 activeCount++;
                 activeSubs.push(slot);
@@ -616,44 +574,10 @@ export class MultiStreamManager {
 
     async reset() {
         for (const slot of this._slots.values()) {
-            // Mainであっても状態を完全にリセット
             slot.reset();
 
             const proxy = this._multiStreamProxy.getSlot(slot.id);
             if (proxy) await proxy.reset();
-        }
-    }
-
-    async resetMainSlot() {
-        const id = this.getMainSlotId();
-        if (id) {
-            const slot = this._slots.get(id);
-            // 周波数情報は消さないが、推論状態は消す
-            slot.text = '';
-
-            const proxy = this._multiStreamProxy.getSlot(id);
-            if (proxy) await proxy.reset();
-        }
-    }
-
-    /**
-     * メインスロットのみをリデコードする
-     * @param {Float32Array[]} history - rawSpectrumHistory (magnitudesの配列)
-     * @param {number} nFft - FFTサイズ
-     * @param {number} sampleRate - サンプリングレート
-     */
-    async redecode(history, nFft, sampleRate) {
-        const mainSlotId = this.getMainSlotId();
-        const proxy = this._multiStreamProxy.getSlot(mainSlotId);
-        if (!proxy) return;
-
-        // メインスロットをリセット
-        await proxy.reset();
-
-        // 履歴データをメインスロットにプッシュ
-        for (const magnitudes of history) {
-            const specFrame = extractSpecFrame(magnitudes, this._mainFreq, nFft, sampleRate);
-            await proxy.pushFrames([specFrame]);
         }
     }
 
