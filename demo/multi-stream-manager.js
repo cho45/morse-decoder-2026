@@ -57,7 +57,7 @@ class AsyncLock {
 /**
  * スロットの状態を管理するクラス
  */
-class SlotState {
+export class SlotState {
     /**
      * @param {string} id - スロットID
      */
@@ -545,30 +545,74 @@ export class MultiStreamManager {
 
     /**
      * パフォーマンス統計
+     * 
+     * ワーカー単位での使用率を計算します。
+     * 計算式: 1つのワーカーにつき、スロット数 × 平均推論時間 < リミット時間 × 安全率
+     * 
+     * @returns {Promise<Object>} パフォーマンス統計
      */
     async performanceStats() {
-        let totalTime = 0;
-        let activeCount = 0;
-        let anyThrottled = false;
-
+        // ワーカーごとのスロットをグループ化
+        const workerSlots = new Map();  // workerIndex -> Array<SlotState>
+        
         for (const slot of this._slots.values()) {
-            if (slot.throttled) {
-                anyThrottled = true;
-                continue;
-            }
             if (slot.freq === 0) continue;
-
-            totalTime += slot.avgInferenceTime;
-            activeCount++;
+            
+            // スロットIDからワーカーインデックスを抽出
+            // 例: "worker-0-slot-0" -> 0
+            const match = slot.id.match(/worker-(\d+)-slot-\d+/);
+            if (match) {
+                const workerIndex = parseInt(match[1]);
+                if (!workerSlots.has(workerIndex)) {
+                    workerSlots.set(workerIndex, []);
+                }
+                workerSlots.get(workerIndex).push(slot);
+            }
         }
-
+        
+        // 各ワーカーの使用率を計算
+        const workers = [];
+        let maxUtilization = 0;
+        let totalActiveSlots = 0;
+        let anyThrottled = false;
+        
+        for (const [workerIndex, slots] of workerSlots) {
+            const activeSlots = slots.filter(s => !s.throttled);
+            const throttledSlots = slots.filter(s => s.throttled);
+            
+            if (throttledSlots.length > 0) {
+                anyThrottled = true;
+            }
+            
+            // アクティブスロットの平均推論時間を計算
+            const avgInferenceTime = activeSlots.length > 0
+                ? activeSlots.reduce((sum, s) => sum + s.avgInferenceTime, 0) / activeSlots.length
+                : 0;
+            
+            // 使用率 = (スロット数 × 平均推論時間) / リミット時間
+            const utilization = this._budgetMs > 0
+                ? (activeSlots.length * avgInferenceTime) / this._budgetMs
+                : 0;
+            
+            // 最大の使用率を採用（ボトルネックとなっているワーカー）
+            maxUtilization = Math.max(maxUtilization, utilization);
+            totalActiveSlots += activeSlots.length;
+            
+            workers.push({
+                workerIndex,
+                activeSlots: activeSlots.length,
+                avgInferenceTime,
+                utilization,
+            });
+        }
+        
         return {
-            totalInferenceTime: totalTime,
             budget: this._budgetMs,
-            utilization: this._budgetMs > 0 ? totalTime / this._budgetMs : 0,
-            activeSlots: activeCount,
+            utilization: maxUtilization,  // ワーカーごとの最大使用率
+            activeSlots: totalActiveSlots,
             maxSlots: this._maxSlots,
             throttled: anyThrottled,
+            workers,  // ワーカーごとの情報
         };
     }
 

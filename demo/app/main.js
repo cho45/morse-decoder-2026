@@ -397,7 +397,16 @@ const app = createApp({
                 const stats = await multiStreamManager.performanceStats();
                 state.activeDecoders = stats.activeSlots;
                 state.decoderThrottled = stats.throttled;
-                state.decoderUtilization = `${stats.totalInferenceTime.toFixed(0)}/${stats.budget.toFixed(0)}=${(stats.utilization * 100).toFixed(0)}%`;
+
+                // ワーカーごとの使用率を表示
+                const workerInfo = stats.workers.map(w => 
+                    `w${w.workerIndex}:${w.activeSlots}slot${(w.utilization * 100).toFixed(0)}%`
+                ).join(', ');
+
+                // 平均推論時間を表示（最初のワーカーの値を使用）
+                const avgInferenceTime = stats.workers.length > 0 ? stats.workers[0].avgInferenceTime : 0;
+
+                state.decoderUtilization = `${workerInfo} ${avgInferenceTime.toFixed(0)}ms`;
             }
 
             const displayMagnitude = magnitudes.map(p => Math.max(0, Math.log1p(p * 5000) / 12));

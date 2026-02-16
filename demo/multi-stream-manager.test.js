@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { MultiStreamManager, extractSpecFrame } from './multi-stream-manager.js';
+import { MultiStreamManager, extractSpecFrame, SlotState } from './multi-stream-manager.js';
 import { MockMultiStreamProxy } from './mocks/MockMultiStreamProxy.js';
 
 describe('MultiStreamManager', () => {
@@ -156,16 +156,111 @@ describe('MultiStreamManager', () => {
         });
 
         describe('パフォーマンス統計', () => {
-            it('should return correct statistics', async () => {
-                manager._slots.get('slot-0').freq = 800;
-                manager._slots.get('slot-0').avgInferenceTime = 50;
-                manager._slots.get('slot-1').freq = 900;
-                manager._slots.get('slot-1').avgInferenceTime = 70;
+            it('should calculate utilization per worker', async () => {
+                // ワーカーごとのスロットIDは "worker-{workerIndex}-slot-{i}" の形式
+                // テスト用のモックでは "slot-{i}" なので、ワーカーインデックスを抽出できない
+                // そのため、このテストではワーカーインデックスを含むスロットIDを使用する
+                
+                // スロットIDをワーカーインデックスを含む形式に変更
+                manager._slots.clear();
+                manager._slots.set('worker-0-slot-0', new SlotState('worker-0-slot-0'));
+                manager._slots.set('worker-0-slot-1', new SlotState('worker-0-slot-1'));
+                manager._slots.set('worker-1-slot-0', new SlotState('worker-1-slot-0'));
+                manager._slots.set('worker-1-slot-1', new SlotState('worker-1-slot-1'));
+
+                // Worker 0: 2つのアクティブスロット、平均推論時間 40ms
+                manager._slots.get('worker-0-slot-0').freq = 800;
+                manager._slots.get('worker-0-slot-0').avgInferenceTime = 40;
+                manager._slots.get('worker-0-slot-1').freq = 810;
+                manager._slots.get('worker-0-slot-1').avgInferenceTime = 40;
+
+                // Worker 1: 1つのアクティブスロット、平均推論時間 30ms
+                manager._slots.get('worker-1-slot-0').freq = 900;
+                manager._slots.get('worker-1-slot-0').avgInferenceTime = 30;
 
                 const stats = await manager.performanceStats();
 
-                expect(stats.totalInferenceTime).toBe(120);
-                expect(stats.activeSlots).toBe(2);
+                // budget = chunkSize * hopMs = 12 * 10 = 120ms
+                // Worker 0: (2 * 40) / 120 = 0.667 (66.7%)
+                // Worker 1: (1 * 30) / 120 = 0.25 (25%)
+                // 全体の使用率: max(0.667, 0.25) = 0.667
+                expect(stats.utilization).toBeCloseTo(0.667, 2);
+                expect(stats.activeSlots).toBe(3);
+                
+                // ワーカーごとの情報を検証
+                expect(stats.workers).toHaveLength(2);
+                expect(stats.workers[0].workerIndex).toBe(0);
+                expect(stats.workers[0].activeSlots).toBe(2);
+                expect(stats.workers[0].avgInferenceTime).toBe(40);
+                expect(stats.workers[0].utilization).toBeCloseTo(0.667, 2);
+                
+                expect(stats.workers[1].workerIndex).toBe(1);
+                expect(stats.workers[1].activeSlots).toBe(1);
+                expect(stats.workers[1].avgInferenceTime).toBe(30);
+                expect(stats.workers[1].utilization).toBeCloseTo(0.25, 2);
+            });
+
+            it('should exclude throttled slots from utilization calculation', async () => {
+                manager._slots.clear();
+                manager._slots.set('worker-0-slot-0', new SlotState('worker-0-slot-0'));
+                manager._slots.set('worker-0-slot-1', new SlotState('worker-0-slot-1'));
+
+                // 2つのスロットのうち、1つはスロットルされている
+                manager._slots.get('worker-0-slot-0').freq = 800;
+                manager._slots.get('worker-0-slot-0').avgInferenceTime = 40;
+                manager._slots.get('worker-0-slot-0').throttled = false;
+
+                manager._slots.get('worker-0-slot-1').freq = 810;
+                manager._slots.get('worker-0-slot-1').avgInferenceTime = 40;
+                manager._slots.get('worker-0-slot-1').throttled = true;  // スロットル中
+
+                const stats = await manager.performanceStats();
+
+                // スロットルされたスロットは除外されるため、1つのスロットのみ計算
+                // (1 * 40) / 120 = 0.333 (33.3%)
+                expect(stats.utilization).toBeCloseTo(0.333, 2);
+                expect(stats.activeSlots).toBe(1);
+                expect(stats.throttled).toBe(true);
+                
+                // ワーカーごとの情報を検証
+                expect(stats.workers).toHaveLength(1);
+                expect(stats.workers[0].activeSlots).toBe(1);
+                expect(stats.workers[0].avgInferenceTime).toBe(40);
+                expect(stats.workers[0].utilization).toBeCloseTo(0.333, 2);
+            });
+
+            it('should exclude unassigned slots (freq=0) from utilization calculation', async () => {
+                manager._slots.clear();
+                manager._slots.set('worker-0-slot-0', new SlotState('worker-0-slot-0'));
+                manager._slots.set('worker-0-slot-1', new SlotState('worker-0-slot-1'));
+
+                // 1つのスロットのみ割り当て
+                manager._slots.get('worker-0-slot-0').freq = 800;
+                manager._slots.get('worker-0-slot-0').avgInferenceTime = 40;
+
+                // もう1つのスロットは未割り当て
+                manager._slots.get('worker-0-slot-1').freq = 0;
+
+                const stats = await manager.performanceStats();
+
+                // 未割り当てのスロットは除外されるため、1つのスロットのみ計算
+                // (1 * 40) / 120 = 0.333 (33.3%)
+                expect(stats.utilization).toBeCloseTo(0.333, 2);
+                expect(stats.activeSlots).toBe(1);
+                
+                // ワーカーごとの情報を検証
+                expect(stats.workers).toHaveLength(1);
+                expect(stats.workers[0].activeSlots).toBe(1);
+                expect(stats.workers[0].avgInferenceTime).toBe(40);
+                expect(stats.workers[0].utilization).toBeCloseTo(0.333, 2);
+            });
+
+            it('should return 0 utilization when no active slots', async () => {
+                const stats = await manager.performanceStats();
+
+                expect(stats.utilization).toBe(0);
+                expect(stats.activeSlots).toBe(0);
+                expect(stats.workers).toHaveLength(0);
             });
         });
     });
