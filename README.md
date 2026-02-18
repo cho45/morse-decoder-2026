@@ -173,5 +173,12 @@ make performance_onnx
     ```
 
 ### 6. ブラウザでの動作確認
-ローカルで開発を行う場合は、`demo/demo.html` または `demo/demo-mic.html` をブラウザで開き、実際のリアルタイム復号動作を確認します。
+ローカルで開発を行う場合は、以下のコマンドでローカルサーバーを起動し、ブラウザでアクセスします。
+```bash
+cd demo && npm run serve
+```
+その後、ブラウザで以下の URL にアクセスして、実際のリアルタイム復号動作を確認します。
+- http://localhost:3000/demo.html（信号合成デモ）
+- http://localhost:3000/demo-mic.html（マイク入力デモ）
+
 （※マイク入力を使用する場合は、HTTPS 環境または localhost である必要があります）

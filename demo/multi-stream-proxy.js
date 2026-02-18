@@ -109,14 +109,11 @@ export class SlotApiProxy {
  * - パフォーマンス統計を収集する
  */
 export class MultiStreamProxy {
-    /**
-     * @param {number} numWorkers - ワーカー数
-     */
-    constructor(numWorkers) {
+    constructor() {
         this.workers = [];
         this.workerInstances = [];
         this.slots = new Map();
-        this.numWorkers = numWorkers;
+        this.numWorkers = 0;
     }
 
     /**

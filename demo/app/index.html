@@ -81,9 +81,19 @@
                 </div>
 
                 <div class="control-group">
-                    <label>最大同時デコード数</label>
-                    <select v-model.number="settings.maxDecoders">
-                        <option :value="1">1 (メインのみ)</option>
+                    <label>ワーカー数</label>
+                    <select v-model.number="settings.numWorkers">
+                        <option :value="1">1</option>
+                        <option :value="2">2</option>
+                        <option :value="3">3 (推奨)</option>
+                        <option :value="4">4</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label>ワーカーごとのスロット数</label>
+                    <select v-model.number="settings.maxSlotsPerWorker">
+                        <option :value="1">1</option>
                         <option :value="2">2</option>
                         <option :value="4">4 (推奨)</option>
                         <option :value="8">8</option>
@@ -105,9 +115,9 @@
             <div class="overlay-info">
                 <div class="status-bar">
                     <span class="freq-display">{{ Math.round(state.trackedFreq) }} Hz</span>
-                    <span v-if="settings.maxDecoders > 1" class="decoder-status"
+                    <span v-if="settings.numWorkers > 0 && settings.maxSlotsPerWorker > 0" class="decoder-status"
                         :class="{ throttled: state.decoderThrottled }">
-                        {{ state.activeDecoders }}/{{ settings.maxDecoders }}
+                        {{ state.activeDecoders }}/{{ settings.numWorkers * settings.maxSlotsPerWorker }}
                         {{ state.decoderThrottled ? '⚠' : '▶' }}
                         ({{ state.decoderUtilization }})
                     </span>

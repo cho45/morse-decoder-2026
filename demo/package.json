@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "serve": "serve ."
   },
   "dependencies": {
     "onnxruntime-node": "^1.20.0"

@@ -130,8 +130,8 @@ export class MultiStreamManager {
      * @param {ArrayBuffer} modelBuffer - ONNXモデルバッファ
      * @param {Object} options
      * @param {Object} options.multiStreamProxy - MultiStreamProxyインスタンス（必須）
-     * @param {number} [options.numWorkers=4] - ワーカー数
-     * @param {number} [options.maxSlots=4] - 最大同時デコード数
+     * @param {number} [options.numWorkers=2] - ワーカー数
+     * @param {number} [options.maxSlotsPerWorker=4] - ワーカーごとの最大同時デコード数
      * @param {number} [options.chunkSize=12] - StreamInference の chunkSize
      * @param {number} [options.hopMs=10] - フレーム間隔(ms)
      * @param {number} [options.historyLength=800] - 可視化用ヒストリ長
@@ -144,7 +144,7 @@ export class MultiStreamManager {
 
         this._modelBuffer = modelBuffer;
         this._numWorkers = options.numWorkers || 2;
-        this._maxSlots = options.maxSlots || 8;
+        this._maxSlotsPerWorker = options.maxSlotsPerWorker || 4;
         this._chunkSize = options.chunkSize || 12;
         this._hopMs = options.hopMs || 10;
         this._historyLength = options.historyLength || 800;
@@ -185,7 +185,7 @@ export class MultiStreamManager {
         // Proxyの初期化（ワーカー起動）
         await this._multiStreamProxy.init(this._modelBuffer, this._numWorkers, {
             workerURL: this._workerURL,
-            maxSlotsPerWorker: Math.ceil(this._maxSlots / this._numWorkers), // 十分な数を確保
+            maxSlotsPerWorker: this._maxSlotsPerWorker,
             chunkSize: this._chunkSize,
             useWebGPU: this._useWebGPU,
             historyLength: this._historyLength,
@@ -326,34 +326,28 @@ export class MultiStreamManager {
                 await this._assignSlot(freeSlot, peak.f, peak.snr, now);
             } else {
                 // 空きなし: 置換判定
-                // スロット保有数チェック (maxSlots)
-                let activeCount = 0;
-                for (const s of this._slots.values()) { if (s.freq > 0) activeCount++; }
+                // ワーカーごとのスロット数制限なので、物理スロットが足りないことはない
+                // initで十分確保しているため、ここには来ないはず
 
-                if (activeCount >= this._maxSlots) {
-                    // 最弱スロットを探す
-                    let worstSlot = null;
-                    let worstSnr = Infinity;
+                // 最弱スロットを探す
+                let worstSlot = null;
+                let worstSnr = Infinity;
 
-                    for (const slot of this._slots.values()) {
-                        if (slot.freq === 0) continue; // 未割り当てはスキップ
+                for (const slot of this._slots.values()) {
+                    if (slot.freq === 0) continue; // 未割り当てはスキップ
 
-                        // クールダウン中は保護 (最後にテキストが出てから一定時間)
-                        if ((now - slot.lastTextUpdate) < SLOT_COOLDOWN_MS) continue;
+                    // クールダウン中は保護 (最後にテキストが出てから一定時間)
+                    if ((now - slot.lastTextUpdate) < SLOT_COOLDOWN_MS) continue;
 
-                        if (slot.snr < worstSnr) {
-                            worstSnr = slot.snr;
-                            worstSlot = slot;
-                        }
+                    if (slot.snr < worstSnr) {
+                        worstSnr = slot.snr;
+                        worstSlot = slot;
                     }
+                }
 
-                    if (worstSlot && peak.snr > worstSnr * SNR_REPLACE_MARGIN) {
-                        console.log(`[MSM] Converting slot ${worstSlot.id} (${Math.round(worstSlot.freq)}Hz -> ${Math.round(peak.f)}Hz)`);
-                        await this._assignSlot(worstSlot, peak.f, peak.snr, now);
-                    }
-                } else {
-                    // 論理的にはまだ割り当てられるはずだが、物理スロットが足りない（バグ？）
-                    // initで十分確保しているはずなので、ここには来ないはず。
+                if (worstSlot && peak.snr > worstSnr * SNR_REPLACE_MARGIN) {
+                    console.log(`[MSM] Converting slot ${worstSlot.id} (${Math.round(worstSlot.freq)}Hz -> ${Math.round(peak.f)}Hz)`);
+                    await this._assignSlot(worstSlot, peak.f, peak.snr, now);
                 }
             }
         }
@@ -515,35 +509,6 @@ export class MultiStreamManager {
     }
 
     /**
-     * 最大スロット数変更
-     */
-    async setMaxSlots(maxSlots) {
-        this._maxSlots = maxSlots;
-        console.warn("[MultiStreamManager] setMaxSlots is partially supported (logical limit only).");
-
-        // 論理的な制限を超えている分を解放する
-        let activeCount = 0;
-        const activeSubs = [];
-        for (const slot of this._slots.values()) {
-            if (slot.freq > 0) {
-                activeCount++;
-                activeSubs.push(slot);
-            }
-        }
-
-        if (activeCount > this._maxSlots) {
-            // SNR昇順（弱い順）にソート
-            activeSubs.sort((a, b) => a.snr - b.snr);
-
-            // 超過分
-            const removeCount = activeCount - this._maxSlots;
-            for (let i = 0; i < removeCount; i++) {
-                await this._releaseSlot(activeSubs[i]);
-            }
-        }
-    }
-
-    /**
      * パフォーマンス統計
      * 
      * ワーカー単位での使用率を計算します。
@@ -610,7 +575,6 @@ export class MultiStreamManager {
             budget: this._budgetMs,
             utilization: maxUtilization,  // ワーカーごとの最大使用率
             activeSlots: totalActiveSlots,
-            maxSlots: this._maxSlots,
             throttled: anyThrottled,
             workers,  // ワーカーごとの情報
         };

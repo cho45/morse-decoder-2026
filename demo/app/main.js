@@ -120,7 +120,8 @@ const app = createApp({
             volume: 0.3,
             modelPath: '../cw_decoder_quantized.onnx',
             autoTrack: true,
-            maxDecoders: 4
+            numWorkers: 3,
+            maxSlotsPerWorker: 4
         });
 
         // Load settings from localStorage
@@ -141,10 +142,8 @@ const app = createApp({
                     state.trackedFreq = newSettings.targetFreq;
                     updateUserFilter();
                 }
-                // Update max decoders at runtime
-                if (multiStreamManager) {
-                    multiStreamManager.setMaxSlots(newSettings.maxDecoders);
-                }
+                // Note: numWorkers and maxSlotsPerWorker cannot be changed at runtime
+                // (requires re-initialization of MultiStreamProxy)
             } else {
                 state.trackedFreq = newSettings.targetFreq;
             }
@@ -274,13 +273,13 @@ const app = createApp({
                 });
 
                 // MultiStreamProxy (ワーカー管理)
-                const multiStreamProxy = new MultiStreamProxy(3);
+                const multiStreamProxy = new MultiStreamProxy();
 
                 // MultiStreamManager (サブ周波数の推論)
                 multiStreamManager = new MultiStreamManager(modelBuffer, {
                     multiStreamProxy: multiStreamProxy,
-                    maxSlots: settings.maxDecoders,
-                    numWorkers: 3,
+                    numWorkers: settings.numWorkers,
+                    maxSlotsPerWorker: settings.maxSlotsPerWorker,
                     chunkSize: 12,
                     hopMs: HOP_MS,
                     useWebGPU: false,

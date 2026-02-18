@@ -17,14 +17,14 @@ describe('MultiStreamManager', () => {
             new ArrayBuffer(100),
             {
                 numWorkers: 2,
-                maxSlots: 4,
+                maxSlotsPerWorker: 2,
                 multiStreamProxy: mockProxy,
                 now: mockNow,
             }
         );
 
         for (let i = 0; i < 4; i++) {
-            await mockProxy.createSlot(`slot-${i}`, 0, {});
+            await mockProxy.createSlot(`worker-${Math.floor(i / 2)}-slot-${i % 2}`, 0, {});
         }
 
         await manager.init();
@@ -36,7 +36,7 @@ describe('MultiStreamManager', () => {
         });
 
         it('should initialize slots from proxy', () => {
-            expect(manager._slots.size).toBe(4);
+            expect(manager._slots.size).toBe(4); // 2 workers * 2 slots per worker
         });
     });
 
@@ -44,8 +44,8 @@ describe('MultiStreamManager', () => {
         describe('近傍マッチング', () => {
             it('should match nearby peaks to existing slots', async () => {
                 // Setup slots manually
-                manager._slots.get('slot-0').freq = 800; // Sub
-                manager._slots.get('slot-1').freq = 900; // Sub
+                manager._slots.get('worker-0-slot-0').freq = 800; // Sub
+                manager._slots.get('worker-0-slot-1').freq = 900; // Sub
 
                 const peaks = [
                     { f: 805, snr: 10 },
@@ -55,8 +55,8 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-0').freq).toBeCloseTo(800.5); // Sub smooths
-                expect(manager._slots.get('slot-1').freq).toBeCloseTo(900.5); // Sub smooths
+                expect(manager._slots.get('worker-0-slot-0').freq).toBeCloseTo(800.5); // Sub smooths
+                expect(manager._slots.get('worker-0-slot-1').freq).toBeCloseTo(900.5); // Sub smooths
             });
 
             it('should skip peaks too close to main frequency', async () => {
@@ -68,8 +68,8 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                // slot-0 should take 800
-                expect(manager._slots.get('slot-0').freq).toBe(800);
+                // worker-0-slot-0 should take 800
+                expect(manager._slots.get('worker-0-slot-0').freq).toBe(800);
             });
         });
 
@@ -82,18 +82,18 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-0').freq).toBe(800);
+                expect(manager._slots.get('worker-0-slot-0').freq).toBe(800);
             });
 
             it('should replace worst slot when full and SNR is high enough', async () => {
-                manager._slots.get('slot-0').freq = 800;
-                manager._slots.get('slot-0').snr = 5;
-                manager._slots.get('slot-0').lastTextUpdate = 0; // Very old (since START_TIME is 100000)
+                manager._slots.get('worker-0-slot-0').freq = 800;
+                manager._slots.get('worker-0-slot-0').snr = 5;
+                manager._slots.get('worker-0-slot-0').lastTextUpdate = 0; // Very old (since START_TIME is 100000)
 
                 // Fill other slots too to make it full
-                manager._slots.get('slot-1').freq = 810; manager._slots.get('slot-1').snr = 100;
-                manager._slots.get('slot-2').freq = 820; manager._slots.get('slot-2').snr = 100;
-                manager._slots.get('slot-3').freq = 830; manager._slots.get('slot-3').snr = 100;
+                manager._slots.get('worker-0-slot-1').freq = 810; manager._slots.get('worker-0-slot-1').snr = 100;
+                manager._slots.get('worker-1-slot-0').freq = 820; manager._slots.get('worker-1-slot-0').snr = 100;
+                manager._slots.get('worker-1-slot-1').freq = 830; manager._slots.get('worker-1-slot-1').snr = 100;
 
                 mockNow.mockReturnValue(START_TIME + 25000); // 25s later
 
@@ -104,16 +104,16 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                // slot-0 should be replaced
-                expect(manager._slots.get('slot-0').freq).toBe(900);
+                // worker-0-slot-0 should be replaced
+                expect(manager._slots.get('worker-0-slot-0').freq).toBe(900);
             });
         });
 
         describe('タイムアウト解放', () => {
             it('should timeout and release sub slots', async () => {
-                manager._slots.get('slot-0').freq = 800;
-                manager._slots.get('slot-0').lastSeen = START_TIME;
-                manager._slots.get('slot-0').lastTextUpdate = 0;
+                manager._slots.get('worker-0-slot-0').freq = 800;
+                manager._slots.get('worker-0-slot-0').lastSeen = START_TIME;
+                manager._slots.get('worker-0-slot-0').lastTextUpdate = 0;
 
                 // Move forward 15s.
                 // START_TIME = 100000.
@@ -127,7 +127,7 @@ describe('MultiStreamManager', () => {
 
                 await manager.updatePeaks(peaks, mainFreq);
 
-                expect(manager._slots.get('slot-0').freq).toBe(0); // Released
+                expect(manager._slots.get('worker-0-slot-0').freq).toBe(0); // Released
             });
         });
 
